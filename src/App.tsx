@@ -69,7 +69,12 @@ You are part of an autonomous multi-agent team building the Optic C-Frontend in 
    - \`side_effects\`: What happens to the graph or DB when called.
    - \`llm_usage_examples\`: Code examples written specifically for other AI agents to understand how to call it.
 4. UPDATE TASKS: Check off completed tasks ONLY in \`.optic/tasks/<your_squad>.md\`. If you need to assign work or report bugs to another squad, append it to \`.optic/tasks/inbox_<target_squad>.md\` (an append-only file to minimize conflicts).
-5. HANDOFF: Open a Pull Request. End your response by stating which Squad should review or take over next.`}
+5. HANDOFF: Open a Pull Request. End your response by stating which Squad should review or take over next.
+
+## ERROR HANDLING & CONFLICT RESOLUTION
+To maintain a stable asynchronous workflow and prevent git merge conflicts:
+- **Append-Only Communication**: For all inter-agent communication, bug reports, or task delegations, you MUST use append-only files (e.g., \`.optic/tasks/inbox_<target_squad>.md\`). Never modify existing lines in another squad's inbox.
+- **Explicit PR Reviews**: When opening a Pull Request, you MUST explicitly state which squad is responsible for reviewing your changes. If your changes affect another squad's API consumption, tag them for review to ensure cross-agent compatibility.`}
           </SyntaxHighlighter>
         </div>
 
