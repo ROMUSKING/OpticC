@@ -181,17 +181,15 @@ impl<'a> MacroExpander<'a> {
     }
 
     fn expand_object_macro(&mut self, name: &str, source: &str) -> Vec<Token> {
-        let definition = self.definitions.get(name).unwrap();
+        let replacement = match self.definitions.get(name).unwrap() {
+            MacroDefinition::ObjectLike { replacement } => replacement.clone(),
+            MacroDefinition::FunctionLike { .. } => return Vec::new(),
+        };
         
-        match definition {
-            MacroDefinition::ObjectLike { replacement } => {
-                self.active_macros.push(name.to_string());
-                let expanded = self.substitute_tokens(replacement, &[], source);
-                self.active_macros.pop();
-                expanded
-            }
-            MacroDefinition::FunctionLike { .. } => Vec::new(),
-        }
+        self.active_macros.push(name.to_string());
+        let expanded = self.substitute_tokens(&replacement, &[], source);
+        self.active_macros.pop();
+        expanded
     }
 
     fn expand_function_macro(
@@ -225,6 +223,7 @@ impl<'a> MacroExpander<'a> {
                 ")" if paren_depth == 0 => {
                     if !current_arg.is_empty() {
                         arg_tokens.push(current_arg);
+                        current_arg = Vec::new();
                     }
                     break;
                 }
@@ -244,7 +243,7 @@ impl<'a> MacroExpander<'a> {
             j += 1;
         }
 
-        if arg_tokens.is_empty() && current_arg.is_empty() {
+        if arg_tokens.is_empty() {
             return None;
         }
 
@@ -412,7 +411,7 @@ impl<'a> MacroExpander<'a> {
     }
 
     fn is_active_macro(&self, name: &str) -> bool {
-        self.active_macros.contains(name)
+        self.active_macros.iter().any(|s| s.as_str() == name)
     }
 
     pub fn build_expanded_ast(&mut self, tokens: &[Token], source: &str) -> NodeOffset {
@@ -487,14 +486,14 @@ impl<'a> MacroExpander<'a> {
             inv_node.flags |= NodeFlags::IS_VALID;
         }
 
-        let expanded_tokens = if let Some(def) = self.get_macro_definition(name) {
+        let expanded_tokens = if let Some(def) = self.get_macro_definition(name).cloned() {
             match def {
                 MacroDefinition::ObjectLike { replacement } => {
-                    self.substitute_tokens(replacement, &[], source)
+                    self.substitute_tokens(&replacement, &[], source)
                 }
                 MacroDefinition::FunctionLike { .. } => {
                     if let Some(args) = args {
-                        self.substitute_tokens_with_args(def, args, source)
+                        self.substitute_tokens_with_args(&def, args, source)
                     } else {
                         Vec::new()
                     }

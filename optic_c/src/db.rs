@@ -1,4 +1,4 @@
-use redb::{Database, TableDefinition};
+use redb::{Database, TableDefinition, ReadableDatabase};
 
 const INCLUDES_TABLE: TableDefinition<&[u8; 32], u32> = TableDefinition::new("includes");
 const SYMBOLS_TABLE: TableDefinition<&str, &str> = TableDefinition::new("symbols");

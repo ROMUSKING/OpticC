@@ -78,7 +78,7 @@ impl<'a> Lexer<'a> {
         let start = self.position;
         while let Some(c) = self.current_byte() {
             match c {
-                b' ' | b'\t' | b'\r' | b'\n' | b'\v' | b'\f' => {
+                b' ' | b'\t' | b'\r' | b'\n' | 11u8 | 12u8 => {
                     self.advance();
                 }
                 _ => break,
@@ -122,7 +122,7 @@ impl<'a> Lexer<'a> {
                     has_decimal = true;
                     self.advance();
                 }
-                Some(b'8')..=Some(b'7') => {
+                Some(c) if c >= b'0' && c <= b'7' => {
                     while let Some(c) = self.current_byte() {
                         if c >= b'0' && c <= b'7' {
                             self.advance();
@@ -239,17 +239,12 @@ impl<'a> Lexer<'a> {
         Token::new(TokenKind::Preprocessor, start, self.position, 0)
     }
 
-    fn read_punctuator(&mut self) -> Token {
+fn read_punctuator(&mut self) -> Token {
         let start = self.position;
         let c = self.current_byte().unwrap_or(b' ');
 
         match c {
-            b'[' | b']' | b'(' | b')' | b'{' | b'}' | b'.' | b'->' | b'++' | b'--'
-            | b'&' | b'*' | b'+' | b'-' | b'~' | b'!' | b'/' | b'%' | b'<<' | b'>>'
-            | b'<' | b'>' | b'<=' | b'>=' | b'==' | b'!=' | b'^' | b'|' | b'&&' | b'||'
-            | b'?' | b':' | b';' | b'=' | b'*=' | b'/=' | b'%=' | b'+=' | b'-='
-            | b'<<=' | b'>>=' | b'&=' | b'^=' | b'|=' | b',' | b'#' | b'##'
-            | b':' => {
+            b'[' | b']' | b'(' | b')' | b'{' | b'}' | b'.' | b'&' | b'*' | b'+' | b'-' | b'~' | b'!' | b'/' | b'%' | b'<' | b'>' | b'^' | b'|' | b'?' | b':' | b';' | b'=' | b',' | b'#' => {
                 self.advance();
                 let next = self.current_byte().unwrap_or(b' ');
                 match (c, next) {
@@ -260,13 +255,13 @@ impl<'a> Lexer<'a> {
                         }
                     }
                     (b'<', b'<') => {
-                        if self.peek_byte(2) == b'=' {
+                        if self.peek_byte(2) == Some(b'=') {
                             self.advance();
                             self.advance();
                         }
                     }
                     (b'>', b'>') => {
-                        if self.peek_byte(2) == b'=' {
+                        if self.peek_byte(2) == Some(b'=') {
                             self.advance();
                             self.advance();
                         }
@@ -304,7 +299,7 @@ impl<'a> Lexer<'a> {
     fn scan_token(&mut self) -> Token {
         match self.current_byte() {
             None => Token::new(TokenKind::EndOfFile, self.position, self.position, 0),
-            Some(b' ') | Some(b'\t') | Some(b'\r') | Some(b'\n') | Some(b'\v') | Some(b'\f') => {
+            Some(b' ') | Some(b'\t') | Some(b'\r') | Some(b'\n') | Some(11u8) | Some(12u8) => {
                 self.skip_whitespace()
             }
             Some(b'/') => {
@@ -426,10 +421,14 @@ mod tests {
     fn test_lexer_keywords() {
         let source = b"if while for return";
         let mut lexer = Lexer::new(source);
-        assert!(lexer.is_keyword(&lexer.next_token()));
-        assert!(lexer.is_keyword(&lexer.next_token()));
-        assert!(lexer.is_keyword(&lexer.next_token()));
-        assert!(lexer.is_keyword(&lexer.next_token()));
+        let t1 = lexer.next_token();
+        let t2 = lexer.next_token();
+        let t3 = lexer.next_token();
+        let t4 = lexer.next_token();
+        assert!(lexer.is_keyword(&t1));
+        assert!(lexer.is_keyword(&t2));
+        assert!(lexer.is_keyword(&t3));
+        assert!(lexer.is_keyword(&t4));
     }
 
     #[test]

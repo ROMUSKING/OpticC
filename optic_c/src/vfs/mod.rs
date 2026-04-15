@@ -1,17 +1,19 @@
 use crate::arena::{Arena, CAstNode, NodeOffset, NodeFlags};
 use crate::analysis::alias::AliasAnalysis;
 use std::path::Path;
-use std::sync::Arc;
-use fuser::{Filesystem, FileAttr, FileType, FUSE_ROOT_ID};
+use std::sync::{Arc, Mutex, RwLock};
+use fuser::{Filesystem, FileAttr, FileType, FileHandle, OpenFlags, FopenFlags, Errno};
 use std::time::{SystemTime, UNIX_EPOCH};
 use std::collections::HashMap;
+
+const FUSE_ROOT_ID: u64 = 1;
 
 pub struct Vfs {
     arena: Arc<Arena>,
     analysis: Arc<AliasAnalysis>,
     mount_path: String,
-    file_nodes: HashMap<u64, VfsNode>,
-    next_inode: u64,
+    file_nodes: RwLock<HashMap<u64, VfsNode>>,
+    next_inode: Mutex<u64>,
 }
 
 #[derive(Debug, Clone)]
@@ -26,18 +28,18 @@ struct VfsNode {
 
 impl Vfs {
     pub fn new(arena: Arc<Arena>, analysis: Arc<AliasAnalysis>, mount_path: &str) -> Self {
-        let mut vfs = Self {
+        let vfs = Self {
             arena,
             analysis,
             mount_path: mount_path.to_string(),
-            file_nodes: HashMap::new(),
-            next_inode: FUSE_ROOT_ID + 1,
+            file_nodes: RwLock::new(HashMap::new()),
+            next_inode: Mutex::new(FUSE_ROOT_ID + 1),
         };
         vfs.init_root();
         vfs
     }
 
-    fn init_root(&mut self) {
+    fn init_root(&self) {
         let root = VfsNode {
             name: String::new(),
             inode: FUSE_ROOT_ID,
@@ -46,23 +48,30 @@ impl Vfs {
             children: Vec::new(),
             parent: FUSE_ROOT_ID,
         };
-        self.file_nodes.insert(FUSE_ROOT_ID, root);
+        self.file_nodes.write().unwrap().insert(FUSE_ROOT_ID, root);
+    }
+
+    fn next_inode(&self) -> u64 {
+        let mut next = self.next_inode.lock().unwrap();
+        let inode = *next;
+        *next += 1;
+        inode
     }
 
     pub fn mount_path(&self) -> &str {
         &self.mount_path
     }
 
-    pub fn reconstruct_from_arena(&mut self) {
+    pub fn reconstruct_from_arena(&self) {
         self.init_root();
         
-        let mut src_dir_inode = self.next_inode();
+        let src_dir_inode = self.next_inode();
         self.add_dir(FUSE_ROOT_ID, ".optic", src_dir_inode);
         
-        let mut vfs_src_inode = self.next_inode();
+        let vfs_src_inode = self.next_inode();
         self.add_dir(src_dir_inode, "vfs", vfs_src_inode);
         
-        let mut src_inode = self.next_inode();
+        let src_inode = self.next_inode();
         self.add_dir(vfs_src_inode, "src", src_inode);
         
         if let Some(root_node) = self.find_root_node() {
@@ -70,14 +79,8 @@ impl Vfs {
         }
     }
 
-    fn next_inode(&mut self) -> u64 {
-        let inode = self.next_inode;
-        self.next_inode += 1;
-        inode
-    }
-
-    fn add_dir(&mut self, parent: u64, name: &str, inode: u64) {
-        if let Some(parent_node) = self.file_nodes.get_mut(&parent) {
+    fn add_dir(&self, parent: u64, name: &str, inode: u64) {
+        if let Some(parent_node) = self.file_nodes.write().unwrap().get_mut(&parent) {
             parent_node.children.push(inode);
         }
         
@@ -89,13 +92,13 @@ impl Vfs {
             children: Vec::new(),
             parent,
         };
-        self.file_nodes.insert(inode, node);
+        self.file_nodes.write().unwrap().insert(inode, node);
     }
 
-    fn add_file(&mut self, parent: u64, name: &str, content: Vec<u8>) -> u64 {
+    fn add_file(&self, parent: u64, name: &str, content: Vec<u8>) -> u64 {
         let inode = self.next_inode();
         
-        if let Some(parent_node) = self.file_nodes.get_mut(&parent) {
+        if let Some(parent_node) = self.file_nodes.write().unwrap().get_mut(&parent) {
             parent_node.children.push(inode);
         }
         
@@ -107,7 +110,7 @@ impl Vfs {
             children: Vec::new(),
             parent,
         };
-        self.file_nodes.insert(inode, node);
+        self.file_nodes.write().unwrap().insert(inode, node);
         inode
     }
 
@@ -125,18 +128,23 @@ impl Vfs {
         None
     }
 
-    fn reconstruct_tree(&mut self, root: NodeOffset, parent_inode: u64) {
+    fn reconstruct_tree(&self, root: NodeOffset, parent_inode: u64) {
         let mut queue = vec![(root, parent_inode)];
         
         while let Some((offset, parent)) = queue.pop() {
             if let Some(node) = self.arena.get(offset) {
                 if node.flags.contains(NodeFlags::IS_VALID) {
+                    let node_kind = node.kind;
+                    let node_data = node.data;
                     let file_name = self.get_node_name(node);
-                    let content = self.reconstruct_file_content(node);
+                    let first_child = node.first_child;
+                    drop(node);
+                    
+                    let content = self.reconstruct_file_content(node_kind, node_data, first_child);
                     
                     let file_inode = self.add_file(parent, &file_name, content);
                     
-                    let mut child = node.first_child;
+                    let mut child = first_child;
                     while child != NodeOffset::NULL {
                         if let Some(child_node) = self.arena.get(child) {
                             queue.push((child, file_inode));
@@ -159,12 +167,12 @@ impl Vfs {
         format!("node_{}.c", node.kind)
     }
 
-    fn reconstruct_file_content(&self, node: &CAstNode) -> Vec<u8> {
+    fn reconstruct_file_content(&self, kind: u16, data: u32, first_child: NodeOffset) -> Vec<u8> {
         let mut content = String::new();
         content.push_str("/* OPTIC RECONSTRUCTED FILE */\n");
-        content.push_str(&format!("/* NodeKind: {}, DataOffset: {} */\n", node.kind, node.data));
+        content.push_str(&format!("/* NodeKind: {}, DataOffset: {} */\n", kind, data));
         
-        let mut child = node.first_child;
+        let mut child = first_child;
         while child != NodeOffset::NULL {
             if let Some(child_node) = self.arena.get(child) {
                 content.push_str(&self.node_to_source(child_node));
@@ -204,7 +212,7 @@ impl Vfs {
         for line in source.lines() {
             if let Some(vulnerable_line) = self.check_vulnerability(line) {
                 result.push_str("// [OPTIC ERROR] ");
-                result.push_str(vulnerable_line);
+                result.push_str(&vulnerable_line);
                 result.push_str("\n");
             }
             result.push_str(line);
@@ -237,11 +245,9 @@ impl Vfs {
                 continue;
             }
             
-            if let Some(node) = self.file_nodes.get(&current_inode) {
-                let next_name = if i < parts.len() - 1 { *part } else { file_name };
-                
+            if let Some(node) = self.file_nodes.read().unwrap().get(&current_inode) {
                 let child_inode = node.children.iter().find(|&&child_inode| {
-                    self.file_nodes.get(&child_inode)
+                    self.file_nodes.read().unwrap().get(&child_inode)
                         .map(|n| n.name == *part)
                         .unwrap_or(false)
                 });
@@ -256,7 +262,7 @@ impl Vfs {
             }
         }
         
-        if let Some(node) = self.file_nodes.get(&current_inode) {
+        if let Some(node) = self.file_nodes.read().unwrap().get(&current_inode) {
             if let Some(content) = &node.content {
                 if self.analysis.has_vulnerabilities() {
                     return Some(self.inject_error_comments(current_inode, content.clone()));
@@ -270,20 +276,21 @@ impl Vfs {
 }
 
 impl Filesystem for Vfs {
-    fn lookup(&mut self, parent: u64, name: &std::ffi::OsStr, reply: fuser::ReplyEntry) {
+    fn lookup(&self, _req: &fuser::Request, parent: fuser::INodeNo, name: &std::ffi::OsStr, reply: fuser::ReplyEntry) {
         let name_str = name.to_str().unwrap_or("");
         
-        if let Some(parent_node) = self.file_nodes.get(&parent) {
+        if let Some(parent_node) = self.file_nodes.read().unwrap().get(&parent.0) {
             if let Some(&child_inode) = parent_node.children.iter().find(|&&child_inode| {
-                self.file_nodes.get(&child_inode)
+                self.file_nodes.read().unwrap().get(&child_inode)
                     .map(|n| n.name == name_str)
                     .unwrap_or(false)
             }) {
-                if let Some(node) = self.file_nodes.get(&child_inode) {
+                if let Some(node) = self.file_nodes.read().unwrap().get(&child_inode) {
                     let attr = FileAttr {
-                        ino: node.inode,
+                        ino: fuser::INodeNo(node.inode),
                         size: node.content.as_ref().map(|c| c.len() as u64).unwrap_or(4096),
                         blocks: 1,
+                        blksize: 512,
                         atime: SystemTime::UNIX_EPOCH,
                         mtime: SystemTime::UNIX_EPOCH,
                         ctime: SystemTime::UNIX_EPOCH,
@@ -296,20 +303,21 @@ impl Filesystem for Vfs {
                         rdev: 0,
                         flags: 0,
                     };
-                    reply.entry(&std::time::Duration::new(0, 0), &attr, 0);
+                    reply.entry(&std::time::Duration::new(0, 0), &attr, fuser::Generation(0));
                     return;
                 }
             }
         }
-        reply.error(libc::ENOENT);
+        reply.error(fuser::Errno::ENOENT);
     }
 
-    fn getattr(&mut self, ino: u64, reply: fuser::ReplyAttr) {
-        if let Some(node) = self.file_nodes.get(&ino) {
+    fn getattr(&self, _req: &fuser::Request, ino: fuser::INodeNo, _fh: Option<FileHandle>, reply: fuser::ReplyAttr) {
+        if let Some(node) = self.file_nodes.read().unwrap().get(&ino.0) {
             let attr = FileAttr {
-                ino: node.inode,
+                ino: fuser::INodeNo(node.inode),
                 size: node.content.as_ref().map(|c| c.len() as u64).unwrap_or(4096),
                 blocks: 1,
+                blksize: 512,
                 atime: SystemTime::UNIX_EPOCH,
                 mtime: SystemTime::UNIX_EPOCH,
                 ctime: SystemTime::UNIX_EPOCH,
@@ -324,22 +332,22 @@ impl Filesystem for Vfs {
             };
             reply.attr(&std::time::Duration::new(0, 0), &attr);
         } else {
-            reply.error(libc::ENOENT);
+            reply.error(fuser::Errno::ENOENT);
         }
     }
 
-    fn readdir(&mut self, ino: u64, offset: u64, mut reply: fuser::ReplyDirectory) {
-        if ino == FUSE_ROOT_ID {
+    fn readdir(&self, _req: &fuser::Request, ino: fuser::INodeNo, _fh: FileHandle, offset: u64, mut reply: fuser::ReplyDirectory) {
+        if ino.0 == FUSE_ROOT_ID {
             let entries: Vec<(u64, FileType, &str)> = vec![
                 (FUSE_ROOT_ID, FileType::Directory, "."),
                 (FUSE_ROOT_ID, FileType::Directory, ".."),
             ];
             
-            if let Some(node) = self.file_nodes.get(&ino) {
+            if let Some(node) = self.file_nodes.read().unwrap().get(&ino.0) {
                 for (i, &child_inode) in node.children.iter().enumerate() {
                     if i as u64 >= offset {
-                        if let Some(child) = self.file_nodes.get(&child_inode) {
-                            reply.add(child_inode, i as u64 + 2, child.file_type, &child.name);
+                        if let Some(child) = self.file_nodes.read().unwrap().get(&child_inode) {
+                            reply.add(fuser::INodeNo(child_inode), i as u64 + 2, child.file_type, &child.name);
                         }
                     }
                 }
@@ -347,37 +355,36 @@ impl Filesystem for Vfs {
             
             for (i, entry) in entries.iter().enumerate() {
                 if i as u64 >= offset {
-                    reply.add(entry.0, i as u64 + 1, entry.1, entry.2);
+                    reply.add(fuser::INodeNo(entry.0), i as u64 + 1, entry.1, entry.2);
                 }
             }
             reply.ok();
-        } else if let Some(node) = self.file_nodes.get(&ino) {
+        } else if let Some(node) = self.file_nodes.read().unwrap().get(&ino.0) {
             if node.file_type == FileType::Directory {
-                reply.add(ino, 0, FileType::Directory, ".");
-                reply.add(node.parent, 1, FileType::Directory, "..");
+                reply.add(fuser::INodeNo(ino.0), 0, FileType::Directory, ".");
+                reply.add(fuser::INodeNo(node.parent), 1, FileType::Directory, "..");
                 
                 for (i, &child_inode) in node.children.iter().enumerate() {
-                    if let Some(child) = self.file_nodes.get(&child_inode) {
-                        reply.add(child_inode, i as u64 + 2, child.file_type, &child.name);
+                    if let Some(child) = self.file_nodes.read().unwrap().get(&child_inode) {
+                        reply.add(fuser::INodeNo(child_inode), i as u64 + 2, child.file_type, &child.name);
                     }
                 }
                 reply.ok();
             } else {
-                reply.error(libc::ENOTDIR);
+                reply.error(fuser::Errno::ENOTDIR);
             }
         } else {
-            reply.error(libc::ENOENT);
+            reply.error(fuser::Errno::ENOENT);
         }
     }
 
-    fn read(&mut self, ino: u64, offset: u64, size: u32, reply: fuser::ReplyData) {
-        if let Some(node) = self.file_nodes.get(&ino) {
+    fn read(&self, _req: &fuser::Request, ino: fuser::INodeNo, _fh: FileHandle, offset: u64, size: u32, _flags: fuser::OpenFlags, _lock_owner: Option<fuser::LockOwner>, reply: fuser::ReplyData) {
+        if let Some(node) = self.file_nodes.read().unwrap().get(&ino.0) {
             if let Some(content) = &node.content {
-                let content_len = content.len() as u64;
                 let start = offset as usize;
                 
                 if start >= content.len() {
-                    reply.error(libc::EINVAL);
+                    reply.error(fuser::Errno::EINVAL);
                     return;
                 }
                 
@@ -385,48 +392,48 @@ impl Filesystem for Vfs {
                 let mut data = content[start..end].to_vec();
                 
                 if self.analysis.has_vulnerabilities() {
-                    let modified = self.inject_error_comments(ino, data);
+                    let modified = self.inject_error_comments(ino.0, data);
                     reply.data(&modified);
                 } else {
                     reply.data(&data);
                 }
             } else {
-                reply.error(libc::EISDIR);
+                reply.error(fuser::Errno::EISDIR);
             }
         } else {
-            reply.error(libc::ENOENT);
+            reply.error(fuser::Errno::ENOENT);
         }
     }
 
-    fn opendir(&mut self, ino: u64, _flags: u32, reply: fuser::ReplyOpen) {
-        if let Some(node) = self.file_nodes.get(&ino) {
+    fn opendir(&self, _req: &fuser::Request, ino: fuser::INodeNo, _flags: OpenFlags, reply: fuser::ReplyOpen) {
+        if let Some(node) = self.file_nodes.read().unwrap().get(&ino.0) {
             if node.file_type == FileType::Directory {
-                reply.opened(0, 0);
+                reply.opened(FileHandle(0), FopenFlags::empty());
             } else {
-                reply.error(libc::ENOTDIR);
+                reply.error(fuser::Errno::ENOTDIR);
             }
         } else {
-            reply.error(libc::ENOENT);
+            reply.error(fuser::Errno::ENOENT);
         }
     }
 
-    fn releasedir(&mut self, _ino: u64, _fh: u64, _flags: u32, reply: fuser::ReplyEmpty) {
+    fn releasedir(&self, _req: &fuser::Request, _ino: fuser::INodeNo, _fh: FileHandle, _flags: OpenFlags, reply: fuser::ReplyEmpty) {
         reply.ok();
     }
 
-    fn open(&mut self, ino: u64, _flags: u32, reply: fuser::ReplyOpen) {
-        if let Some(node) = self.file_nodes.get(&ino) {
+    fn open(&self, _req: &fuser::Request, ino: fuser::INodeNo, _flags: OpenFlags, reply: fuser::ReplyOpen) {
+        if let Some(node) = self.file_nodes.read().unwrap().get(&ino.0) {
             if node.file_type == FileType::RegularFile {
-                reply.opened(0, 0);
+                reply.opened(FileHandle(0), FopenFlags::empty());
             } else {
-                reply.error(libc::EISDIR);
+                reply.error(fuser::Errno::EISDIR);
             }
         } else {
-            reply.error(libc::ENOENT);
+            reply.error(fuser::Errno::ENOENT);
         }
     }
 
-    fn release(&mut self, _ino: u64, _fh: u64, _flags: u32, _lock_owner: u64, _fl: u32, reply: fuser::ReplyEmpty) {
+    fn release(&self, _req: &fuser::Request, _ino: fuser::INodeNo, _fh: FileHandle, _flags: OpenFlags, _lock_owner: Option<fuser::LockOwner>, _flush: bool, reply: fuser::ReplyEmpty) {
         reply.ok();
     }
 }
@@ -438,7 +445,7 @@ pub trait ArenaAccess {
 
 impl ArenaAccess for Arena {
     fn capacity(&self) -> u32 {
-        self.allocated
+        self.allocated()
     }
     
     fn get_string(&self, offset: u32) -> Option<&str> {

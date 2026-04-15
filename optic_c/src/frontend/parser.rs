@@ -126,6 +126,7 @@ impl Parser {
                     });
                 }
                 '\'' => {
+                    let start_column = column;
                     chars.next();
                     column += 1;
                     let mut ch = String::new();
@@ -925,13 +926,8 @@ impl Parser {
             None
         };
 
-        Ok(self.alloc_node(
-            41,
-            0,
-            NodeOffset::NULL,
-            condition,
-            self.alloc_node(0, 0, NodeOffset::NULL, then_stmt, else_stmt.unwrap_or(NodeOffset::NULL)),
-        ))
+        let else_node = self.alloc_node(0, 0, NodeOffset::NULL, then_stmt, else_stmt.unwrap_or(NodeOffset::NULL));
+        Ok(self.alloc_node(41, 0, NodeOffset::NULL, condition, else_node))
     }
 
     fn parse_while_statement(&mut self) -> Result<NodeOffset, ParseError> {
@@ -982,13 +978,9 @@ impl Parser {
 
         let body = self.parse_statement()?;
 
-        Ok(self.alloc_node(
-            43,
-            0,
-            NodeOffset::NULL,
-            self.alloc_node(0, 0, NodeOffset::NULL, init, condition),
-            self.alloc_node(0, 0, NodeOffset::NULL, increment, body),
-        ))
+        let init_node = self.alloc_node(0, 0, NodeOffset::NULL, init, condition);
+        let increment_node = self.alloc_node(0, 0, NodeOffset::NULL, increment, body);
+        Ok(self.alloc_node(43, 0, NodeOffset::NULL, init_node, increment_node))
     }
 
     fn parse_do_statement(&mut self) -> Result<NodeOffset, ParseError> {
@@ -1116,7 +1108,8 @@ impl Parser {
             let then_expr = self.parse_expression()?;
             self.expect(":")?;
             let else_expr = self.parse_conditional_expression()?;
-            return Ok(self.alloc_node(66, 0, NodeOffset::NULL, condition, self.alloc_node(0, 0, NodeOffset::NULL, then_expr, else_expr)));
+            let else_node = self.alloc_node(0, 0, NodeOffset::NULL, then_expr, else_expr);
+            return Ok(self.alloc_node(66, 0, NodeOffset::NULL, condition, else_node));
         }
 
         Ok(condition)
