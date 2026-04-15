@@ -2,9 +2,9 @@ import { useState } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
 import { vscDarkPlus } from 'react-syntax-highlighter/dist/esm/styles/prism';
-import { BookOpen, Cpu, Database, Code2, Network, Terminal, ChevronRight, FileCode2 } from 'lucide-react';
+import { BookOpen, Cpu, Database, Code2, Network, Terminal, ChevronRight, FileCode2, Bot } from 'lucide-react';
 
-type ModuleId = 'architecture' | 'arena' | 'kv_store' | 'lexer' | 'analysis';
+type ModuleId = 'architecture' | 'arena' | 'kv_store' | 'lexer' | 'analysis' | 'jules_prompts';
 
 interface ModuleData {
   id: ModuleId;
@@ -40,6 +40,129 @@ const modules: ModuleData[] = [
           <li><strong>Graph Analysis:</strong> DFS/BFS traversals over the AST to automatically promote C pointers to strict aliasing (<code className="text-orange-400 bg-orange-400/10 px-1.5 py-0.5 rounded">restrict</code>/<code className="text-orange-400 bg-orange-400/10 px-1.5 py-0.5 rounded">noalias</code>).</li>
           <li><strong>VFS Projection:</strong> A FUSE filesystem that projects the graph back into standard C files for IDE compatibility.</li>
         </ul>
+      </div>
+    )
+  },
+  {
+    id: 'jules_prompts',
+    title: 'Jules Agent Prompts',
+    icon: <Bot className="w-5 h-5" />,
+    description: 'Autonomous prompts for Google Jules to implement and self-manage Project OCF.',
+    content: (
+      <div className="space-y-6 text-zinc-300 leading-relaxed">
+        <p>
+          To implement this project using a team of Google Jules agents, we use a <strong>Self-Maintaining Memory Protocol</strong>. Because Jules operates asynchronously on separate git branches, we use a <strong>sharded memory system</strong> to prevent merge conflicts. Agents will use the local filesystem to pass state, track tasks, and document API contracts without human intervention.
+        </p>
+        
+        <div className="bg-zinc-900 border border-zinc-800 rounded-lg p-5 mt-6">
+          <h3 className="text-lg font-bold text-white mb-3">1. The Async Branch Protocol (Append to ALL Agents)</h3>
+          <p className="text-sm text-zinc-400 mb-4">Every Jules agent must have this block appended to their system instructions to ensure they maintain the project state without causing git merge conflicts.</p>
+          <SyntaxHighlighter language="markdown" style={vscDarkPlus} customStyle={{ margin: 0, padding: '1rem', background: '#050505', borderRadius: '0.5rem', fontSize: '0.875rem' }}>
+{`# ASYNC BRANCH & MEMORY PROTOCOL
+You are part of an autonomous multi-agent team building the Optic C-Frontend in Rust. Because you operate asynchronously on separate git branches, we use a sharded memory system to prevent merge conflicts.
+
+1. WAKE UP: Before writing any code, you MUST read ALL files in \`.optic/memory/\` and \`.optic/tasks/\` to understand the global state and API contracts established by other agents.
+2. EXECUTE: Perform your assigned tasks on your branch. Use \`cargo check\` and \`cargo test\` frequently.
+3. UPDATE MEMORY: Document your API changes ONLY in \`.optic/memory/<your_squad>.md\`. NEVER edit another squad's memory file.
+4. UPDATE TASKS: Check off completed tasks ONLY in \`.optic/tasks/<your_squad>.md\`. If you need to assign work or report bugs to another squad, append it to \`.optic/tasks/inbox_<target_squad>.md\` (an append-only file to minimize conflicts).
+5. HANDOFF: Open a Pull Request. End your response by stating which Squad should review or take over next.`}
+          </SyntaxHighlighter>
+        </div>
+
+        <div className="bg-zinc-900 border border-zinc-800 rounded-lg p-5">
+          <h3 className="text-lg font-bold text-white mb-3">2. Jules-Orchestrator (The Lead)</h3>
+          <p className="text-sm text-zinc-400 mb-4">Run this prompt first to initialize the workspace.</p>
+          <SyntaxHighlighter language="markdown" style={vscDarkPlus} customStyle={{ margin: 0, padding: '1rem', background: '#050505', borderRadius: '0.5rem', fontSize: '0.875rem' }}>
+{`You are Jules-Orchestrator, the Lead AI Architect for Project OCF (Optic C-Frontend).
+Your goal is to initialize the project and coordinate Squads A, B, C, and D.
+
+IMMEDIATE TASKS:
+1. Run \`cargo new optic_c --lib\` to initialize the Rust workspace.
+2. Create directories: \`.optic/memory/\` and \`.optic/tasks/\`.
+3. Create squad-specific task files (e.g., \`.optic/tasks/squad_a.md\`) and populate them with the 5 Phases of the Project OCF plan.
+4. Create squad-specific memory files (e.g., \`.optic/memory/squad_a.md\`) with a basic schema for agents to record their API contracts.
+5. Add \`memmap2\`, \`redb\`, \`inkwell\`, and \`fuser\` to Cargo.toml.
+6. Commit to \`main\` and hand off to Jules-Squad-A to begin Phase 1 (mmap Arena).`}
+          </SyntaxHighlighter>
+        </div>
+
+        <div className="bg-zinc-900 border border-zinc-800 rounded-lg p-5">
+          <h3 className="text-lg font-bold text-white mb-3">3. Jules-Squad-A (Graph Infrastructure)</h3>
+          <SyntaxHighlighter language="markdown" style={vscDarkPlus} customStyle={{ margin: 0, padding: '1rem', background: '#050505', borderRadius: '0.5rem', fontSize: '0.875rem' }}>
+{`You are Jules-Squad-A. Your domain is the Core Graph Infrastructure.
+Tech Stack: Rust, memmap2, redb.
+
+YOUR DIRECTIVES:
+1. Implement the zero-serialization mmap arena allocator in \`src/arena.rs\`.
+2. Define the \`NodeOffset(u32)\` and \`CAstNode\` structs with \`#[repr(C)]\`.
+3. Implement the embedded KV-store using \`redb\` in \`src/db.rs\` for header deduplication.
+4. Ensure the Arena can allocate 10M nodes sequentially at high speed.
+5. Follow the ASYNC BRANCH PROTOCOL to update \`.optic/memory/squad_a.md\` with your Arena API so Squad B can use it.`}
+          </SyntaxHighlighter>
+        </div>
+
+        <div className="bg-zinc-900 border border-zinc-800 rounded-lg p-5">
+          <h3 className="text-lg font-bold text-white mb-3">4. Jules-Squad-B (C-Frontend)</h3>
+          <SyntaxHighlighter language="markdown" style={vscDarkPlus} customStyle={{ margin: 0, padding: '1rem', background: '#050505', borderRadius: '0.5rem', fontSize: '0.875rem' }}>
+{`You are Jules-Squad-B. Your domain is C-Ingestion & The Preprocessor.
+Tech Stack: Rust, custom parsing.
+
+YOUR DIRECTIVES:
+1. Read \`.optic/memory/squad_a.md\` to understand Squad A's Arena and DB APIs.
+2. Implement the C99 Lexer and Recursive Descent Parser in \`src/frontend/\`.
+3. Implement Dual-Node Macro Expansion (allocate Node A for invocation, Node B for expansion).
+4. Integrate with the \`redb\` KV-store to hash and deduplicate \`#include\` files instantly.
+5. Follow the ASYNC BRANCH PROTOCOL to document the AST node kinds in \`.optic/memory/squad_b.md\` for Squad C.`}
+          </SyntaxHighlighter>
+        </div>
+
+        <div className="bg-zinc-900 border border-zinc-800 rounded-lg p-5">
+          <h3 className="text-lg font-bold text-white mb-3">5. Jules-Squad-C (Analysis & LLVM)</h3>
+          <SyntaxHighlighter language="markdown" style={vscDarkPlus} customStyle={{ margin: 0, padding: '1rem', background: '#050505', borderRadius: '0.5rem', fontSize: '0.875rem' }}>
+{`You are Jules-Squad-C. Your domain is Graph-Based Static Analysis & LLVM Lowering.
+Tech Stack: Rust, inkwell (LLVM).
+
+YOUR DIRECTIVES:
+1. Read \`.optic/memory/squad_b.md\` to understand the AST node kinds and \`.optic/memory/squad_a.md\` for the Arena API.
+2. Implement DFS pointer provenance tracing in \`src/analysis/alias.rs\` to promote pointers to \`noalias\` (AffineGrade).
+3. Implement Taint Tracking to identify Use-After-Free vulnerabilities.
+4. Use \`inkwell\` to lower the AST into LLVM IR in \`src/backend/llvm.rs\`, applying vectorization hints.
+5. Follow the ASYNC BRANCH PROTOCOL to document the Analysis diagnostics API in \`.optic/memory/squad_c.md\` for Squad D.`}
+          </SyntaxHighlighter>
+        </div>
+
+        <div className="bg-zinc-900 border border-zinc-800 rounded-lg p-5">
+          <h3 className="text-lg font-bold text-white mb-3">6. Jules-Squad-D (VFS & Tooling)</h3>
+          <SyntaxHighlighter language="markdown" style={vscDarkPlus} customStyle={{ margin: 0, padding: '1rem', background: '#050505', borderRadius: '0.5rem', fontSize: '0.875rem' }}>
+{`You are Jules-Squad-D. Your domain is VFS Projectional Tooling.
+Tech Stack: Rust, fuser.
+
+YOUR DIRECTIVES:
+1. Read \`.optic/memory/squad_a.md\` and \`.optic/memory/squad_c.md\` to understand the Arena and Analysis APIs.
+2. Implement a userspace filesystem using \`fuser\` in \`src/vfs/mod.rs\`.
+3. Map \`.optic/vfs/src/\` to reconstruct original C files from the mmap arena.
+4. Query the Analysis engine during \`read()\` syscalls to inject \`// [OPTIC ERROR]\` shadow comments above vulnerable AST nodes.
+5. Expose \`.optic/vfs/expanded_macros/\` to project fully evaluated macros.
+6. Follow the ASYNC BRANCH PROTOCOL and hand off to Jules-Integration for final testing.`}
+          </SyntaxHighlighter>
+        </div>
+
+        <div className="bg-zinc-900 border border-zinc-800 rounded-lg p-5">
+          <h3 className="text-lg font-bold text-white mb-3">7. Jules-Integration (The Oracle)</h3>
+          <SyntaxHighlighter language="markdown" style={vscDarkPlus} customStyle={{ margin: 0, padding: '1rem', background: '#050505', borderRadius: '0.5rem', fontSize: '0.875rem' }}>
+{`You are Jules-Integration. Your domain is QA and the Definition of Done.
+Tech Stack: Rust, bash, C.
+
+YOUR DIRECTIVES:
+1. Read ALL files in \`.optic/tasks/\` and \`.optic/memory/\` to verify all phases are marked complete.
+2. Download the SQLite Amalgamation (\`sqlite3.c\`, ~250k LOC).
+3. Run the Optic C-Compiler against \`sqlite3.c\`.
+4. Verify that the compiler generates a working shared library.
+5. Mount the VFS and verify that at least one "Taint Tracking" shadow comment is projected into the virtual filesystem.
+6. If bugs are found, append them to the relevant squad's inbox (e.g., \`.optic/tasks/inbox_squad_b.md\`) and hand back to them. Otherwise, declare PROJECT COMPLETE.`}
+          </SyntaxHighlighter>
+        </div>
+
       </div>
     )
   },
