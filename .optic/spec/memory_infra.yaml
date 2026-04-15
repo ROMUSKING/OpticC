@@ -1,0 +1,55 @@
+# Arena (Memory Infrastructure) Specification
+
+## Overview
+The Arena is a memory-mapped allocator for AST nodes, providing high-performance sequential allocation with persistent storage.
+
+## Data Structures
+
+### NodeOffset
+- Type: `u32` wrapper
+- Purpose: Reference to an allocated node in the arena
+- Special value: `NodeOffset::NULL` (0) represents null/empty reference
+
+### NodeFlags
+- Type: bitflags u16
+- Flags:
+  - `NONE` (0): No flags set
+  - `IS_VALID` (1 << 0): Node is valid
+  - `HAS_ERROR` (1 << 1): Node has an error
+
+### CAstNode
+Memory-mapped AST node structure:
+```
+kind: u16          # Node type identifier
+flags: NodeFlags   # Node properties
+parent: NodeOffset # Parent node reference
+first_child: NodeOffset  # First child node
+next_sibling: NodeOffset # Next sibling node
+data: u32          # Additional data (e.g., string intern offset)
+```
+
+## Arena API
+
+### Construction
+```
+Arena::new(path: P, capacity: u32) -> io::Result<Self>
+```
+Creates a new memory-mapped arena file with specified node capacity.
+
+### Allocation
+```
+alloc(node: CAstNode) -> Option<NodeOffset>
+```
+Allocates a new node in the arena. Returns None if capacity exceeded.
+
+### Access
+```
+get(offset: NodeOffset) -> Option<&CAstNode>
+get_mut(offset: NodeOffset) -> Option<&mut CAstNode>
+```
+Retrieves a node by its offset. Returns None for null offset or out-of-bounds access.
+
+## Usage Pattern
+1. Create arena with `Arena::new(path, capacity)`
+2. Allocate nodes with `arena.alloc(node)` which returns `NodeOffset`
+3. Access nodes via `arena.get(offset)`

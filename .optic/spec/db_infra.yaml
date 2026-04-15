@@ -1,0 +1,46 @@
+# Database (DB) Infrastructure Specification
+
+## Overview
+The DB provides persistent key-value storage using redb (embedded database) for include deduplication and symbol tracking.
+
+## Data Structures
+
+### OpticDb
+Main database wrapper managing the redb database.
+
+## DB API
+
+### Construction
+```
+OpticDb::new(path: &str) -> Result<Self, redb::Error>
+```
+Creates or opens a database at the specified path.
+
+### Include Deduplication
+```
+check_include(hash: &[u8; 32]) -> Result<Option<u32>, redb::Error>
+record_include(hash: &[u8; 32], offset: u32) -> Result<(), redb::Error>
+```
+- `check_include`: Looks up if an include has been processed before. Returns the stored offset if found.
+- `record_include`: Records a new include with its associated AST node offset.
+
+### Symbol Management (Future)
+```
+SYMBOLS_TABLE: TableDefinition<&str, u32>
+```
+Stores symbol name to definition offset mappings.
+
+## Storage Tables
+
+### includes
+- Key: `[u8; 32]` (SHA-256 hash of include path/content)
+- Value: `u32` (AST node offset)
+
+### symbols
+- Key: `&str` (symbol name)
+- Value: `u32` (definition offset)
+
+## Usage Pattern
+1. Create/open db with `OpticDb::new(path)`
+2. Before processing `#include`, check `check_include(hash)` to avoid duplicates
+3. After processing, record with `record_include(hash, offset)`
