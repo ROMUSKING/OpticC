@@ -1,0 +1,15 @@
+[package]
+name = "optic"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+bitflags = "2.11.1"
+memmap2 = "0.9.10"
+redb = "2.0.0"
+
+[dev-dependencies]
+tempfile = "3.8.1"
