@@ -1,237 +1,438 @@
-import { motion } from 'motion/react';
-import { Terminal, Cpu, Database, Network, HardDrive, CheckCircle2, Users, Clock, Code2 } from 'lucide-react';
+import { useState } from 'react';
+import { motion, AnimatePresence } from 'motion/react';
+import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
+import { vscDarkPlus } from 'react-syntax-highlighter/dist/esm/styles/prism';
+import { BookOpen, Cpu, Database, Code2, Network, Terminal, ChevronRight, FileCode2 } from 'lucide-react';
 
-const techStack = ['Rust (2021)', 'memmap2', 'redb (KV)', 'inkwell (LLVM 17+)', 'fuser'];
+type ModuleId = 'architecture' | 'arena' | 'kv_store' | 'lexer' | 'analysis';
 
-const phases = [
+interface ModuleData {
+  id: ModuleId;
+  title: string;
+  icon: React.ReactNode;
+  description: string;
+  content: React.ReactNode;
+  code?: {
+    filename: string;
+    language: string;
+    snippet: string;
+  };
+}
+
+const modules: ModuleData[] = [
   {
-    number: '01',
-    title: 'Core Graph Infrastructure',
-    weeks: 'Weeks 1-3',
-    goal: 'Establish the zero-serialization mmap arena and KV store mapping.',
-    tasks: [
-      { name: 'The mmap Arena Allocator', desc: 'Append-only memory-mapped file (.optic/c_arena.bin) using memmap2.' },
-      { name: 'Embedded KV-Store Integration', desc: 'Embed redb for metadata and deduplication tracking.' }
-    ],
-    icon: <Database className="w-5 h-5" />
+    id: 'architecture',
+    title: 'System Architecture',
+    icon: <BookOpen className="w-5 h-5" />,
+    description: 'High-level overview of the Optic C-Frontend architecture.',
+    content: (
+      <div className="space-y-4 text-zinc-300 leading-relaxed">
+        <p>
+          The Optic C-Frontend is designed to completely eliminate the traditional <code className="text-orange-400 bg-orange-400/10 px-1.5 py-0.5 rounded">#include</code> I/O bottleneck inherent in legacy C/C++ compilation.
+        </p>
+        <p>
+          Instead of parsing files into isolated, disjointed ASTs in memory, Optic parses the entire program into a <strong>single, memory-mapped graph arena</strong>. This allows for instant whole-program Link-Time Optimization (LTO) and zero-serialization overhead.
+        </p>
+        <h3 className="text-xl font-semibold text-white mt-8 mb-4">Core Components</h3>
+        <ul className="list-disc pl-5 space-y-2">
+          <li><strong>mmap Arena:</strong> A fast, append-only virtual memory space backed by <code className="text-orange-400 bg-orange-400/10 px-1.5 py-0.5 rounded">memmap2</code>.</li>
+          <li><strong>Embedded KV-Store:</strong> Powered by <code className="text-orange-400 bg-orange-400/10 px-1.5 py-0.5 rounded">redb</code>, used to track included files and deduplicate headers instantly.</li>
+          <li><strong>Graph Analysis:</strong> DFS/BFS traversals over the AST to automatically promote C pointers to strict aliasing (<code className="text-orange-400 bg-orange-400/10 px-1.5 py-0.5 rounded">restrict</code>/<code className="text-orange-400 bg-orange-400/10 px-1.5 py-0.5 rounded">noalias</code>).</li>
+          <li><strong>VFS Projection:</strong> A FUSE filesystem that projects the graph back into standard C files for IDE compatibility.</li>
+        </ul>
+      </div>
+    )
   },
   {
-    number: '02',
-    title: 'C-Ingestion & The Preprocessor',
-    weeks: 'Weeks 4-6',
-    goal: 'Parse C99 into the graph, neutralizing #include overhead and expanding macros.',
-    tasks: [
-      { name: 'Lexer & Header Deduplication', desc: 'Hash file + state. Query redb. Parse and store on miss.' },
-      { name: 'Dual-Node Macro Expansion', desc: 'Allocate Node A (Invocation) and Node B (Expanded AST).' },
-      { name: 'C99 Recursive Descent Parser', desc: 'Parse constructs into C_AstNode topological edges.' }
-    ],
-    icon: <Code2 className="w-5 h-5" />
+    id: 'arena',
+    title: 'mmap Arena Allocator',
+    icon: <Database className="w-5 h-5" />,
+    description: 'Zero-serialization memory-mapped graph arena.',
+    content: (
+      <div className="space-y-4 text-zinc-300 leading-relaxed">
+        <p>
+          The Arena is the heart of the Optic compiler. By using <code className="text-orange-400 bg-orange-400/10 px-1.5 py-0.5 rounded">memmap2</code>, we bypass standard heap allocations. Every AST node is written sequentially to a memory-mapped file.
+        </p>
+        <p>
+          Pointers between nodes are represented as <code className="text-orange-400 bg-orange-400/10 px-1.5 py-0.5 rounded">NodeOffset(u32)</code>, ensuring the entire graph is relocatable and fits within a 4GB address space (sufficient for massive C codebases due to deduplication).
+        </p>
+      </div>
+    ),
+    code: {
+      filename: 'src/arena/mod.rs',
+      language: 'rust',
+      snippet: `use memmap2::MmapMut;
+use std::fs::OpenOptions;
+use std::path::Path;
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NodeOffset(pub u32);
+
+bitflags::bitflags! {
+    pub struct NodeFlags: u16 {
+        const IS_CONST    = 0b0000_0001;
+        const IS_VOLATILE = 0b0000_0010;
+        const IS_RESTRICT = 0b0000_0100;
+        const IS_MACRO    = 0b0000_1000;
+    }
+}
+
+#[repr(C)]
+pub struct CAstNode {
+    pub kind: u16,
+    pub flags: NodeFlags,
+    pub left_child: NodeOffset,
+    pub next_sibling: NodeOffset,
+    pub data_offset: u32, // Offset into string interner
+}
+
+pub struct Arena {
+    mmap: MmapMut,
+    len: usize,
+}
+
+impl Arena {
+    pub fn new<P: AsRef<Path>>(path: P, capacity: usize) -> std::io::Result<Self> {
+        let file = OpenOptions::new()
+            .read(true).write(true).create(true)
+            .open(path)?;
+        
+        file.set_len(capacity as u64)?;
+        let mmap = unsafe { MmapMut::map_mut(&file)? };
+        
+        Ok(Self { mmap, len: 0 })
+    }
+
+    #[inline(always)]
+    pub fn alloc(&mut self, node: CAstNode) -> NodeOffset {
+        let offset = self.len;
+        let node_size = std::mem::size_of::<CAstNode>();
+        
+        unsafe {
+            let ptr = self.mmap.as_mut_ptr().add(offset);
+            std::ptr::write(ptr as *mut CAstNode, node);
+        }
+        
+        self.len += node_size;
+        NodeOffset(offset as u32)
+    }
+    
+    #[inline(always)]
+    pub fn get(&self, offset: NodeOffset) -> &CAstNode {
+        unsafe {
+            let ptr = self.mmap.as_ptr().add(offset.0 as usize);
+            &*(ptr as *const CAstNode)
+        }
+    }
+}`
+    }
   },
   {
-    number: '03',
-    title: 'Graph-Based Static Analysis',
-    weeks: 'Weeks 7-9',
-    goal: 'Leverage whole-program graph visibility for instant alias analysis and taint tracking.',
-    tasks: [
-      { name: 'Grade Promotion Pass (Auto-noalias)', desc: 'DFS pointer provenance tracing for restrict/noalias tagging.' },
-      { name: 'Taint Tracking & Lifetime Analysis', desc: 'Identify malloc/free nodes and Use-After-Free vulnerabilities.' }
-    ],
-    icon: <Network className="w-5 h-5" />
+    id: 'kv_store',
+    title: 'Embedded KV-Store',
+    icon: <Cpu className="w-5 h-5" />,
+    description: 'redb integration for O(1) header deduplication.',
+    content: (
+      <div className="space-y-4 text-zinc-300 leading-relaxed">
+        <p>
+          To solve the <code className="text-orange-400 bg-orange-400/10 px-1.5 py-0.5 rounded">#include</code> explosion problem, Optic hashes the contents of a header file along with the current preprocessor macro state.
+        </p>
+        <p>
+          This hash is queried against an embedded <code className="text-orange-400 bg-orange-400/10 px-1.5 py-0.5 rounded">redb</code> database. If a match is found, the lexer completely skips the file and returns the cached <code className="text-orange-400 bg-orange-400/10 px-1.5 py-0.5 rounded">NodeOffset</code> of the previously parsed AST.
+        </p>
+      </div>
+    ),
+    code: {
+      filename: 'src/db/mod.rs',
+      language: 'rust',
+      snippet: `use redb::{Database, TableDefinition};
+
+const INCLUDES_TABLE: TableDefinition<&[u8; 32], u32> = TableDefinition::new("includes");
+const SYMBOLS_TABLE: TableDefinition<&str, u32> = TableDefinition::new("symbols");
+
+pub struct OpticDb {
+    db: Database,
+}
+
+impl OpticDb {
+    pub fn new(path: &str) -> Result<Self, redb::Error> {
+        let db = Database::create(path)?;
+        let write_txn = db.begin_write()?;
+        {
+            let _ = write_txn.open_table(INCLUDES_TABLE)?;
+            let _ = write_txn.open_table(SYMBOLS_TABLE)?;
+        }
+        write_txn.commit()?;
+        Ok(Self { db })
+    }
+
+    pub fn check_include(&self, hash: &[u8; 32]) -> Result<Option<u32>, redb::Error> {
+        let read_txn = self.db.begin_read()?;
+        let table = read_txn.open_table(INCLUDES_TABLE)?;
+        if let Some(val) = table.get(hash)? {
+            Ok(Some(val.value()))
+        } else {
+            Ok(None)
+        }
+    }
+
+    pub fn record_include(&self, hash: &[u8; 32], offset: u32) -> Result<(), redb::Error> {
+        let write_txn = self.db.begin_write()?;
+        {
+            let mut table = write_txn.open_table(INCLUDES_TABLE)?;
+            table.insert(hash, offset)?;
+        }
+        write_txn.commit()?;
+        Ok(())
+    }
+}`
+    }
   },
   {
-    number: '04',
-    title: 'LLVM Backend Lowering',
-    weeks: 'Weeks 10-12',
-    goal: 'Translate the verified C-Graph into LLVM IR and emit binaries.',
-    tasks: [
-      { name: 'ABI-Compliant Struct Lowering', desc: 'Emit LLVM types matching target C ABI (System V, Win x64).' },
-      { name: 'Control Flow & Basic Blocks', desc: 'Translate graph nodes into LLVM Basic Blocks via inkwell.' },
-      { name: 'Applying Vectorization Hints', desc: 'Apply LLVM noalias attributes for SIMD auto-vectorization.' }
-    ],
-    icon: <Cpu className="w-5 h-5" />
+    id: 'lexer',
+    title: 'Dual-Node Preprocessor',
+    icon: <Code2 className="w-5 h-5" />,
+    description: 'Native C preprocessor within the graph builder.',
+    content: (
+      <div className="space-y-4 text-zinc-300 leading-relaxed">
+        <p>
+          Traditional C compilers lose macro information during the preprocessor phase. Optic uses a <strong>Dual-Node Macro Expansion</strong> system.
+        </p>
+        <p>
+          When a macro is invoked, Optic allocates Node A (the original invocation text) and Node B (the expanded AST). They are linked via an <code className="text-orange-400 bg-orange-400/10 px-1.5 py-0.5 rounded">expansion_of</code> edge. This allows the VFS to project the expanded code to the IDE while retaining the original source for diagnostics.
+        </p>
+      </div>
+    ),
+    code: {
+      filename: 'src/frontend/macro_expander.rs',
+      language: 'rust',
+      snippet: `use crate::arena::{Arena, CAstNode, NodeFlags, NodeOffset};
+
+pub struct MacroExpander<'a> {
+    arena: &'a mut Arena,
+}
+
+impl<'a> MacroExpander<'a> {
+    pub fn new(arena: &'a mut Arena) -> Self {
+        Self { arena }
+    }
+
+    /// Expands a macro and links the invocation to the expansion
+    pub fn expand_macro(&mut self, invocation_offset: u32, expanded_kind: u16) -> NodeOffset {
+        // Node A: The Invocation (already in arena, represented by invocation_offset)
+        
+        // Node B: The Expanded AST Node
+        let expanded_node = CAstNode {
+            kind: expanded_kind,
+            flags: NodeFlags::IS_MACRO,
+            left_child: NodeOffset(0),
+            next_sibling: NodeOffset(0),
+            data_offset: invocation_offset, // Link back to Node A
+        };
+
+        self.arena.alloc(expanded_node)
+    }
+}`
+    }
   },
   {
-    number: '05',
-    title: 'VFS Projectional Tooling',
-    weeks: 'Weeks 13-15',
-    goal: 'Project the graph and its diagnostics out to the IDE via a FUSE filesystem.',
-    tasks: [
-      { name: 'The FUSE Driver (fuser)', desc: 'Map .optic/vfs/src/ to original C file paths.' },
-      { name: 'Shadow Comments & Diagnostics', desc: 'Inject // [OPTIC ERROR] comments above offending AST nodes.' },
-      { name: 'Expanded Macro Projection', desc: 'Expose fully evaluated macros in .optic/vfs/expanded_macros/.' }
-    ],
-    icon: <HardDrive className="w-5 h-5" />
+    id: 'analysis',
+    title: 'Graph-Based Analysis',
+    icon: <Network className="w-5 h-5" />,
+    description: 'Whole-program alias analysis and taint tracking.',
+    content: (
+      <div className="space-y-4 text-zinc-300 leading-relaxed">
+        <p>
+          Because the entire program is in a single graph, we can perform global DFS/BFS traversals instantly.
+        </p>
+        <p>
+          <strong>Grade Promotion:</strong> If two pointers in a function subgraph never intersect in provenance, we promote their internal node states to <code className="text-orange-400 bg-orange-400/10 px-1.5 py-0.5 rounded">AffineGrade</code>. This allows us to automatically apply LLVM <code className="text-orange-400 bg-orange-400/10 px-1.5 py-0.5 rounded">noalias</code> attributes to legacy C code, enabling aggressive SIMD auto-vectorization.
+        </p>
+      </div>
+    ),
+    code: {
+      filename: 'src/analysis/alias.rs',
+      language: 'rust',
+      snippet: `use crate::arena::{Arena, NodeOffset};
+use std::collections::HashSet;
+
+pub struct AliasAnalyzer<'a> {
+    arena: &'a Arena,
+}
+
+impl<'a> AliasAnalyzer<'a> {
+    pub fn new(arena: &'a Arena) -> Self {
+        Self { arena }
+    }
+
+    /// Traces pointer provenance to determine if two pointers can alias.
+    /// Returns true if they are strictly disjoint (noalias).
+    pub fn is_disjoint(&self, ptr_a: NodeOffset, ptr_b: NodeOffset) -> bool {
+        let mut provenance_a = HashSet::new();
+        let mut provenance_b = HashSet::new();
+
+        self.trace_provenance(ptr_a, &mut provenance_a);
+        self.trace_provenance(ptr_b, &mut provenance_b);
+
+        provenance_a.is_disjoint(&provenance_b)
+    }
+
+    fn trace_provenance(&self, node: NodeOffset, visited: &mut HashSet<u32>) {
+        if visited.contains(&node.0) {
+            return;
+        }
+        visited.insert(node.0);
+
+        let ast_node = self.arena.get(node);
+        
+        // Traverse left child (e.g., pointer dereference or assignment source)
+        if ast_node.left_child.0 != 0 {
+            self.trace_provenance(ast_node.left_child, visited);
+        }
+        
+        // Traverse siblings
+        if ast_node.next_sibling.0 != 0 {
+            self.trace_provenance(ast_node.next_sibling, visited);
+        }
+    }
+}`
+    }
   }
 ];
 
-const teams = [
-  { name: 'Squad A', role: 'Graph Infrastructure', desc: 'mmap arena, NodeOffset safety, redb integration' },
-  { name: 'Squad B', role: 'C-Frontend', desc: 'Lexer, Parser, Macro expansion, #include deduplication' },
-  { name: 'Squad C', role: 'Analysis & LLVM', desc: 'DFS/BFS alias analysis, Grade Promotion, inkwell lowering' },
-  { name: 'Squad D', role: 'VFS & Tooling', desc: 'fuser projection, shadow comments, diagnostic directories' }
-];
-
 export default function App() {
+  const [activeModule, setActiveModule] = useState<ModuleId>('architecture');
+
+  const currentData = modules.find(m => m.id === activeModule)!;
+
   return (
-    <div className="min-h-screen bg-[#0a0a0a] text-zinc-300 font-sans selection:bg-orange-500/30">
-      {/* Header / Hero */}
-      <header className="border-b border-zinc-800 bg-[#0f0f11] relative overflow-hidden">
-        <div className="absolute inset-0 bg-[url('https://grainy-gradients.vercel.app/noise.svg')] opacity-20 mix-blend-overlay pointer-events-none"></div>
-        <div className="absolute top-0 left-0 w-full h-1 bg-gradient-to-r from-orange-600 via-orange-500 to-amber-500"></div>
-        
-        <div className="max-w-7xl mx-auto px-6 py-16 relative z-10">
-          <motion.div 
-            initial={{ opacity: 0, y: 20 }}
-            animate={{ opacity: 1, y: 0 }}
-            transition={{ duration: 0.5 }}
-            className="flex items-center gap-3 mb-6"
-          >
-            <Terminal className="w-8 h-8 text-orange-500" />
-            <span className="font-mono text-orange-500 tracking-widest uppercase text-sm font-semibold">Project OCF</span>
-          </motion.div>
-          
-          <motion.h1 
-            initial={{ opacity: 0, y: 20 }}
-            animate={{ opacity: 1, y: 0 }}
-            transition={{ duration: 0.5, delay: 0.1 }}
-            className="text-5xl md:text-7xl font-bold text-white tracking-tight mb-6"
-          >
-            Optic C-Frontend
-          </motion.h1>
-          
-          <motion.p 
-            initial={{ opacity: 0, y: 20 }}
-            animate={{ opacity: 1, y: 0 }}
-            transition={{ duration: 0.5, delay: 0.2 }}
-            className="text-xl text-zinc-400 max-w-3xl leading-relaxed mb-10"
-          >
-            Legacy C99/C11 Compilation via mmap Graph Arena & VFS. Eliminating the #include I/O bottleneck and performing instant whole-program Link-Time Optimization.
-          </motion.p>
-
-          <motion.div 
-            initial={{ opacity: 0, y: 20 }}
-            animate={{ opacity: 1, y: 0 }}
-            transition={{ duration: 0.5, delay: 0.3 }}
-            className="flex flex-wrap gap-4 items-center"
-          >
-            <div className="flex items-center gap-2 bg-zinc-900 border border-zinc-800 px-4 py-2 rounded-full">
-              <Clock className="w-4 h-4 text-zinc-500" />
-              <span className="font-mono text-sm">15 Weeks ETA</span>
-            </div>
-            <div className="h-4 w-px bg-zinc-800 hidden sm:block"></div>
-            <div className="flex flex-wrap gap-2">
-              {techStack.map((tech) => (
-                <span key={tech} className="bg-orange-500/10 text-orange-400 border border-orange-500/20 px-3 py-1 rounded-full text-xs font-mono uppercase tracking-wider">
-                  {tech}
-                </span>
-              ))}
-            </div>
-          </motion.div>
-        </div>
-      </header>
-
-      <main className="max-w-7xl mx-auto px-6 py-16 grid grid-cols-1 lg:grid-cols-12 gap-12">
-        
-        {/* Left Column: Phases */}
-        <div className="lg:col-span-8 space-y-12">
+    <div className="min-h-screen bg-[#050505] text-zinc-300 font-sans flex flex-col md:flex-row selection:bg-orange-500/30">
+      
+      {/* Sidebar Navigation */}
+      <aside className="w-full md:w-72 bg-[#0a0a0a] border-r border-zinc-800 flex flex-col shrink-0">
+        <div className="p-6 border-b border-zinc-800 flex items-center gap-3">
+          <Terminal className="w-6 h-6 text-orange-500" />
           <div>
-            <h2 className="text-2xl font-semibold text-white mb-8 flex items-center gap-3">
-              <span className="w-8 h-px bg-orange-500"></span>
-              Implementation Phases
-            </h2>
-            
-            <div className="space-y-6">
-              {phases.map((phase, idx) => (
-                <motion.div 
-                  key={phase.number}
-                  initial={{ opacity: 0, x: -20 }}
-                  whileInView={{ opacity: 1, x: 0 }}
-                  viewport={{ once: true }}
-                  transition={{ duration: 0.5, delay: idx * 0.1 }}
-                  className="group relative bg-[#121214] border border-zinc-800 hover:border-orange-500/50 rounded-xl p-6 md:p-8 transition-colors"
-                >
-                  <div className="absolute top-0 right-0 p-6 opacity-10 group-hover:opacity-20 transition-opacity">
-                    {phase.icon}
-                  </div>
-                  
-                  <div className="flex flex-col md:flex-row md:items-baseline gap-4 mb-4">
-                    <span className="font-mono text-4xl font-bold text-zinc-800 group-hover:text-orange-500/20 transition-colors">
-                      {phase.number}
-                    </span>
-                    <h3 className="text-xl font-semibold text-white">{phase.title}</h3>
-                    <span className="font-mono text-xs text-orange-400 bg-orange-400/10 px-2 py-1 rounded">
-                      {phase.weeks}
-                    </span>
-                  </div>
-                  
-                  <p className="text-zinc-400 mb-6 font-medium">
-                    Goal: {phase.goal}
-                  </p>
-                  
-                  <div className="space-y-4">
-                    {phase.tasks.map((task, tIdx) => (
-                      <div key={tIdx} className="flex gap-4 items-start">
-                        <div className="mt-1.5 w-1.5 h-1.5 rounded-full bg-orange-500 shrink-0"></div>
-                        <div>
-                          <h4 className="text-sm font-semibold text-zinc-200">{task.name}</h4>
-                          <p className="text-sm text-zinc-500 mt-1">{task.desc}</p>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                </motion.div>
-              ))}
+            <h1 className="font-bold text-white tracking-tight">OpticC</h1>
+            <p className="text-xs text-zinc-500 font-mono">Compiler Source & Docs</p>
+          </div>
+        </div>
+        
+        <nav className="flex-1 overflow-y-auto py-4 px-3 space-y-1">
+          {modules.map((mod) => {
+            const isActive = activeModule === mod.id;
+            return (
+              <button
+                key={mod.id}
+                onClick={() => setActiveModule(mod.id)}
+                className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-left transition-all duration-200 ${
+                  isActive 
+                    ? 'bg-orange-500/10 text-orange-400' 
+                    : 'text-zinc-400 hover:bg-zinc-900 hover:text-zinc-200'
+                }`}
+              >
+                <div className={`${isActive ? 'text-orange-500' : 'text-zinc-500'}`}>
+                  {mod.icon}
+                </div>
+                <span className="font-medium text-sm flex-1">{mod.title}</span>
+                {isActive && <ChevronRight className="w-4 h-4 text-orange-500" />}
+              </button>
+            );
+          })}
+        </nav>
+        
+        <div className="p-4 border-t border-zinc-800">
+          <div className="bg-zinc-900 rounded-lg p-3 border border-zinc-800">
+            <p className="text-xs text-zinc-500 font-mono mb-1">Target</p>
+            <p className="text-sm text-zinc-300 font-medium">C99 / C11</p>
+            <div className="mt-2 h-1 w-full bg-zinc-800 rounded-full overflow-hidden">
+              <div className="h-full bg-orange-500 w-1/3"></div>
             </div>
           </div>
         </div>
+      </aside>
 
-        {/* Right Column: Sidebar */}
-        <div className="lg:col-span-4 space-y-8">
-          
-          {/* Definition of Done */}
-          <motion.div 
-            initial={{ opacity: 0, y: 20 }}
-            whileInView={{ opacity: 1, y: 0 }}
-            viewport={{ once: true }}
-            className="bg-orange-500/5 border border-orange-500/20 rounded-xl p-6 relative overflow-hidden"
-          >
-            <div className="absolute top-0 left-0 w-1 h-full bg-orange-500"></div>
-            <h3 className="text-lg font-semibold text-white mb-4 flex items-center gap-2">
-              <CheckCircle2 className="w-5 h-5 text-orange-500" />
-              Definition of Done
-            </h3>
-            <p className="text-sm text-zinc-400 leading-relaxed">
-              Phase 0 is considered complete when the Optic C-Compiler can successfully ingest, analyze, project, and compile the <strong className="text-zinc-200">SQLite Amalgamation (sqlite3.c - ~250k LOC)</strong> into a working, test-passing shared library, while generating at least one "Taint Tracking" shadow comment via the VFS.
-            </p>
-          </motion.div>
+      {/* Main Content Area */}
+      <main className="flex-1 flex flex-col h-screen overflow-hidden bg-[#050505]">
+        
+        {/* Topbar */}
+        <header className="h-16 border-b border-zinc-800 flex items-center px-8 shrink-0 bg-[#0a0a0a]/50 backdrop-blur-md">
+          <h2 className="text-lg font-semibold text-white flex items-center gap-2">
+            {currentData.icon}
+            {currentData.title}
+          </h2>
+        </header>
 
-          {/* Team Topology */}
-          <motion.div 
-            initial={{ opacity: 0, y: 20 }}
-            whileInView={{ opacity: 1, y: 0 }}
-            viewport={{ once: true }}
-            className="bg-[#121214] border border-zinc-800 rounded-xl p-6"
-          >
-            <h3 className="text-lg font-semibold text-white mb-6 flex items-center gap-2">
-              <Users className="w-5 h-5 text-zinc-400" />
-              Team Topology
-            </h3>
-            <div className="space-y-6">
-              {teams.map((team, idx) => (
-                <div key={idx} className="relative pl-4 border-l border-zinc-800">
-                  <div className="absolute -left-[5px] top-1.5 w-2 h-2 rounded-full bg-zinc-700"></div>
-                  <div className="flex items-baseline justify-between gap-2 mb-1">
-                    <h4 className="font-mono text-sm font-bold text-zinc-200">{team.name}</h4>
-                    <span className="text-xs font-medium text-orange-400">{team.role}</span>
+        {/* Scrollable Content */}
+        <div className="flex-1 overflow-y-auto p-8">
+          <div className="max-w-4xl mx-auto">
+            
+            <AnimatePresence mode="wait">
+              <motion.div
+                key={currentData.id}
+                initial={{ opacity: 0, y: 10 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0, y: -10 }}
+                transition={{ duration: 0.2 }}
+                className="space-y-12"
+              >
+                {/* Documentation Section */}
+                <section>
+                  <h1 className="text-3xl font-bold text-white mb-2">{currentData.title}</h1>
+                  <p className="text-lg text-zinc-400 mb-8 pb-8 border-b border-zinc-800">
+                    {currentData.description}
+                  </p>
+                  <div className="prose prose-invert prose-orange max-w-none">
+                    {currentData.content}
                   </div>
-                  <p className="text-xs text-zinc-500 leading-relaxed">{team.desc}</p>
-                </div>
-              ))}
-            </div>
-          </motion.div>
+                </section>
 
+                {/* Code Section */}
+                {currentData.code && (
+                  <section className="mt-12">
+                    <div className="flex items-center justify-between mb-4">
+                      <h3 className="text-xl font-semibold text-white flex items-center gap-2">
+                        <FileCode2 className="w-5 h-5 text-orange-500" />
+                        Implementation
+                      </h3>
+                      <div className="bg-zinc-900 border border-zinc-800 px-3 py-1 rounded-md flex items-center gap-2">
+                        <span className="w-2 h-2 rounded-full bg-orange-500"></span>
+                        <span className="text-xs font-mono text-zinc-400">{currentData.code.filename}</span>
+                      </div>
+                    </div>
+                    
+                    <div className="rounded-xl overflow-hidden border border-zinc-800 shadow-2xl">
+                      <SyntaxHighlighter
+                        language={currentData.code.language}
+                        style={vscDarkPlus}
+                        customStyle={{
+                          margin: 0,
+                          padding: '1.5rem',
+                          background: '#0a0a0a',
+                          fontSize: '0.875rem',
+                          lineHeight: '1.6',
+                        }}
+                        showLineNumbers={true}
+                        lineNumberStyle={{
+                          minWidth: '3em',
+                          paddingRight: '1em',
+                          color: '#404040',
+                          textAlign: 'right',
+                        }}
+                      >
+                        {currentData.code.snippet}
+                      </SyntaxHighlighter>
+                    </div>
+                  </section>
+                )}
+              </motion.div>
+            </AnimatePresence>
+
+          </div>
         </div>
       </main>
     </div>
   );
 }
+
