@@ -1,0 +1,7 @@
+api_version: "1.0"
+structs: []
+functions: []
+
+
+structs:
+  - name: Arena
