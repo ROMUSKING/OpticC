@@ -1,0 +1,9 @@
+[package]
+name = "optic_c"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+fuser = "0.17.0"
+memmap2 = "0.9.10"
+redb = "4.0.0"
