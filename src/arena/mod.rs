@@ -46,6 +46,10 @@ impl Arena {
     pub fn alloc(&mut self, node: CAstNode) -> NodeOffset {
         let offset = self.len;
         let node_size = std::mem::size_of::<CAstNode>();
+
+        if offset + node_size > self.mmap.len() {
+            panic!("Arena capacity exceeded: cannot allocate {} bytes at offset {}", node_size, offset);
+        }
         
         unsafe {
             let ptr = self.mmap.as_mut_ptr().add(offset);
@@ -58,8 +62,15 @@ impl Arena {
     
     #[inline(always)]
     pub fn get(&self, offset: NodeOffset) -> &CAstNode {
+        let offset = offset.0 as usize;
+        let node_size = std::mem::size_of::<CAstNode>();
+
+        if offset + node_size > self.mmap.len() {
+            panic!("Arena access out of bounds: offset {} with node size {}", offset, node_size);
+        }
+
         unsafe {
-            let ptr = self.mmap.as_ptr().add(offset.0 as usize);
+            let ptr = self.mmap.as_ptr().add(offset);
             &*(ptr as *const CAstNode)
         }
     }
