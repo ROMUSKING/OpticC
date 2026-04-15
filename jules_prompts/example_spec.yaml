@@ -1,0 +1,52 @@
+# Example of the Rich Spec Format (Cloudflare cf style)
+# Agents must use this format to document their APIs in .optic/spec/<squad>.yaml
+
+api_version: "1.0"
+squad: "squad_a"
+domain: "Graph Infrastructure"
+
+structs:
+  - name: "CAstNode"
+    semantic_description: "The fundamental unit of the AST. Represents a single operation, declaration, or macro invocation."
+    memory_layout: "Must be exactly 16 bytes. Uses #[repr(C)] to ensure predictable alignment in the mmap arena."
+    fields:
+      - name: "kind"
+        type: "u16"
+        description: "The AST node type (e.g., 0x01 for ADD, 0x02 for VAR_DECL)."
+      - name: "flags"
+        type: "NodeFlags"
+        description: "Bitflags representing properties like IS_CONST or IS_MACRO."
+      - name: "left_child"
+        type: "NodeOffset"
+        description: "Pointer to the first child node in the arena."
+      - name: "next_sibling"
+        type: "NodeOffset"
+        description: "Pointer to the next sibling node in the arena."
+      - name: "data_offset"
+        type: "u32"
+        description: "Offset into the string interner for identifiers/literals."
+
+functions:
+  - name: "Arena::alloc"
+    semantic_description: "Allocates a new CAstNode sequentially in the memory-mapped file."
+    side_effects: "Increments the internal `len` counter by 16 bytes. Writes directly to virtual memory. Does NOT flush to disk immediately."
+    parameters:
+      - name: "node"
+        type: "CAstNode"
+        description: "The node to allocate."
+    returns:
+      type: "NodeOffset"
+      description: "The 32-bit offset representing the node's location in the arena."
+    llm_usage_examples:
+      - title: "Allocating a basic node"
+        code: |
+          let mut arena = Arena::new("ast.bin", 1024 * 1024).unwrap();
+          let node = CAstNode {
+              kind: 1,
+              flags: NodeFlags::empty(),
+              left_child: NodeOffset(0),
+              next_sibling: NodeOffset(0),
+              data_offset: 0,
+          };
+          let offset = arena.alloc(node);
+          // offset can now be safely passed to other nodes as a child/sibling pointer.

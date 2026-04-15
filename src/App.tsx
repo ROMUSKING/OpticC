@@ -55,15 +55,19 @@ const modules: ModuleData[] = [
         </p>
         
         <div className="bg-zinc-900 border border-zinc-800 rounded-lg p-5 mt-6">
-          <h3 className="text-lg font-bold text-white mb-3">1. The Async Branch Protocol (Append to ALL Agents)</h3>
-          <p className="text-sm text-zinc-400 mb-4">Every Jules agent must have this block appended to their system instructions to ensure they maintain the project state without causing git merge conflicts.</p>
+          <h3 className="text-lg font-bold text-white mb-3">1. The Async Branch & Rich Spec Protocol (Append to ALL Agents)</h3>
+          <p className="text-sm text-zinc-400 mb-4">Every Jules agent must have this block appended to their system instructions to ensure they maintain the project state using a rich, LLM-optimized API spec.</p>
           <SyntaxHighlighter language="markdown" style={vscDarkPlus} customStyle={{ margin: 0, padding: '1rem', background: '#050505', borderRadius: '0.5rem', fontSize: '0.875rem' }}>
-{`# ASYNC BRANCH & MEMORY PROTOCOL
-You are part of an autonomous multi-agent team building the Optic C-Frontend in Rust. Because you operate asynchronously on separate git branches, we use a sharded memory system to prevent merge conflicts.
+{`# ASYNC BRANCH & RICH SPEC PROTOCOL
+You are part of an autonomous multi-agent team building the Optic C-Frontend in Rust. Because you operate asynchronously on separate git branches, we use a sharded memory system to prevent merge conflicts. Furthermore, to ensure perfect cross-agent understanding, we use a "Rich Spec" format (similar to Cloudflare's cf tool) instead of basic markdown.
 
-1. WAKE UP: Before writing any code, you MUST read ALL files in \`.optic/memory/\` and \`.optic/tasks/\` to understand the global state and API contracts established by other agents.
+1. WAKE UP: Before writing any code, you MUST read ALL files in \`.optic/spec/\` and \`.optic/tasks/\` to understand the global state and API contracts established by other agents.
 2. EXECUTE: Perform your assigned tasks on your branch. Use \`cargo check\` and \`cargo test\` frequently.
-3. UPDATE MEMORY: Document your API changes ONLY in \`.optic/memory/<your_squad>.md\`. NEVER edit another squad's memory file.
+3. UPDATE RICH SPEC: Document your API changes ONLY in \`.optic/spec/<your_squad>.yaml\`. NEVER edit another squad's spec file. Your YAML spec MUST include:
+   - \`semantic_description\`: What the function/struct actually means in the context of the compiler.
+   - \`memory_layout\`: Critical constraints for the mmap arena.
+   - \`side_effects\`: What happens to the graph or DB when called.
+   - \`llm_usage_examples\`: Code examples written specifically for other AI agents to understand how to call it.
 4. UPDATE TASKS: Check off completed tasks ONLY in \`.optic/tasks/<your_squad>.md\`. If you need to assign work or report bugs to another squad, append it to \`.optic/tasks/inbox_<target_squad>.md\` (an append-only file to minimize conflicts).
 5. HANDOFF: Open a Pull Request. End your response by stating which Squad should review or take over next.`}
           </SyntaxHighlighter>
@@ -78,9 +82,9 @@ Your goal is to initialize the project and coordinate Squads A, B, C, and D.
 
 IMMEDIATE TASKS:
 1. Run \`cargo new optic_c --lib\` to initialize the Rust workspace.
-2. Create directories: \`.optic/memory/\` and \`.optic/tasks/\`.
+2. Create directories: \`.optic/spec/\` and \`.optic/tasks/\`.
 3. Create squad-specific task files (e.g., \`.optic/tasks/squad_a.md\`) and populate them with the 5 Phases of the Project OCF plan.
-4. Create squad-specific memory files (e.g., \`.optic/memory/squad_a.md\`) with a basic schema for agents to record their API contracts.
+4. Create squad-specific spec files (e.g., \`.optic/spec/squad_a.yaml\`) with a basic schema for agents to record their API contracts.
 5. Add \`memmap2\`, \`redb\`, \`inkwell\`, and \`fuser\` to Cargo.toml.
 6. Commit to \`main\` and hand off to Jules-Squad-A to begin Phase 1 (mmap Arena).`}
           </SyntaxHighlighter>
@@ -97,7 +101,7 @@ YOUR DIRECTIVES:
 2. Define the \`NodeOffset(u32)\` and \`CAstNode\` structs with \`#[repr(C)]\`.
 3. Implement the embedded KV-store using \`redb\` in \`src/db.rs\` for header deduplication.
 4. Ensure the Arena can allocate 10M nodes sequentially at high speed.
-5. Follow the ASYNC BRANCH PROTOCOL to update \`.optic/memory/squad_a.md\` with your Arena API so Squad B can use it.`}
+5. Follow the ASYNC BRANCH PROTOCOL to update \`.optic/spec/squad_a.yaml\` with your Arena API so Squad B can use it.`}
           </SyntaxHighlighter>
         </div>
 
@@ -108,11 +112,11 @@ YOUR DIRECTIVES:
 Tech Stack: Rust, custom parsing.
 
 YOUR DIRECTIVES:
-1. Read \`.optic/memory/squad_a.md\` to understand Squad A's Arena and DB APIs.
+1. Read \`.optic/spec/squad_a.yaml\` to understand Squad A's Arena and DB APIs.
 2. Implement the C99 Lexer and Recursive Descent Parser in \`src/frontend/\`.
 3. Implement Dual-Node Macro Expansion (allocate Node A for invocation, Node B for expansion).
 4. Integrate with the \`redb\` KV-store to hash and deduplicate \`#include\` files instantly.
-5. Follow the ASYNC BRANCH PROTOCOL to document the AST node kinds in \`.optic/memory/squad_b.md\` for Squad C.`}
+5. Follow the ASYNC BRANCH PROTOCOL to document the AST node kinds in \`.optic/spec/squad_b.yaml\` for Squad C.`}
           </SyntaxHighlighter>
         </div>
 
@@ -123,11 +127,11 @@ YOUR DIRECTIVES:
 Tech Stack: Rust, inkwell (LLVM).
 
 YOUR DIRECTIVES:
-1. Read \`.optic/memory/squad_b.md\` to understand the AST node kinds and \`.optic/memory/squad_a.md\` for the Arena API.
+1. Read \`.optic/spec/squad_b.yaml\` to understand the AST node kinds and \`.optic/spec/squad_a.yaml\` for the Arena API.
 2. Implement DFS pointer provenance tracing in \`src/analysis/alias.rs\` to promote pointers to \`noalias\` (AffineGrade).
 3. Implement Taint Tracking to identify Use-After-Free vulnerabilities.
 4. Use \`inkwell\` to lower the AST into LLVM IR in \`src/backend/llvm.rs\`, applying vectorization hints.
-5. Follow the ASYNC BRANCH PROTOCOL to document the Analysis diagnostics API in \`.optic/memory/squad_c.md\` for Squad D.`}
+5. Follow the ASYNC BRANCH PROTOCOL to document the Analysis diagnostics API in \`.optic/spec/squad_c.yaml\` for Squad D.`}
           </SyntaxHighlighter>
         </div>
 
@@ -138,7 +142,7 @@ YOUR DIRECTIVES:
 Tech Stack: Rust, fuser.
 
 YOUR DIRECTIVES:
-1. Read \`.optic/memory/squad_a.md\` and \`.optic/memory/squad_c.md\` to understand the Arena and Analysis APIs.
+1. Read \`.optic/spec/squad_a.yaml\` and \`.optic/spec/squad_c.yaml\` to understand the Arena and Analysis APIs.
 2. Implement a userspace filesystem using \`fuser\` in \`src/vfs/mod.rs\`.
 3. Map \`.optic/vfs/src/\` to reconstruct original C files from the mmap arena.
 4. Query the Analysis engine during \`read()\` syscalls to inject \`// [OPTIC ERROR]\` shadow comments above vulnerable AST nodes.
@@ -154,7 +158,7 @@ YOUR DIRECTIVES:
 Tech Stack: Rust, bash, C.
 
 YOUR DIRECTIVES:
-1. Read ALL files in \`.optic/tasks/\` and \`.optic/memory/\` to verify all phases are marked complete.
+1. Read ALL files in \`.optic/tasks/\` and \`.optic/spec/\` to verify all phases are marked complete.
 2. Download the SQLite Amalgamation (\`sqlite3.c\`, ~250k LOC).
 3. Run the Optic C-Compiler against \`sqlite3.c\`.
 4. Verify that the compiler generates a working shared library.
