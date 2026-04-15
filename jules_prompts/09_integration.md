@@ -7,4 +7,4 @@ YOUR DIRECTIVES:
 3. Run the Optic C-Compiler against `sqlite3.c`.
 4. Verify that the compiler generates a working shared library.
 5. Mount the VFS and verify that at least one "Taint Tracking" shadow comment is projected into the virtual filesystem.
-6. If bugs are found, append them to the relevant squad's inbox (e.g., `.optic/tasks/inbox_squad_b.md`) and hand back to them. Otherwise, declare PROJECT COMPLETE.
+6. If bugs are found, write them to a new file in the relevant agent's inbox (e.g., `.optic/tasks/inbox_lexer_macro/<timestamp_or_uuid>.md`) and hand back to them. Otherwise, declare PROJECT COMPLETE.
