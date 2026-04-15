@@ -57,6 +57,7 @@ impl Arena {
     
     #[inline(always)]
     pub fn get(&self, offset: NodeOffset) -> &CAstNode {
+        assert!(offset.0 as usize + std::mem::size_of::<CAstNode>() <= self.len);
         unsafe {
             let ptr = self.mmap.as_ptr().add(offset.0 as usize);
             &*(ptr as *const CAstNode)
