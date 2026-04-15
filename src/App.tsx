@@ -19,8 +19,8 @@ interface ModuleData {
   };
 }
 
-const modules: ModuleData[] = [
-  {
+const modules: Record<ModuleId, ModuleData> = {
+  architecture: {
     id: 'architecture',
     title: 'System Architecture',
     icon: <BookOpen className="w-5 h-5" />,
@@ -43,7 +43,7 @@ const modules: ModuleData[] = [
       </div>
     )
   },
-  {
+  jules_prompts: {
     id: 'jules_prompts',
     title: 'Jules Agent Prompts',
     icon: <Bot className="w-5 h-5" />,
@@ -212,7 +212,7 @@ YOUR DIRECTIVES:
       </div>
     )
   },
-  {
+  arena: {
     id: 'arena',
     title: 'mmap Arena Allocator',
     icon: <Database className="w-5 h-5" />,
@@ -277,6 +277,10 @@ impl Arena {
     pub fn alloc(&mut self, node: CAstNode) -> NodeOffset {
         let offset = self.len;
         let node_size = std::mem::size_of::<CAstNode>();
+
+        if offset + node_size > self.mmap.len() {
+            panic!("Arena capacity exceeded: cannot allocate {} bytes at offset {}", node_size, offset);
+        }
         
         unsafe {
             let ptr = self.mmap.as_mut_ptr().add(offset);
@@ -289,15 +293,22 @@ impl Arena {
     
     #[inline(always)]
     pub fn get(&self, offset: NodeOffset) -> &CAstNode {
+        let offset = offset.0 as usize;
+        let node_size = std::mem::size_of::<CAstNode>();
+
+        if offset + node_size > self.mmap.len() {
+            panic!("Arena access out of bounds: offset {} with node size {}", offset, node_size);
+        }
+
         unsafe {
-            let ptr = self.mmap.as_ptr().add(offset.0 as usize);
+            let ptr = self.mmap.as_ptr().add(offset);
             &*(ptr as *const CAstNode)
         }
     }
 }`
     }
   },
-  {
+  kv_store: {
     id: 'kv_store',
     title: 'Embedded KV-Store',
     icon: <Cpu className="w-5 h-5" />,
@@ -358,7 +369,7 @@ impl OpticDb {
 }`
     }
   },
-  {
+  lexer: {
     id: 'lexer',
     title: 'Dual-Node Preprocessor',
     icon: <Code2 className="w-5 h-5" />,
@@ -405,7 +416,7 @@ impl<'a> MacroExpander<'a> {
 }`
     }
   },
-  {
+  analysis: {
     id: 'analysis',
     title: 'Graph-Based Analysis',
     icon: <Network className="w-5 h-5" />,
@@ -468,12 +479,14 @@ impl<'a> AliasAnalyzer<'a> {
 }`
     }
   }
-];
+};
+
+const modulesList = Object.values(modules);
 
 export default function App() {
   const [activeModule, setActiveModule] = useState<ModuleId>('architecture');
 
-  const currentData = modules.find(m => m.id === activeModule)!;
+  const currentData = modules[activeModule];
 
   return (
     <div className="min-h-screen bg-[#050505] text-zinc-300 font-sans flex flex-col md:flex-row selection:bg-orange-500/30">
@@ -489,7 +502,7 @@ export default function App() {
         </div>
         
         <nav className="flex-1 overflow-y-auto py-4 px-3 space-y-1">
-          {modules.map((mod) => {
+          {modulesList.map((mod) => {
             const isActive = activeModule === mod.id;
             return (
               <button
