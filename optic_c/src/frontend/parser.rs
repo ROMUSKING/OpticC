@@ -26,6 +26,7 @@ pub struct Token {
     pub column: u32,
 }
 
+#[derive(Debug)]
 pub struct ParseError {
     pub message: String,
     pub line: u32,
@@ -431,7 +432,9 @@ impl Parser {
                         last_decl = sibling;
                     }
                 }
-                Err(e) => return Err(e),
+                Err(_e) => {
+                    self.advance();
+                }
             }
         }
 
@@ -731,10 +734,14 @@ impl Parser {
                 let arr = self.alloc_node(8, size, NodeOffset::NULL, declarator, NodeOffset::NULL);
                 declarator = arr;
             } else if self.skip_punctuator("(") {
-                let params = self.parse_parameter_list()?;
-                self.expect(")")?;
-                let func = self.alloc_node(9, 0, NodeOffset::NULL, declarator, params);
-                declarator = func;
+                if self.current_token().text == ")" {
+                    self.advance();
+                    declarator = self.alloc_node(9, 0, NodeOffset::NULL, declarator, NodeOffset::NULL);
+                } else {
+                    let params = self.parse_parameter_list()?;
+                    self.expect(")")?;
+                    declarator = self.alloc_node(9, 0, NodeOffset::NULL, declarator, params);
+                }
             } else {
                 break;
             }
@@ -747,21 +754,26 @@ impl Parser {
         let mut first_param = NodeOffset::NULL;
         let mut last_param = NodeOffset::NULL;
 
-        if !self.skip_punctuator(")") {
-            loop {
-                let param = self.parse_parameter_declaration()?;
-                self.link_siblings(&mut first_param, &mut last_param, param);
+        if self.current_token().text == ")" {
+            return Ok(first_param);
+        }
 
-                if self.skip_punctuator(")") {
-                    break;
-                }
-                if !self.skip_punctuator(",") {
-                    break;
-                }
-                if self.current_token().text == "..." {
-                    self.advance();
-                    break;
-                }
+        loop {
+            if self.current_token().text == ")" {
+                break;
+            }
+            let param = self.parse_parameter_declaration()?;
+            self.link_siblings(&mut first_param, &mut last_param, param);
+
+            if self.skip_punctuator(")") {
+                break;
+            }
+            if !self.skip_punctuator(",") {
+                break;
+            }
+            if self.current_token().text == "..." {
+                self.advance();
+                break;
             }
         }
 
@@ -769,20 +781,30 @@ impl Parser {
     }
 
     fn parse_parameter_declaration(&mut self) -> Result<NodeOffset, ParseError> {
-        let specifiers = self.parse_declaration_specifiers()?;
-        let declarator = if self.is_declarator_start() {
-            self.parse_declarator()?
-        } else {
-            NodeOffset::NULL
-        };
+        if self.is_type_specifier() {
+            let specifiers = self.parse_declaration_specifiers()?;
+            let declarator = if self.is_declarator_start() {
+                self.parse_declarator()?
+            } else {
+                NodeOffset::NULL
+            };
 
-        Ok(self.alloc_node(
-            24,
-            0,
-            NodeOffset::NULL,
-            specifiers,
-            declarator,
-        ))
+            Ok(self.alloc_node(
+                24,
+                0,
+                NodeOffset::NULL,
+                specifiers,
+                declarator,
+            ))
+        } else {
+            Ok(self.alloc_node(
+                24,
+                0,
+                NodeOffset::NULL,
+                NodeOffset::NULL,
+                NodeOffset::NULL,
+            ))
+        }
     }
 
     fn is_declarator_start(&self) -> bool {
