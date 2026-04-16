@@ -39,3 +39,28 @@ impl OpticDb {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::NamedTempFile;
+
+    #[test]
+    fn test_check_include() {
+        let temp_file = NamedTempFile::new().unwrap();
+        let db = OpticDb::new(temp_file.path().to_str().unwrap()).unwrap();
+
+        let hash = [1u8; 32];
+
+        // Initially, the hash should not be included
+        let result = db.check_include(&hash).unwrap();
+        assert_eq!(result, None);
+
+        // Record the include
+        db.record_include(&hash, 42).unwrap();
+
+        // Now, the hash should be included
+        let result = db.check_include(&hash).unwrap();
+        assert_eq!(result, Some(42));
+    }
+}
