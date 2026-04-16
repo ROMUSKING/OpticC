@@ -1,7 +1,227 @@
 api_version: "1.0"
-structs: []
-functions: []
-
 
 structs:
   - name: Parser
+
+ast_node_kinds:
+  description: "C99 AST node kinds for the recursive descent parser"
+  categories:
+    - name: Types
+      kinds:
+        - name: AST_VOID
+          value: 1
+          description: "void type specifier"
+        - name: AST_INT
+          value: 2
+          description: "int type specifier"
+        - name: AST_CHAR
+          value: 3
+          description: "char type specifier"
+        - name: AST_STRUCT
+          value: 4
+          description: "struct type specifier"
+        - name: AST_UNION
+          value: 5
+          description: "union type specifier"
+        - name: AST_ENUM
+          value: 6
+          description: "enum type specifier"
+        - name: AST_PTR
+          value: 7
+          description: "pointer type (unary *)"
+        - name: AST_ARRAY
+          value: 8
+          description: "array type"
+        - name: AST_FUNC
+          value: 9
+          description: "function type"
+    - name: Declarations
+      kinds:
+        - name: AST_DECL
+          value: 20
+          description: "top-level declaration"
+        - name: AST_VAR_DECL
+          value: 21
+          description: "variable declaration"
+        - name: AST_FUNC_DECL
+          value: 22
+          description: "function declaration"
+        - name: AST_FUNC_DEF
+          value: 23
+          description: "function definition"
+        - name: AST_PARAM
+          value: 24
+          description: "function parameter"
+        - name: AST_STRUCT_DECL
+          value: 25
+          description: "struct declaration"
+        - name: AST_ENUM_CONST
+          value: 26
+          description: "enumeration constant"
+    - name: Statements
+      kinds:
+        - name: AST_COMPOUND
+          value: 40
+          description: "compound statement (block)"
+        - name: AST_IF
+          value: 41
+          description: "if statement"
+        - name: AST_WHILE
+          value: 42
+          description: "while statement"
+        - name: AST_FOR
+          value: 43
+          description: "for statement"
+        - name: AST_RETURN
+          value: 44
+          description: "return statement"
+        - name: AST_EXPR_STMT
+          value: 45
+          description: "expression statement"
+        - name: AST_BREAK
+          value: 46
+          description: "break statement"
+        - name: AST_CONTINUE
+          value: 47
+          description: "continue statement"
+        - name: AST_EMPTY
+          value: 48
+          description: "empty statement"
+    - name: Expressions
+      kinds:
+        - name: AST_IDENT
+          value: 60
+          description: "identifier"
+        - name: AST_INT_CONST
+          value: 61
+          description: "integer constant"
+        - name: AST_CHAR_CONST
+          value: 62
+          description: "character constant"
+        - name: AST_STRING
+          value: 63
+          description: "string literal"
+        - name: AST_BINOP
+          value: 64
+          description: "binary operation"
+        - name: AST_UNOP
+          value: 65
+          description: "unary operation"
+        - name: AST_COND
+          value: 66
+          description: "conditional expression (ternary)"
+        - name: AST_CALL
+          value: 67
+          description: "function call"
+        - name: AST_ARRAY subscript
+          value: 68
+          description: "array subscript expression"
+        - name: AST_MEMBER
+          value: 69
+          description: "struct/union member access"
+        - name: AST_CAST
+          value: 70
+          description: "type cast"
+        - name: AST_SIZEOF
+          value: 71
+          description: "sizeof expression"
+        - name: AST_COMMA
+          value: 72
+          description: "comma operator"
+        - name: AST_ASSIGN
+          value: 73
+          description: "assignment expression"
+    - name: Literals
+      kinds:
+        - name: AST_NUM
+          value: 80
+          description: "numeric literal (generic)"
+        - name: AST_STRING_LIT
+          value: 81
+          description: "string literal"
+        - name: AST_FLOAT_CONST
+          value: 82
+          description: "floating point constant"
+        - name: AST_FLOAT
+          value: 83
+          description: "float type"
+
+binary_operators:
+  description: "Operator codes stored in node data field"
+  operators:
+    - name: OP_ADD
+      value: 1
+      symbol: "+"
+    - name: OP_SUB
+      value: 2
+      symbol: "-"
+    - name: OP_MUL
+      value: 3
+      symbol: "*"
+    - name: OP_DIV
+      value: 4
+      symbol: "/"
+    - name: OP_MOD
+      value: 5
+      symbol: "%"
+    - name: OP_EQ
+      value: 6
+      symbol: "=="
+    - name: OP_NE
+      value: 7
+      symbol: "!="
+    - name: OP_LT
+      value: 8
+      symbol: "<"
+    - name: OP_GT
+      value: 9
+      symbol: ">"
+    - name: OP_LE
+      value: 10
+      symbol: "<="
+    - name: OP_GE
+      value: 11
+      symbol: ">="
+    - name: OP_AND
+      value: 12
+      symbol: "&&"
+    - name: OP_OR
+      value: 13
+      symbol: "||"
+    - name: OP_BITAND
+      value: 14
+      symbol: "&"
+    - name: OP_BITOR
+      value: 15
+      symbol: "|"
+    - name: OP_XOR
+      value: 16
+      symbol: "^"
+    - name: OP_SHL
+      value: 17
+      symbol: "<<"
+    - name: OP_SHR
+      value: 18
+      symbol: ">>"
+    - name: OP_ASSIGN
+      value: 19
+      symbol: "="
+
+unary_operators:
+  description: "Unary operator codes stored in node data field"
+  operators:
+    - name: OP_NEG
+      value: 1
+      symbol: "-"
+    - name: OP_NOT
+      value: 2
+      symbol: "!"
+    - name: OP_BITNOT
+      value: 3
+      symbol: "~"
+    - name: OP_ADDR
+      value: 4
+      symbol: "&"
+    - name: OP_DEREF
+      value: 5
+      symbol: "*"
