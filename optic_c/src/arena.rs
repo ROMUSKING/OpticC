@@ -96,6 +96,10 @@ impl Arena {
         Some(node)
     }
 
+    pub fn allocated(&self) -> u32 {
+        self.allocated
+    }
+
     pub fn get_mut(&mut self, offset: NodeOffset) -> Option<&mut CAstNode> {
         if offset.0 == 0 || offset.0 >= self.allocated {
             return None;
