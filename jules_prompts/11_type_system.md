@@ -84,6 +84,18 @@ M+ = structs (TypeId points to struct definition)
 ...
 ```
 
+## IMPLEMENTATION STATUS
+**Completed**: Full C99 type system with type resolution and checking.
+- **70 tests passing** (26 in mod.rs, 44 in resolve.rs)
+- **CType enum with 17 variants**: Void, Bool, Char, Short, Int, Long, LongLong, Float, Double, LongDouble, Pointer, Array, Struct, Union, Enum, Function, Typedef, Qualified
+- **TypeResolver** with binary/unary operator type checking, assignment compatibility, implicit conversions
+- **Struct layout computation** with automatic padding, alignment, and bit field support
+- **Type caching** via `type_cache: HashMap<TypeSignature, TypeId>` for deduplication
+- **Integer promotion** (char/short -> int) and **usual arithmetic conversions** implemented
+- **Pointer arithmetic** checking (pointer + int, pointer - pointer)
+- **Type qualifiers** (const, volatile, restrict) via bitflags
+- **inkwell dependency** made optional to allow testing without LLVM
+
 ## ACCEPTANCE CRITERIA
 1. Type resolver correctly identifies all primitive types in a C source file
 2. Struct/union member offsets are computed correctly (including padding/alignment)

@@ -51,6 +51,18 @@ OpticC currently has a working parser and LLVM backend but CANNOT compile real C
 - **Consumed by**: Parser (replaces internal lex())
 - **Uses**: redb for include deduplication, MacroExpander for macro expansion
 
+## IMPLEMENTATION STATUS
+**Completed**: ~2200 lines of Rust code implementing the full C99 preprocessor.
+- **22 tests passing** covering #include, #define, #ifdef, #if/#elif, #pragma, macro expansion, predefined macros
+- **Unified Token type** created in `preprocessor::Token` with `TokenKind` enum mapping to parser's expectations
+- **TokenKind mapping** to parser implemented via `From<preprocessor::Token> for parser::Token`
+- **redb integration** working for include deduplication (SHA-256 hashing of included file content)
+- **Two-phase design**: Phase 1 resolves #include and builds translation unit, Phase 2 expands macros and evaluates conditionals
+- **Include guard detection**: `#ifndef FOO_H` / `#define FOO_H` / `#endif` pattern recognized and cached
+- **Search paths**: `-I` include path support with current directory and system path defaults
+- **Token-based macro expansion**: Macros expand to token streams, not text, for correct `##` and `#` handling
+- **Predefined macros**: `__LINE__`, `__FILE__`, `__DATE__`, `__TIME__`, `__STDC__`, `__STDC_VERSION__` all implemented
+
 ## ACCEPTANCE CRITERIA
 1. Preprocessor can handle a file with 100+ `#include` directives without duplicates
 2. Conditional compilation correctly evaluates `#ifdef`/`#ifndef`/`#if`/`#elif` chains

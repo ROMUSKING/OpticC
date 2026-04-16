@@ -14,14 +14,19 @@ The LLVM backend is Phase 1 (COMPLETE) but is i32-only. Phase 2 requires major u
 - **Build system (`14_build_system.md`)**: The backend must output `.o` files (via `llc`) for linking, not just `.ll` files.
 
 ## CRITICAL TODO FOR PHASE 2
-1. **Replace i32-only with proper types**: Every `self.context.i32_type()` call must be replaced with type-aware code.
-2. **Struct/union lowering**: Generate LLVM struct types with correct field offsets and padding.
-3. **Pointer types**: Use `ptr_type()` for pointers, not `i32_type()`.
-4. **Float operations**: Use `f32_type()` and `f64_type()` with float-specific instructions.
-5. **64-bit integers**: Use `i64_type()` for `long long`.
-6. **Phi nodes**: Implement for ternary expressions and statement expressions.
-7. **LLVM attributes**: Set function attributes from `__attribute__` annotations.
-8. **Inline asm**: Use `inkwell::values::InlineAsm::get()` for asm blocks.
+### COMPLETED
+- [x] **Replace i32-only with proper types**: Type-aware code generation implemented. Backend now has `with_types()` constructor accepting `&TypeSystem` and `to_llvm_type()` method for CType -> LLVM type conversion.
+- [x] **Float operations**: f32_type() and f64_type() with float-specific instructions (fadd, fsub, fmul, fdiv, fcmp) implemented.
+- [x] **64-bit integers**: i64_type() for `long long` and `unsigned long long` implemented.
+- [x] **Pointer types**: ptr_type() used for pointers instead of i32_type().
+- [x] **13 new backend tests passing** covering typed code generation for i8/i16/i32/i64/f32/f64/pointers.
+- [x] **Fallback to i32**: When no type system provided, backend falls back to i32 (backward compatible).
+
+### REMAINING
+- [ ] **Struct field access via GEP**: Generate LLVM struct types with correct field offsets and use getelementptr for field access.
+- [ ] **Phi nodes for ternary**: Ternary expressions currently evaluate both branches. Proper SSA form requires phi nodes.
+- [ ] **LLVM attributes from __attribute__**: Set function attributes (noreturn, noalias, etc.) from `__attribute__` annotations.
+- [ ] **Inline asm**: Use `inkwell::values::InlineAsm::get()` for asm blocks (depends on `13_inline_asm.md`).
 - **inkwell 0.9 API changes**: The pass manager API changed in inkwell 0.9. The `optimize()` method had to be stubbed out as a no-op. Check the inkwell changelog for the new optimization API.
 - **All types as i32**: The current implementation treats all values as i32. This works for integer arithmetic but is incorrect for pointers, floats, and structs. Proper type propagation from the parser is needed.
 - **External function declarations**: When a function is called but not defined, auto-declare it with a variadic i32 signature. This works for simple cases but is incorrect for functions like `printf`.

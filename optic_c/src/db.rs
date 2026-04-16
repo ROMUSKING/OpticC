@@ -1,4 +1,4 @@
-use redb::{Database, ReadableDatabase, ReadableTable, TableDefinition};
+use redb::{Database, ReadableDatabase, ReadableTable, ReadableTableMetadata, TableDefinition};
 use std::path::Path;
 
 const FILE_HASHES_TABLE: TableDefinition<&[u8; 32], &str> = TableDefinition::new("file_hashes");
@@ -12,6 +12,7 @@ pub enum DbError {
     Table(redb::TableError),
     Storage(redb::StorageError),
     Commit(redb::CommitError),
+    Database(redb::DatabaseError),
 }
 
 impl From<redb::Error> for DbError {
@@ -50,6 +51,12 @@ impl From<redb::CommitError> for DbError {
     }
 }
 
+impl From<redb::DatabaseError> for DbError {
+    fn from(err: redb::DatabaseError) -> Self {
+        DbError::Database(err)
+    }
+}
+
 impl std::fmt::Display for DbError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -59,6 +66,7 @@ impl std::fmt::Display for DbError {
             DbError::Table(e) => write!(f, "table error: {}", e),
             DbError::Storage(e) => write!(f, "storage error: {}", e),
             DbError::Commit(e) => write!(f, "commit error: {}", e),
+            DbError::Database(e) => write!(f, "database error: {}", e),
         }
     }
 }
@@ -131,20 +139,28 @@ impl OpticDb {
         let write_txn = self.db.begin_write().map_err(DbError::from)?;
         let old_value = {
             let mut table = write_txn.open_table(FILE_HASHES_TABLE).map_err(DbError::from)?;
-            table.remove(hash).map_err(DbError::from)?
+            if let Some(g) = table.remove(hash).map_err(DbError::from)? {
+                Some(g.value().to_string())
+            } else {
+                None
+            }
         };
         write_txn.commit().map_err(DbError::from)?;
-        Ok(old_value.map(|g| g.value().to_string()))
+        Ok(old_value)
     }
 
     pub fn remove_macro(&self, name: &str) -> Result<Option<String>> {
         let write_txn = self.db.begin_write().map_err(DbError::from)?;
         let old_value = {
             let mut table = write_txn.open_table(MACROS_TABLE).map_err(DbError::from)?;
-            table.remove(name).map_err(DbError::from)?
+            if let Some(g) = table.remove(name).map_err(DbError::from)? {
+                Some(g.value().to_string())
+            } else {
+                None
+            }
         };
         write_txn.commit().map_err(DbError::from)?;
-        Ok(old_value.map(|g| g.value().to_string()))
+        Ok(old_value)
     }
 
     pub fn file_hash_count(&self) -> Result<u64> {
