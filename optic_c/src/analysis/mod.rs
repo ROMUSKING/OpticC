@@ -1,3 +1,3 @@
 pub mod alias;
 
-pub use alias::AliasAnalysis;
+pub use alias::AliasAnalyzer;

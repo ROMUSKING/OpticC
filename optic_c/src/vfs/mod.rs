@@ -1,5 +1,5 @@
 use crate::arena::{Arena, CAstNode, NodeOffset, NodeFlags};
-use crate::analysis::alias::AliasAnalysis;
+use crate::analysis::alias::AliasAnalyzer;
 use std::path::Path;
 use std::sync::{Arc, Mutex, RwLock};
 use fuser::{Filesystem, FileAttr, FileType, FileHandle, OpenFlags, FopenFlags, Errno};
@@ -8,9 +8,9 @@ use std::collections::HashMap;
 
 const FUSE_ROOT_ID: u64 = 1;
 
-pub struct Vfs {
+pub struct Vfs<'a> {
     arena: Arc<Arena>,
-    analysis: Arc<AliasAnalysis>,
+    analysis: Arc<AliasAnalyzer<'a>>,
     mount_path: String,
     file_nodes: RwLock<HashMap<u64, VfsNode>>,
     next_inode: Mutex<u64>,
@@ -26,8 +26,8 @@ struct VfsNode {
     parent: u64,
 }
 
-impl Vfs {
-    pub fn new(arena: Arc<Arena>, analysis: Arc<AliasAnalysis>, mount_path: &str) -> Self {
+impl<'a> Vfs<'a> {
+    pub fn new(arena: Arc<Arena>, analysis: Arc<AliasAnalyzer<'a>>, mount_path: &str) -> Self {
         let vfs = Self {
             arena,
             analysis,
@@ -160,7 +160,7 @@ impl Vfs {
 
     fn get_node_name(&self, node: &CAstNode) -> String {
         if node.data != 0 {
-            if let Some(str_ptr) = self.arena.get_string(node.data) {
+            if let Some(str_ptr) = self.arena.get_string(NodeOffset(node.data)) {
                 return str_ptr.to_string();
             }
         }
@@ -275,7 +275,7 @@ impl Vfs {
     }
 }
 
-impl Filesystem for Vfs {
+impl<'a> Filesystem for Vfs<'a> {
     fn lookup(&self, _req: &fuser::Request, parent: fuser::INodeNo, name: &std::ffi::OsStr, reply: fuser::ReplyEntry) {
         let name_str = name.to_str().unwrap_or("");
         

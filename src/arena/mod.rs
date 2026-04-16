@@ -32,6 +32,13 @@ pub struct Arena {
 
 impl Arena {
     pub fn new<P: AsRef<Path>>(path: P, capacity: usize) -> std::io::Result<Self> {
+        if capacity == 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "Capacity must be greater than 0",
+            ));
+        }
+
         let file = OpenOptions::new()
             .read(true).write(true).create(true)
             .open(path)?;
@@ -79,7 +86,48 @@ impl Arena {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::env;
+    use std::fs;
     use tempfile::NamedTempFile;
+
+    #[test]
+    fn test_arena_new_success() {
+        let mut temp_path = env::temp_dir();
+        temp_path.push("test_arena_new_success.bin");
+
+        // Ensure clean state
+        let _ = fs::remove_file(&temp_path);
+
+        let arena = Arena::new(&temp_path, 1024).expect("Failed to create Arena");
+        assert_eq!(arena.len, 0);
+        assert_eq!(arena.mmap.len(), 1024);
+
+        // Clean up
+        drop(arena);
+        let _ = fs::remove_file(&temp_path);
+    }
+
+    #[test]
+    fn test_arena_new_invalid_path() {
+        let path = "/this/path/does/not/exist/arena_test.bin";
+        let result = Arena::new(path, 1024);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_arena_new_zero_capacity() {
+        let mut temp_path = env::temp_dir();
+        temp_path.push("test_arena_new_zero_capacity.bin");
+
+        // Ensure clean state
+        let _ = fs::remove_file(&temp_path);
+
+        let result = Arena::new(&temp_path, 0);
+        assert!(result.is_err());
+
+        // Clean up
+        let _ = fs::remove_file(&temp_path);
+    }
 
     #[test]
     fn test_arena_alloc_and_get() {

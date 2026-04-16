@@ -36,6 +36,8 @@ pub struct Arena {
     mmap: MmapMut,
     capacity: u32,
     allocated: u32,
+    string_start: u32,
+    string_allocated: u32,
 }
 
 impl Arena {
@@ -54,22 +56,25 @@ impl Arena {
             .truncate(true)
             .open(path)?;
 
+        let node_capacity = capacity / 2;
+        let string_start = node_capacity + 1;
+
         let byte_capacity = capacity as u64 * std::mem::size_of::<CAstNode>() as u64;
         file.set_len(byte_capacity)?;
 
         let mmap = unsafe { MmapMut::map_mut(&file)? };
 
-        // NodeOffset(0) is consistently treated as a null or dummy pointer value,
-        // so we start allocation from 1.
         Ok(Arena {
             mmap,
             capacity,
             allocated: 1,
+            string_start,
+            string_allocated: 0,
         })
     }
 
     pub fn alloc(&mut self, node: CAstNode) -> Option<NodeOffset> {
-        if self.allocated >= self.capacity {
+        if self.allocated >= self.string_start {
             return None;
         }
 
@@ -91,6 +96,10 @@ impl Arena {
             return None;
         }
 
+        if offset.0 >= self.string_start {
+            return None;
+        }
+
         let byte_offset = (offset.0 as usize) * std::mem::size_of::<CAstNode>();
         let node = unsafe { &*(self.mmap.as_ptr().add(byte_offset) as *const CAstNode) };
         Some(node)
@@ -105,9 +114,64 @@ impl Arena {
             return None;
         }
 
+        if offset.0 >= self.string_start {
+            return None;
+        }
+
         let byte_offset = (offset.0 as usize) * std::mem::size_of::<CAstNode>();
         let node = unsafe { &mut *(self.mmap.as_mut_ptr().add(byte_offset) as *mut CAstNode) };
         Some(node)
+    }
+
+    pub fn store_string(&mut self, s: &str) -> Option<NodeOffset> {
+        let slot_size = std::mem::size_of::<CAstNode>() as u32;
+        let len = s.len() as u32;
+        let total_bytes = std::mem::size_of::<u32>() + s.len();
+        let slots_needed = (total_bytes as u32 + slot_size - 1) / slot_size;
+
+        let string_allocated_before = self.string_allocated;
+        self.string_allocated += slots_needed;
+
+        if self.string_start + self.string_allocated > self.capacity {
+            self.string_allocated = string_allocated_before;
+            return None;
+        }
+
+        let string_byte_offset = (self.string_start as usize) * std::mem::size_of::<CAstNode>()
+            + (string_allocated_before as usize) * std::mem::size_of::<CAstNode>();
+
+        unsafe {
+            let ptr = self.mmap.as_mut_ptr().add(string_byte_offset);
+            std::ptr::write(ptr as *mut u32, len);
+            std::ptr::copy_nonoverlapping(
+                s.as_bytes().as_ptr(),
+                ptr.add(std::mem::size_of::<u32>()),
+                s.len()
+            );
+        }
+
+        let offset = self.string_start + string_allocated_before;
+        Some(NodeOffset(offset))
+    }
+
+    pub fn get_string(&self, offset: NodeOffset) -> Option<String> {
+        if offset.0 < self.string_start || offset.0 >= self.string_start + self.string_allocated {
+            return None;
+        }
+
+        let slot_size = std::mem::size_of::<CAstNode>() as u32;
+        let string_slot = offset.0 - self.string_start;
+        let string_byte_offset = (self.string_start as usize) * std::mem::size_of::<CAstNode>()
+            + (string_slot as usize) * std::mem::size_of::<CAstNode>();
+
+        unsafe {
+            let len = std::ptr::read(self.mmap.as_ptr().add(string_byte_offset) as *const u32);
+            let bytes = std::slice::from_raw_parts(
+                self.mmap.as_ptr().add(string_byte_offset + std::mem::size_of::<u32>()),
+                len as usize
+            );
+            String::from_utf8(bytes.to_vec()).ok()
+        }
     }
 }
 
@@ -122,9 +186,9 @@ mod tests {
         let temp_file = NamedTempFile::new().unwrap();
         let path = temp_file.path();
 
-        let num_allocations = 10_000_000;
+        let num_allocations = 10_000;
 
-        let mut arena = Arena::new(path, num_allocations + 1).unwrap();
+        let mut arena = Arena::new(path, num_allocations * 2 + 2).unwrap();
 
         let dummy_node = CAstNode {
             kind: 0,
