@@ -534,7 +534,7 @@ pub fn compile(&mut self, arena: &Arena, root: NodeOffset) -> Result<(), Backend
 
     fn lower_binop(&mut self, arena: &Arena, node: &CAstNode) -> Result<Option<BasicValueEnum<'ctx>>, BackendError> {
         let lhs_offset = node.first_child;
-        let rhs_offset = if let Some(c) = arena.get(lhs_offset) { c.next_sibling } else { NodeOffset::NULL };
+        let rhs_offset = node.next_sibling;  // RHS is stored as next_sibling of BINOP node
 
         eprintln!("lower_binop: node.data={} lhs_offset={:?} rhs_offset={:?}", node.data, lhs_offset, rhs_offset);
         let lhs_val = self.lower_expr(arena, lhs_offset)?
@@ -745,7 +745,7 @@ pub fn compile(&mut self, arena: &Arena, root: NodeOffset) -> Result<(), Backend
 
     fn lower_assign_expr(&mut self, arena: &Arena, node: &CAstNode) -> Result<Option<BasicValueEnum<'ctx>>, BackendError> {
         let lhs_offset = node.first_child;
-        let rhs_offset = if let Some(c) = arena.get(lhs_offset) { c.next_sibling } else { NodeOffset::NULL };
+        let rhs_offset = node.next_sibling;  // RHS is stored as next_sibling of ASSIGN node
 
         let rhs_val = self.lower_expr(arena, rhs_offset)?
             .ok_or(BackendError::InvalidNode)?;
