@@ -1,0 +1,224 @@
+api_version: "1.0"
+squad: "backend_llvm"
+domain: "LLVM Lowering"
+
+semantic_description: >
+  The Backend LLVM module lowers the AST (stored in the mmap arena) into LLVM IR
+  using the inkwell crate (Rust bindings for LLVM). It traverses the AST node tree
+  via parent/child/sibling offsets and generates corresponding LLVM IR instructions.
+  The backend handles: function declarations and definitions, variable declarations
+  with initializers, all control flow (if/else, while, for, return), the full
+  expression grammar (binary/unary operations, function calls, casts, sizeof,
+  comma expressions, assignments), and identifier resolution. It maintains a
+  symbol table (HashMap) mapping variable names to LLVM alloca pointers and
+  function names to LLVM FunctionValue handles. Vectorization hints can be
+  applied via the VectorizationHints struct. The backend supports external
+  function declarations for libc calls (printf, malloc, etc.) that are not
+  defined in the source.
+
+memory_layout: |
+  LlvmBackend struct:
+    - context: &'ctx Context (LLVM context, borrowed)
+    - module: Module<'ctx> (LLVM module, owned)
+    - builder: Builder<'ctx> (LLVM IR builder, owned)
+    - variables: HashMap<String, PointerValue<'ctx>> (local variable symbol table)
+    - functions: HashMap<String, FunctionValue<'ctx>> (function symbol table)
+    - vectorization_hints: VectorizationHints
+
+  VectorizationHints:
+    - loop_vectorize: bool
+    - vector_width: u32
+
+  Node Kind Mapping (backend's view of AST):
+    1..=9   = Type specifiers (skipped during lowering)
+    20      = AST_DECL (external declaration)
+    21      = AST_VAR_DECL (variable declaration)
+    22      = AST_FUNC_DECL (function declaration)
+    23      = AST_FUNC_DEF (function definition)
+    24      = AST_PARAM (function parameter)
+    40      = AST_COMPOUND (block statement)
+    41      = AST_IF (conditional)
+    42      = AST_WHILE (while loop)
+    43      = AST_FOR (for loop)
+    44      = AST_RETURN (return statement)
+    45      = AST_EXPR_STMT (expression statement)
+    46      = AST_BREAK
+    47      = AST_CONTINUE
+    48      = AST_EMPTY
+    60      = AST_IDENT (identifier)
+    61      = AST_INT_CONST
+    62      = AST_CHAR_CONST
+    63/81   = AST_STRING
+    64      = AST_BINOP (binary operator)
+    65      = AST_UNOP (unary operator)
+    66      = AST_COND (ternary)
+    67      = AST_CALL (function call)
+    70      = AST_CAST (type cast)
+    71      = AST_SIZEOF
+    72      = AST_COMMA (comma expression)
+    73      = AST_ASSIGN (assignment)
+    80      = AST_NUM (numeric literal)
+    82      = AST_FLOAT_CONST
+    83      = float type specifier
+    90..=94 = Type qualifiers/function specifiers (skipped)
+    101..=105 = Storage class specifiers (skipped)
+
+  Binary Operator Codes (node.data):
+    1=add  2=sub  3=mul  4=sdiv  5=srem  6=eq  7=ne  8=slt  9=sgt
+    10=sle 11=sge 12=and 13=or   14=and  15=or  16=xor 17=shl 18=ashr
+    19=store (assignment)
+
+  Unary Operator Codes (node.data):
+    0=plus  1=neg  2=lnot  3=bitnot  4=addr  5=deref
+
+side_effects:
+  - "LlvmBackend::new() creates a new LLVM module and builder"
+  - "compile() traverses the AST and generates LLVM IR into the module"
+  - "lower_func_def() creates LLVM basic blocks (entry, then, else, merge, while.cond, etc.)"
+  - "lower_var_decl() allocates stack space via build_alloca()"
+  - "lower_expr() generates LLVM instructions for expressions"
+  - "External functions are auto-declared when called but not previously defined"
+  - "optimize() is a no-op (pass manager API changed in inkwell 0.9)"
+  - "dump_ir() returns the LLVM IR as a string"
+  - "verify() checks the module for LLVM validation errors"
+
+llm_usage_examples:
+  - name: "Create backend and compile"
+    description: "Lower an AST to LLVM IR"
+    code: |
+      use inkwell::context::Context;
+      use optic_c::arena::{Arena, NodeOffset};
+      use optic_c::backend::llvm::{LlvmBackend, BackendError};
+
+      let context = Context::create();
+      let mut backend = LlvmBackend::new(&context, "my_module");
+
+      // arena and root come from the parser
+      backend.compile(&arena, root)?;
+
+      // Get the generated IR
+      let ir = backend.dump_ir();
+      println!("{}", ir);
+
+  - name: "Verify and optimize"
+    description: "Verify the generated IR and apply optimizations"
+    code: |
+      use inkwell::context::Context;
+      use optic_c::backend::llvm::LlvmBackend;
+
+      let context = Context::create();
+      let mut backend = LlvmBackend::new(&context, "my_module");
+
+      backend.compile(&arena, root)?;
+
+      // Verify the module
+      match backend.verify() {
+          Ok(()) => println!("IR is valid"),
+          Err(e) => eprintln!("IR validation failed: {}", e),
+      }
+
+      // Apply optimizations (currently no-op in inkwell 0.9)
+      backend.optimize(2)?;
+
+  - name: "Set vectorization hints"
+    description: "Configure vectorization hints before compilation"
+    code: |
+      use optic_c::backend::llvm::{LlvmBackend, VectorizationHints};
+
+      let mut backend = LlvmBackend::new(&context, "vectorized");
+      backend.set_vectorization_hints(VectorizationHints {
+          loop_vectorize: true,
+          vector_width: 4,
+      });
+      backend.compile(&arena, root)?;
+
+  - name: "Handle compilation errors"
+    description: "Handle BackendError variants"
+    code: |
+      use optic_c::backend::llvm::BackendError;
+
+      match backend.compile(&arena, root) {
+          Ok(()) => println!("Compilation successful"),
+          Err(BackendError::UnknownNodeKind(k)) => {
+              eprintln!("Unsupported AST node kind: {}", k);
+          }
+          Err(BackendError::InvalidNode) => {
+              eprintln!("Invalid AST node encountered");
+          }
+          Err(BackendError::UndefinedVariable(name)) => {
+              eprintln!("Variable '{}' not in scope", name);
+          }
+          Err(BackendError::UndefinedFunction(name)) => {
+              eprintln!("Function '{}' not declared", name);
+          }
+          Err(BackendError::InvalidOperator(op)) => {
+              eprintln!("Unsupported operator code: {}", op);
+          }
+          Err(BackendError::VerificationFailed(msg)) => {
+              eprintln!("LLVM verification failed:\n{}", msg);
+          }
+          Err(BackendError::IoError(msg)) => {
+              eprintln!("I/O error: {}", msg);
+          }
+      }
+
+api_reference:
+  types:
+    LlvmBackend:
+      description: "LLVM IR code generator using inkwell"
+      lifetime: "'ctx"
+      fields:
+        - "context: &'ctx Context"
+        - "module: Module<'ctx>"
+        - "builder: Builder<'ctx>"
+        - "variables: HashMap<String, PointerValue<'ctx>>"
+        - "functions: HashMap<String, FunctionValue<'ctx>>"
+        - "vectorization_hints: VectorizationHints"
+      methods:
+        - "new(context: &'ctx Context, module_name: &str) -> Self"
+        - "compile(&mut self, arena: &Arena, root: NodeOffset) -> Result<(), BackendError>"
+        - "module(&self) -> &Module<'ctx>"
+        - "set_vectorization_hints(&mut self, hints: VectorizationHints)"
+        - "dump_ir(&self) -> String"
+        - "verify(&self) -> Result<(), BackendError>"
+        - "optimize(&self, opt_level: u32) -> Result<(), BackendError>"
+
+    VectorizationHints:
+      description: "Hints for LLVM vectorization passes"
+      fields:
+        - "loop_vectorize: bool"
+        - "vector_width: u32"
+
+    BackendError:
+      description: "Error type for backend operations"
+      variants:
+        - "UnknownNodeKind(u16)"
+        - "InvalidNode"
+        - "UndefinedVariable(String)"
+        - "UndefinedFunction(String)"
+        - "InvalidOperator(u32)"
+        - "VerificationFailed(String)"
+        - "IoError(String)"
+      implements:
+        - "std::fmt::Display"
+        - "std::error::Error"
+
+  lowering_pipeline:
+    - "lower_translation_unit: Walk top-level declarations"
+    - "lower_decl: Process external declarations"
+    - "lower_var_decl: Allocate stack space, store initializers"
+    - "lower_func_decl: Declare external functions"
+    - "lower_func_def: Create function, allocate params, lower body"
+    - "lower_compound: Lower block of statements"
+    - "lower_stmt: Dispatch to statement-specific lowerers"
+    - "lower_expr: Dispatch to expression-specific lowerers"
+
+  known_limitations:
+    - "All types are lowered as i32 (no proper type inference)"
+    - "External function declarations use variadic i32 signature"
+    - "Ternary expressions do not use phi nodes (evaluates both branches)"
+    - "break/continue are no-ops (no loop exit tracking)"
+    - "switch statements are no-ops"
+    - "optimize() is a no-op due to inkwell 0.9 API changes"
+    - "No support for floating point operations beyond const generation"
+    - "No support for struct/union types in LLVM IR"

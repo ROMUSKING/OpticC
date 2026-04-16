@@ -1,46 +1,168 @@
-# Database (DB) Infrastructure Specification
+api_version: "1.0"
+squad: "db_infra"
+domain: "Embedded KV-Store (redb)"
 
-## Overview
-The DB provides persistent key-value storage using redb (embedded database) for include deduplication and symbol tracking.
+semantic_description: >
+  The OpticDb provides persistent key-value storage using redb (embedded database)
+  for header deduplication and macro definition tracking. It wraps a redb Database
+  with typed table definitions for file hashes and macros. The file_hashes table
+  maps SHA-256 hashes ([u8; 32]) to file paths (&str), enabling #include
+  deduplication by checking if a header has already been processed. The macros
+  table maps macro names (&str) to their definitions/expansions (&str), allowing
+  the frontend to track and retrieve macro definitions during preprocessing.
+  All operations use redb's transactional API with proper commit semantics,
+  ensuring ACID guarantees. The database is created or opened via OpticDb::new()
+  which initializes both tables if they don't exist.
 
-## Data Structures
+memory_layout: |
+  +------------------+------------------------------------------+
+  | Table            | Key Type          | Value Type             |
+  +------------------+------------------------------------------+
+  | file_hashes      | &[u8; 32]         | &str (file path)       |
+  | macros           | &str (macro name) | &str (macro definition)|
+  +------------------+------------------------------------------+
 
-### OpticDb
-Main database wrapper managing the redb database.
+  redb internal structure (copy-on-write B-tree):
+    - Data stored in sorted B-tree pages
+    - MVCC: concurrent readers don't block writers
+    - Crash-safe: write-ahead logging with atomic commit
+    - Zero-copy reads via AccessGuard (memory-mapped access)
 
-## DB API
+  Storage characteristics:
+    - Key: [u8; 32] = 32 bytes (SHA-256 hash)
+    - Key: &str = variable length (macro name, typically < 64 bytes)
+    - Value: &str = variable length (file path or macro definition)
+    - B-tree overhead: ~4KB per page, logarithmic lookup
 
-### Construction
-```
-OpticDb::new(path: &str) -> Result<Self, redb::Error>
-```
-Creates or opens a database at the specified path.
+side_effects:
+  - "Creates the database file on OpticDb::new() if it doesn't exist"
+  - "Creates file_hashes and macros tables on first open"
+  - "insert_file_hash() opens a write transaction and commits"
+  - "insert_macro() opens a write transaction and commits"
+  - "remove_file_hash() opens a write transaction and commits"
+  - "remove_macro() opens a write transaction and commits"
+  - "Read operations (get_*, contains_*) use read-only transactions (MVCC)"
+  - "Database file persists across process restarts"
+  - "No explicit close needed; Database drops cleanly"
 
-### Include Deduplication
-```
-check_include(hash: &[u8; 32]) -> Result<Option<u32>, redb::Error>
-record_include(hash: &[u8; 32], offset: u32) -> Result<(), redb::Error>
-```
-- `check_include`: Looks up if an include has been processed before. Returns the stored offset if found.
-- `record_include`: Records a new include with its associated AST node offset.
+llm_usage_examples:
+  - name: "Include deduplication"
+    description: "Check if a header file has already been processed before parsing"
+    code: |
+      use optic_c::db::{OpticDb, DbError};
+      use sha2::{Sha256, Digest};
 
-### Symbol Management (Future)
-```
-SYMBOLS_TABLE: TableDefinition<&str, u32>
-```
-Stores symbol name to definition offset mappings.
+      let db = OpticDb::new("/tmp/ocf_db.redb")?;
 
-## Storage Tables
+      let content = std::fs::read("/usr/include/stdio.h")?;
+      let hash: [u8; 32] = Sha256::digest(&content).into();
 
-### includes
-- Key: `[u8; 32]` (SHA-256 hash of include path/content)
-- Value: `u32` (AST node offset)
+      if db.contains_file_hash(&hash)? {
+          println!("Already processed stdio.h, skipping");
+      } else {
+          db.insert_file_hash(&hash, "/usr/include/stdio.h")?;
+          println!("Processing stdio.h for the first time");
+      }
 
-### symbols
-- Key: `&str` (symbol name)
-- Value: `u32` (definition offset)
+  - name: "Macro tracking"
+    description: "Store and retrieve macro definitions during preprocessing"
+    code: |
+      use optic_c::db::{OpticDb, DbError};
 
-## Usage Pattern
-1. Create/open db with `OpticDb::new(path)`
-2. Before processing `#include`, check `check_include(hash)` to avoid duplicates
-3. After processing, record with `record_include(hash, offset)`
+      let db = OpticDb::new("/tmp/ocf_db.redb")?;
+
+      // Store macro definitions encountered during preprocessing
+      db.insert_macro("MAX", "(a > b ? a : b)")?;
+      db.insert_macro("MIN", "(a < b ? a : b)")?;
+      db.insert_macro("PI", "3.14159265358979")?;
+
+      // Later, retrieve macro expansion when needed
+      if let Some(expansion) = db.get_macro("MAX")? {
+          println!("MAX expands to: {}", expansion);
+      }
+
+  - name: "Lookup by hash"
+    description: "Resolve a file hash back to its original path"
+    code: |
+      use optic_c::db::{OpticDb, DbError};
+
+      let db = OpticDb::new("/tmp/ocf_db.redb")?;
+
+      let hash = [0xAB; 32];
+      match db.get_file_path_by_hash(&hash)? {
+          Some(path) => println!("Hash corresponds to: {}", path),
+          None => println!("Hash not found in database"),
+      }
+
+  - name: "Database statistics"
+    description: "Monitor the number of tracked files and macros"
+    code: |
+      use optic_c::db::{OpticDb, DbError};
+
+      let db = OpticDb::new("/tmp/ocf_db.redb")?;
+
+      println!("Tracked files: {}", db.file_hash_count()?);
+      println!("Tracked macros: {}", db.macro_count()?);
+
+  - name: "Cleanup entries"
+    description: "Remove entries when files are no longer needed"
+    code: |
+      use optic_c::db::{OpticDb, DbError};
+
+      let db = OpticDb::new("/tmp/ocf_db.redb")?;
+
+      // Remove a file hash entry
+      if let Some(old_path) = db.remove_file_hash(&hash)? {
+          println!("Removed entry for: {}", old_path);
+      }
+
+      // Undefine a macro (#undef)
+      if let Some(old_def) = db.remove_macro("TEMP_MACRO")? {
+          println!("Undefine: was defined as '{}'", old_def);
+      }
+
+api_reference:
+  types:
+    DbError:
+      description: "Error type for database operations"
+      variants:
+        - "Redb(redb::Error)"
+        - "Io(std::io::Error)"
+      implements:
+        - "std::fmt::Display"
+        - "std::error::Error"
+        - "From<redb::Error>"
+        - "From<std::io::Error>"
+
+    Result<T>:
+      description: "Type alias for Result<T, DbError>"
+      definition: "std::result::Result<T, DbError>"
+
+    OpticDb:
+      description: "Main database wrapper managing the redb database for file deduplication and macro tracking"
+      fields:
+        - "db: Database (internal redb database handle)"
+      methods:
+        - "new<P: AsRef<Path>>(path: P) -> Result<Self> - Creates or opens a database at the specified path, initializing tables"
+        - "insert_file_hash(&self, hash: &[u8; 32], file_path: &str) -> Result<()> - Stores a file hash to path mapping"
+        - "get_file_path_by_hash(&self, hash: &[u8; 32]) -> Result<Option<String>> - Retrieves the file path for a given hash"
+        - "contains_file_hash(&self, hash: &[u8; 32]) -> Result<bool> - Checks if a hash exists in the database"
+        - "insert_macro(&self, name: &str, definition: &str) -> Result<()> - Stores a macro name to definition mapping"
+        - "get_macro(&self, name: &str) -> Result<Option<String>> - Retrieves the definition for a given macro name"
+        - "remove_file_hash(&self, hash: &[u8; 32]) -> Result<Option<String>> - Removes a file hash entry, returns old path if existed"
+        - "remove_macro(&self, name: &str) -> Result<Option<String>> - Removes a macro entry, returns old definition if existed"
+        - "file_hash_count(&self) -> Result<u64> - Returns the number of entries in the file_hashes table"
+        - "macro_count(&self) -> Result<u64> - Returns the number of entries in the macros table"
+
+  tables:
+    file_hashes:
+      description: "Maps SHA-256 content hashes to file paths for #include deduplication"
+      key_type: "&[u8; 32]"
+      value_type: "&str"
+      definition: "TableDefinition<&[u8; 32], &str> = TableDefinition::new(\"file_hashes\")"
+
+    macros:
+      description: "Maps macro names to their definitions/expansions for preprocessing tracking"
+      key_type: "&str"
+      value_type: "&str"
+      definition: "TableDefinition<&str, &str> = TableDefinition::new(\"macros\")"

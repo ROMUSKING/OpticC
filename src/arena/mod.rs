@@ -3,7 +3,7 @@ use std::fs::OpenOptions;
 use std::path::Path;
 
 #[repr(C)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct NodeOffset(pub u32);
 
 bitflags::bitflags! {
@@ -46,7 +46,8 @@ impl Arena {
         file.set_len(capacity as u64)?;
         let mmap = unsafe { MmapMut::map_mut(&file)? };
         
-        Ok(Self { mmap, len: 0 })
+        let node_size = std::mem::size_of::<CAstNode>();
+        Ok(Self { mmap, len: node_size })
     }
 
     #[inline(always)]
@@ -99,7 +100,8 @@ mod tests {
         let _ = fs::remove_file(&temp_path);
 
         let arena = Arena::new(&temp_path, 1024).expect("Failed to create Arena");
-        assert_eq!(arena.len, 0);
+        let node_size = std::mem::size_of::<CAstNode>();
+        assert_eq!(arena.len, node_size);
         assert_eq!(arena.mmap.len(), 1024);
 
         // Clean up
@@ -144,8 +146,9 @@ mod tests {
             data_offset: 10,
         };
 
+        let node_size = std::mem::size_of::<CAstNode>();
         let offset1 = arena.alloc(node1);
-        assert_eq!(offset1, NodeOffset(0));
+        assert_eq!(offset1, NodeOffset(node_size as u32));
 
         let node2 = CAstNode {
             kind: 2,
@@ -156,7 +159,7 @@ mod tests {
         };
 
         let offset2 = arena.alloc(node2);
-        assert_eq!(offset2.0 as usize, std::mem::size_of::<CAstNode>());
+        assert_eq!(offset2.0 as usize, node_size * 2);
 
         let retrieved_node1 = arena.get(offset1);
         assert_eq!(retrieved_node1.kind, 1);

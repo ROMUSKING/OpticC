@@ -89,16 +89,7 @@ impl<'a> AliasAnalyzer<'a> {
         }
         visited.insert(node.0);
 
-        let ast_node = match self.arena.get(node) {
-            Some(n) => n,
-            None => {
-                return PointerProvenance {
-                    source: node,
-                    provenance: vec![],
-                    is_noalias: true,
-                };
-            }
-        };
+        let ast_node = self.arena.get(node);
 
         let mut provenance = vec![node.0];
 
@@ -110,7 +101,10 @@ impl<'a> AliasAnalyzer<'a> {
                 }
             }
             AST_VAR_DECL => {
-                provenance.push(node.0);
+                if ast_node.left_child.0 != 0 {
+                    let child_provenance = self.trace_provenance(ast_node.left_child, visited);
+                    provenance.extend(child_provenance.provenance);
+                }
             }
             AST_PTR => {
                 if ast_node.left_child.0 != 0 {
@@ -119,19 +113,19 @@ impl<'a> AliasAnalyzer<'a> {
                 }
             }
             AST_UNOP => {
-                if ast_node.data == OP_ADDR && ast_node.left_child.0 != 0 {
+                if ast_node.data_offset == OP_ADDR && ast_node.left_child.0 != 0 {
                     let child_provenance = self.trace_provenance(ast_node.left_child, visited);
                     provenance.extend(child_provenance.provenance);
-                } else if ast_node.data == OP_DEREF && ast_node.left_child.0 != 0 {
+                } else if ast_node.data_offset == OP_DEREF && ast_node.left_child.0 != 0 {
                     let child_provenance = self.trace_provenance(ast_node.left_child, visited);
                     provenance.extend(child_provenance.provenance);
                 }
             }
             AST_IDENT | AST_MEMBER => {
-                provenance.push(node.0);
+                // Node already added to provenance at start
             }
             AST_CALL => {
-                provenance.push(node.0);
+                // Node already added to provenance at start
             }
             _ => {}
         }
@@ -141,10 +135,11 @@ impl<'a> AliasAnalyzer<'a> {
             provenance.extend(sibling_provenance.provenance);
         }
 
+        let is_noalias = provenance.len() <= 1;
         PointerProvenance {
             source: node,
             provenance,
-            is_noalias: provenance.len() <= 1,
+            is_noalias,
         }
     }
 
@@ -204,12 +199,9 @@ impl<'a> AliasAnalyzer<'a> {
     }
 
     pub fn analyze_dereference(&mut self, deref_node: NodeOffset) {
-        let ast_node = match self.arena.get(deref_node) {
-            Some(n) => n,
-            None => return,
-        };
+        let ast_node = self.arena.get(deref_node);
 
-        if ast_node.kind == AST_UNOP && ast_node.data == OP_DEREF {
+        if ast_node.kind == AST_UNOP && ast_node.data_offset == OP_DEREF {
             if let Some(deref_child) = self.get_child(ast_node.left_child) {
                 let taint = self.check_taint(deref_child);
                 if let TaintState::Tainted { source } = taint {
@@ -245,10 +237,7 @@ impl<'a> AliasAnalyzer<'a> {
     }
 
     pub fn analyze_return(&mut self, return_node: NodeOffset) {
-        let ast_node = match self.arena.get(return_node) {
-            Some(n) => n,
-            None => return,
-        };
+        let ast_node = self.arena.get(return_node);
 
         if ast_node.kind == AST_RETURN {
             if ast_node.left_child.0 != 0 {
@@ -263,10 +252,7 @@ impl<'a> AliasAnalyzer<'a> {
     }
 
     pub fn analyze_function_exit(&mut self, func_node: NodeOffset) {
-        let ast_node = match self.arena.get(func_node) {
-            Some(n) => n,
-            None => return,
-        };
+        let ast_node = self.arena.get(func_node);
 
         if ast_node.kind == AST_FUNC_DEF || ast_node.kind == AST_FUNC_DECL {
             self.mark_escaped(func_node);
@@ -316,10 +302,7 @@ impl<'a> AliasAnalyzer<'a> {
         }
         visited.insert(node.0);
 
-        let ast_node = match self.arena.get(node) {
-            Some(n) => n,
-            None => return,
-        };
+        let ast_node = self.arena.get(node);
 
         result.push(node);
 
@@ -367,11 +350,7 @@ impl<'a> AliasAnalyzer<'a> {
     }
 }
 
-impl<'a> Default for AliasAnalyzer<'a> {
-    fn default() -> Self {
-        Self::new(&Arena::new("/dev/null", 1024).unwrap())
-    }
-}
+
 
 #[cfg(test)]
 mod tests {
