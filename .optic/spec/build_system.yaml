@@ -1,0 +1,89 @@
+api_version: "1.0"
+squad: "build_system"
+domain: "Multi-file Compilation, Linking, and Build System Integration"
+
+semantic_description: >
+  The Build System handles multi-file compilation, object file generation, library
+  creation, and executable linking. It compiles multiple .c files to .ll/.o files
+  in parallel, archives them into static libraries, links shared libraries and
+  executables, tracks header dependencies for incremental builds, and caches
+  compiled objects to avoid redundant work. Uses external LLVM tools (llc, clang)
+  for object generation and linking.
+
+memory_layout: |
+  Build State:
+    - files: Vec<CompilationUnit> (source files to compile)
+    - dependencies: HashMap<PathBuf, Vec<PathBuf>> (file → included headers)
+    - cache: HashMap<CacheKey, PathBuf> (hash → compiled object path)
+    - jobs: usize (parallel compilation count)
+
+  CompilationUnit:
+    - source: PathBuf
+    - output: PathBuf (.ll or .o)
+    - flags: Vec<String> (compiler flags)
+    - includes: Vec<PathBuf> (resolved header dependencies)
+
+  CacheKey:
+    - source_hash: [u8; 32] (SHA-256 of source + includes)
+    - flags_hash: [u8; 32] (SHA-256 of compiler flags)
+
+side_effects:
+  - "Build::compile() creates .o files for each source file"
+  - "Build::link() invokes clang to link .o files into executables/libraries"
+  - "Dependency tracking parses #include directives during preprocessing"
+  - "Build cache stores compiled objects in ~/.cache/opticc/"
+  - "Parallel compilation uses rayon for concurrent file processing"
+
+llm_usage_examples:
+  - name: "Build a shared library"
+    description: "Compile all .c files and link into libfoo.so"
+    code: |
+      use optic_c::build::Build;
+
+      let mut build = Build::new();
+      build.set_source_dir("./src");
+      build.set_output("./build/libfoo.so");
+      build.set_jobs(8);
+      build.build()?;
+
+  - name: "Build an executable with libraries"
+    description: "Compile and link with external libraries"
+    code: |
+      use optic_c::build::Build;
+
+      let mut build = Build::new();
+      build.set_source_dir("./src");
+      build.set_output("./build/myapp");
+      build.add_link_lib("m");
+      build.add_link_lib("dl");
+      build.add_link_lib("pthread");
+      build.build()?;
+
+api_reference:
+  types:
+    Build:
+      description: "Multi-file build orchestrator"
+      fields:
+        - "source_dir: PathBuf"
+        - "output: PathBuf"
+        - "jobs: usize"
+        - "link_libs: Vec<String>"
+        - "include_paths: Vec<PathBuf>"
+        - "defines: HashMap<String, String>"
+      methods:
+        - "new() -> Self"
+        - "set_source_dir(&mut self, path: &str)"
+        - "set_output(&mut self, path: &str)"
+        - "set_jobs(&mut self, n: usize)"
+        - "add_link_lib(&mut self, name: &str)"
+        - "add_include_path(&mut self, path: &str)"
+        - "define(&mut self, name: &str, value: &str)"
+        - "build(&mut self) -> Result<(), BuildError>"
+
+    BuildError:
+      description: "Error type for build operations"
+      variants:
+        - "CompileError(String, String)"
+        - "LinkError(String)"
+        - "IoError(std::io::Error)"
+        - "NoSourceFiles"

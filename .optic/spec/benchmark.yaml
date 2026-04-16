@@ -1,0 +1,95 @@
+api_version: "1.0"
+squad: "benchmark"
+domain: "Compiler Benchmarking and Performance Comparison"
+
+semantic_description: >
+  The Benchmark suite compares OpticC against GCC and Clang across multiple dimensions:
+  compile time, output size, execution time, memory usage, and correctness. It supports
+  micro-benchmarks, SQLite full compilation, coreutils subset, kernel modules, and
+  synthetic stress tests. Results are stored as JSON and reports generated in Markdown.
+
+memory_layout: |
+  Benchmark Result:
+    - benchmark: String (name)
+    - compiler: String (opticc, gcc, clang)
+    - version: String
+    - optimization: String (O0, O1, O2, O3)
+    - metrics: BenchmarkMetrics
+    - comparison: HashMap<String, BenchmarkMetrics>
+
+  BenchmarkMetrics:
+    - compile_time_ms: u64
+    - output_size_bytes: u64
+    - peak_memory_mb: u64
+    - correctness: String (pass, fail, error)
+    - test_results: TestResults
+
+  TestResults:
+    - total: u64
+    - passed: u64
+    - failed: u64
+
+side_effects:
+  - "Benchmark::run() compiles test files with multiple compilers"
+  - "Each benchmark is run 5+ times for statistical significance"
+  - "Results are stored as JSON in benchmarks/results/"
+  - "Markdown reports are generated in benchmarks/report.md"
+  - "Compiled programs are executed against test cases for correctness"
+
+llm_usage_examples:
+  - name: "Run SQLite benchmark"
+    description: "Compile SQLite with all compilers and run test suite"
+    code: |
+      use optic_c::benchmark::{Benchmark, Suite};
+
+      let mut bench = Benchmark::new();
+      bench.add_suite(Suite::Sqlite);
+      bench.add_compiler("opticc");
+      bench.add_compiler("gcc");
+      bench.add_compiler("clang");
+      bench.run()?;
+
+      let report = bench.generate_report()?;
+      println!("{}", report);
+
+  - name: "Generate comparison report"
+    description: "Compare results across compilers"
+    code: |
+      use optic_c::benchmark::Report;
+
+      let report = Report::load("benchmarks/results/")?;
+      let markdown = report.to_markdown()?;
+      std::fs::write("benchmarks/report.md", markdown)?;
+
+api_reference:
+  types:
+    Benchmark:
+      description: "Benchmark runner"
+      fields:
+        - "suites: Vec<Suite>"
+        - "compilers: Vec<String>"
+        - "optimization_levels: Vec<String>"
+        - "results_dir: PathBuf"
+      methods:
+        - "new() -> Self"
+        - "add_suite(&mut self, suite: Suite)"
+        - "add_compiler(&mut self, name: &str)"
+        - "run(&mut self) -> Result<(), BenchmarkError>"
+        - "generate_report(&self) -> Result<String, BenchmarkError>"
+
+    Suite:
+      description: "Benchmark test suites"
+      variants:
+        - "Micro"
+        - "Sqlite"
+        - "Coreutils"
+        - "KernelModules"
+        - "Synthetic { loc: u64 }"
+
+    BenchmarkError:
+      description: "Error type for benchmark operations"
+      variants:
+        - "CompileError(String, String)"
+        - "RuntimeError(String)"
+        - "CorrectnessError(String, String, String)"
+        - "IoError(std::io::Error)"

@@ -1,0 +1,111 @@
+api_version: "1.0"
+squad: "type_system"
+domain: "C Type Representation and Propagation"
+
+semantic_description: >
+  The Type System provides complete C type representation, resolution, and propagation
+  from the parser to the LLVM backend. It supports all C99 primitive types, pointers,
+  arrays, structs, unions, enums, typedefs, function types, and type qualifiers. The
+  type resolver walks the AST after parsing, resolves typedef chains, computes struct/union
+  member offsets and sizes, propagates types from declarations to expressions, and performs
+  type checking with implicit conversions (integer promotion, usual arithmetic conversions).
+
+memory_layout: |
+  Type Arena (separate from AST arena):
+    - TypeId (u32) — opaque handle into the type arena
+    - Types stored as enum variants in a bump-allocated region
+    - TypeId 0 = void, 1 = _Bool, 2 = char, ..., 15 = long double
+    - TypeId 16+ = compound types (pointers, arrays, structs, functions)
+
+  Type Representation:
+    enum CType {
+        Void,
+        Bool,
+        Int { signed: bool, size: IntSize },  // char, short, int, long, long long
+        Float { size: FloatSize },            // float, double, long double
+        Pointer { base: TypeId },
+        Array { element: TypeId, size: Option<u64> },
+        Struct { name: Option<String>, members: Vec<StructMember> },
+        Union { name: Option<String>, members: Vec<StructMember> },
+        Enum { name: Option<String>, variants: Vec<EnumVariant> },
+        Function { return_type: TypeId, params: Vec<ParamType>, variadic: bool },
+        Typedef { name: String, underlying: TypeId },
+        Qualified { qualifiers: TypeQualifiers, base: TypeId },
+    }
+
+  StructMember:
+    - name: String
+    - type_id: TypeId
+    - offset: u64 (byte offset within struct)
+    - bit_offset: Option<u32> (for bit fields)
+    - bit_width: Option<u32> (for bit fields)
+
+side_effects:
+  - "TypeResolver::resolve() walks the AST and annotates nodes with TypeId"
+  - "Struct/union member offsets are computed during resolution (including padding)"
+  - "Type errors are reported but resolution continues (error recovery)"
+  - "The LLVM backend consumes TypeId values to generate correct LLVM types"
+
+llm_usage_examples:
+  - name: "Resolve types in an AST"
+    description: "Run type resolution on a parsed AST"
+    code: |
+      use optic_c::types::{TypeResolver, TypeSystem};
+
+      let mut types = TypeSystem::new();
+      let mut resolver = TypeResolver::new(&mut types);
+
+      // Resolve types in the AST
+      resolver.resolve(ast_root)?;
+
+      // Get the type of a node
+      let node_type = resolver.get_node_type(node_offset);
+
+  - name: "Get LLVM type from TypeId"
+    description: "Convert a TypeId to an LLVM type for code generation"
+    code: |
+      use optic_c::types::{TypeSystem, TypeId};
+      use inkwell::context::Context;
+
+      let types = TypeSystem::new();
+      let context = Context::create();
+
+      let type_id = resolver.get_node_type(node_offset).unwrap();
+      let llvm_type = types.to_llvm_type(&context, type_id);
+      // llvm_type is BasicTypeEnum for code generation
+
+api_reference:
+  types:
+    TypeSystem:
+      description: "Type arena and type operations"
+      fields:
+        - "types: Vec<CType> (bump-allocated)"
+        - "type_cache: HashMap<TypeSignature, TypeId>"
+      methods:
+        - "new() -> Self"
+        - "get_type(&self, id: TypeId) -> &CType"
+        - "add_type(&mut self, ty: CType) -> TypeId"
+        - "to_llvm_type(&self, context: &Context, id: TypeId) -> BasicTypeEnum"
+        - "size_of(&self, id: TypeId) -> u64"
+        - "align_of(&self, id: TypeId) -> u64"
+
+    TypeResolver:
+      description: "Walks AST and resolves types"
+      fields:
+        - "types: &mut TypeSystem"
+        - "node_types: HashMap<NodeOffset, TypeId>"
+        - "typedefs: HashMap<String, TypeId>"
+      methods:
+        - "new(types: &mut TypeSystem) -> Self"
+        - "resolve(&mut self, root: NodeOffset) -> Result<(), TypeError>"
+        - "get_node_type(&self, offset: NodeOffset) -> Option<TypeId>"
+        - "check_binary_op(&self, op: u32, lhs: TypeId, rhs: TypeId) -> Result<TypeId, TypeError>"
+
+    TypeError:
+      description: "Error type for type operations"
+      variants:
+        - "UnknownType(String)"
+        - "TypeMismatch(TypeId, TypeId)"
+        - "InvalidOperator(u32, TypeId, TypeId)"
+        - "StructIncomplete(String)"
+        - "CircularTypedef(String)"

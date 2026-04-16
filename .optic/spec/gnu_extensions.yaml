@@ -1,0 +1,85 @@
+api_version: "1.0"
+squad: "gnu_extensions"
+domain: "GNU C Dialect Support"
+
+semantic_description: >
+  GNU C extension support for parsing and lowering GCC-specific language features
+  required by the Linux kernel. Includes __attribute__, typeof, statement expressions,
+  label as values, nested functions, designated initializers, case ranges, and
+  __builtin_* functions. These extensions are parsed as additional AST node kinds
+  and lowered to appropriate LLVM IR constructs.
+
+memory_layout: |
+  GNU Extension Node Kinds (AST):
+    200 = AST_ATTRIBUTE — __attribute__((...))
+    201 = AST_TYPEOF — typeof(expr)
+    202 = AST_STMT_EXPR — ({ ... })
+    203 = AST_LABEL_ADDR — &&label
+    204 = AST_NESTED_FUNC — nested function definition
+    205 = AST_DESIGNATED_INIT — .field = value
+    206 = AST_CASE_RANGE — case 1 ... 5
+    207 = AST_BUILTIN — __builtin_* call
+    208 = AST_EXTENSION — __extension__ wrapper
+
+  Attribute Storage:
+    - Attributes stored as strings in the arena payload region
+    - Parsed into structured form during type resolution
+
+side_effects:
+  - "GNU extensions are parsed as additional AST node kinds"
+  - "__attribute__ annotations are stored and passed to LLVM backend for function attributes"
+  - "Statement expressions create new scopes with phi nodes for result values"
+  - "Builtins are mapped to LLVM intrinsics or inline expansion"
+
+llm_usage_examples:
+  - name: "Parse __attribute__"
+    description: "Handle function attributes"
+    code: |
+      // Source: void foo(void) __attribute__((noreturn));
+      // AST: AST_FUNC_DEF with AST_ATTRIBUTE child
+      // LLVM: call void @foo() #0
+      // where #0 = { "noreturn" }
+
+  - name: "Lower statement expression"
+    description: "({ int x = 1; x + 1; }) → LLVM basic blocks with phi"
+    code: |
+      // Source: int y = ({ int x = 1; x + 1; });
+      // LLVM:
+      //   %x = alloca i32
+      //   store i32 1, ptr %x
+      //   %load = load i32, ptr %x
+      //   %result = add i32 %load, 1
+      //   y = %result
+
+api_reference:
+  types:
+    GnuExtension:
+      description: "GNU C extension AST nodes"
+      variants:
+        - "Attribute { kind: AttrKind, args: Vec<String> }"
+        - "TypeOf { expr: NodeOffset }"
+        - "StmtExpr { body: NodeOffset }"
+        - "LabelAddr { label: String }"
+        - "NestedFunc { name: String, body: NodeOffset }"
+        - "DesignatedInit { field: String, value: NodeOffset }"
+        - "CaseRange { start: NodeOffset, end: NodeOffset }"
+        - "Builtin { name: String, args: Vec<NodeOffset> }"
+
+    AttrKind:
+      description: "Attribute types"
+      variants:
+        - "Noreturn"
+        - "Unused"
+        - "Used"
+        - "Aligned(u64)"
+        - "Packed"
+        - "Weak"
+        - "Visibility(String)"
+        - "Section(String)"
+        - "Constructor"
+        - "Destructor"
+        - "Format { kind: String, fmt_idx: u32, first_arg: u32 }"
+        - "Nonnull"
+        - "Pure"
+        - "Const"
+        - "Other(String)"

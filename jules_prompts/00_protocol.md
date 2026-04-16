@@ -39,3 +39,86 @@ These lessons were discovered during the first full execution of the project. Fu
 11. **Debug logging is noisy**: Extensive `eprintln!` in parser.rs and llvm.rs. Consider gating behind a feature flag.
 12. **Always run `cargo test` after changes**: 9 bugs were caught only during integration testing. Unit tests in individual modules don't catch cross-module API mismatches.
 13. **Provenance double-counting bug**: Adding node offsets to provenance at function entry AND in match arms caused incorrect analysis results. Be careful about where provenance is recorded.
+
+---
+
+## PROJECT ROADMAP & MILESTONES
+
+OpticC is organized into 4 milestone phases. Each phase has a Definition of Done (DoD) that must be met before proceeding.
+
+### Phase 1: Core Infrastructure (COMPLETE)
+- ✅ Arena allocator (mmap-backed, 64-byte CAstNode, 10M node benchmark)
+- ✅ redb KV-store (include deduplication, macro tracking)
+- ✅ C99 Lexer (byte-level, 37 keywords, multi-char punctuators)
+- ✅ Macro Expander (object-like, function-like, ##, #)
+- ✅ Recursive Descent Parser (C99, all statements, full expression grammar)
+- ✅ LLVM Backend (i32-only, functions, control flow, expressions)
+- ✅ Static Analysis (pointer provenance, taint tracking, UAF detection)
+- ✅ VFS Projection (FUSE, shadow comment injection)
+
+### Phase 2: SQLite Compilation (IN PROGRESS)
+**Goal**: Compile SQLite Amalgamation (255K LOC) to a working shared library.
+
+| # | Prompt | Agent | Dependency | Status |
+|---|--------|-------|------------|--------|
+| 10 | `10_preprocessor.md` | Jules-Preprocessor | Phase 1 | PENDING |
+| 11 | `11_type_system.md` | Jules-Type-System | Phase 1 | PENDING |
+| 12 | `12_gnu_extensions.md` | Jules-GNU-Extensions | 10, 11 | PENDING |
+| 13 | `13_inline_asm.md` | Jules-Inline-Asm | 11, 12 | PENDING |
+| 14 | `14_build_system.md` | Jules-Build-System | 10, 11, 13 | PENDING |
+| 15 | `15_benchmark.md` | Jules-Benchmark | 14 | PENDING |
+
+**Definition of Done**:
+- [ ] Preprocessor handles `#include`, `#define`, `#ifdef`, `#pragma`
+- [ ] Type system supports all C99 types with propagation to LLVM backend
+- [ ] LLVM backend generates correct IR for i8/i16/i32/i64/float/double/pointers/structs
+- [ ] `optic_c build` compiles SQLite to `libsqlite3.so`
+- [ ] SQLite's test suite passes with the compiled library
+- [ ] Benchmark report shows OpticC vs GCC vs Clang for SQLite
+
+### Phase 3: Linux Kernel Compilation (FUTURE)
+**Goal**: Compile out-of-tree Linux kernel modules and benchmark against GCC/Clang.
+
+**Additional Requirements**:
+- Full GNU C extension support (`__attribute__`, `typeof`, statement expressions, builtins)
+- Inline assembly with operands and clobbers
+- Architecture-specific headers and types
+- Kbuild integration
+- 30M+ LOC scale handling
+
+### Phase 4: Production Compiler (FUTURE)
+**Goal**: OpticC as a drop-in replacement for GCC/Clang in real projects.
+
+**Additional Requirements**:
+- Full optimization pipeline (LLVM pass manager)
+- Debug info (DWARF)
+- LTO (Link-Time Optimization)
+- Cross-compilation support
+- Plugin system
+
+---
+
+## EXECUTION ORDER & DEPENDENCY GRAPH
+
+```
+Phase 1 (COMPLETE)
+  ├── arena, db, lexer, macro, parser, llvm, analysis, vfs
+  
+Phase 2 (SQLite)
+  ├── 10_preprocessor ──────────────────────┐
+  ├── 11_type_system ───────────────────────┤
+  ├── 12_gnu_extensions ──────────┬─────────┤
+  ├── 13_inline_asm ──────────────┤    ┌────┘
+  ├── 14_build_system ────────────┤────┤
+  └── 15_benchmark ───────────────┴────┴────┘
+  
+Phase 3 (Kernel) — after Phase 2 DoD
+Phase 4 (Production) — after Phase 3 DoD
+```
+
+**Independent Phase 2 tasks** (can run in parallel):
+- `10_preprocessor` and `11_type_system` are independent of each other
+- `12_gnu_extensions` depends on both 10 and 11
+- `13_inline_asm` depends on 11 (type system) and 12 (GNU extensions)
+- `14_build_system` depends on 10, 11, 13
+- `15_benchmark` depends on 14
