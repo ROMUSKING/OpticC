@@ -1,0 +1,8 @@
+api_version: "1.0"
+squad: "lexer_macro"
+domain: "C-Ingestion, Lexing, and Preprocessing"
+
+semantic_description: ""
+memory_layout: ""
+side_effects: ""
+llm_usage_examples: []

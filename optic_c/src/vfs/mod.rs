@@ -121,7 +121,7 @@ impl<'a> Vfs<'a> {
                 return Some(cursor);
             }
             cursor = NodeOffset(cursor.0 + 1);
-            if cursor.0 >= self.arena.capacity() {
+            if cursor.0 >= self.arena.node_capacity() {
                 break;
             }
         }
@@ -445,7 +445,7 @@ pub trait ArenaAccess {
 
 impl ArenaAccess for Arena {
     fn capacity(&self) -> u32 {
-        self.allocated()
+        self.node_capacity()
     }
     
     fn get_string(&self, offset: u32) -> Option<&str> {

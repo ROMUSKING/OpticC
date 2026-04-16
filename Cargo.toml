@@ -6,10 +6,16 @@ edition = "2021"
 [lib]
 path = "src/lib.rs"
 
+[[bin]]
+name = "optic"
+path = "src/main.rs"
+
 [dependencies]
 memmap2 = "0.9"
 bitflags = "2.4"
 redb = "2.0"
+inkwell = { version = "0.9.0", features = ["llvm14-0"] }
+fuser = "0.17"
 
 [dev-dependencies]
 tempfile = "3.8"

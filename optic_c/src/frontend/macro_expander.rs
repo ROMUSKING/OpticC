@@ -1,6 +1,5 @@
-use crate::arena::{Arena, CAstNode, NodeFlags, NodeOffset};
+use crate::arena::{Arena, CAstNode, NodeFlags, NodeOffset, SourceLocation};
 use std::collections::HashMap;
-use std::path::Path;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TokenKind {
@@ -420,8 +419,14 @@ impl<'a> MacroExpander<'a> {
             flags: NodeFlags::IS_VALID,
             parent: NodeOffset::NULL,
             first_child: NodeOffset::NULL,
+            last_child: NodeOffset::NULL,
             next_sibling: NodeOffset::NULL,
+            prev_sibling: NodeOffset::NULL,
+            child_count: 0,
             data: 0,
+            source: SourceLocation::unknown(),
+            payload_offset: NodeOffset::NULL,
+            payload_len: 0,
         }).unwrap_or(NodeOffset::NULL);
 
         if root == NodeOffset::NULL {
@@ -438,8 +443,14 @@ impl<'a> MacroExpander<'a> {
                 flags: NodeFlags::IS_VALID,
                 parent: root,
                 first_child: NodeOffset::NULL,
+                last_child: NodeOffset::NULL,
                 next_sibling: NodeOffset::NULL,
+                prev_sibling: NodeOffset::NULL,
+                child_count: 0,
                 data: string_offset,
+                source: SourceLocation::unknown(),
+                payload_offset: NodeOffset::NULL,
+                payload_len: 0,
             }).unwrap_or(NodeOffset::NULL);
 
             if token_node != NodeOffset::NULL {
@@ -473,8 +484,14 @@ impl<'a> MacroExpander<'a> {
             flags: NodeFlags::IS_VALID | NodeFlags::HAS_ERROR,
             parent: NodeOffset::NULL,
             first_child: NodeOffset::NULL,
+            last_child: NodeOffset::NULL,
             next_sibling: NodeOffset::NULL,
+            prev_sibling: NodeOffset::NULL,
+            child_count: 0,
             data: 0,
+            source: SourceLocation::unknown(),
+            payload_offset: NodeOffset::NULL,
+            payload_len: 0,
         }).unwrap_or(NodeOffset::NULL);
 
         if expanded_node == NodeOffset::NULL {
@@ -511,8 +528,14 @@ impl<'a> MacroExpander<'a> {
                 flags: NodeFlags::IS_VALID,
                 parent: expanded_node,
                 first_child: NodeOffset::NULL,
+                last_child: NodeOffset::NULL,
                 next_sibling: NodeOffset::NULL,
+                prev_sibling: NodeOffset::NULL,
+                child_count: 0,
                 data: string_offset,
+                source: SourceLocation::unknown(),
+                payload_offset: NodeOffset::NULL,
+                payload_len: 0,
             }).unwrap_or(NodeOffset::NULL);
 
             if token_node != NodeOffset::NULL {
@@ -541,10 +564,10 @@ impl<'a> MacroExpander<'a> {
             return None;
         }
 
-        let arena::CAstNode { kind, flags, parent, first_child, next_sibling, data } = *self.arena.get(expanded_node)?;
+        let node = *self.arena.get(expanded_node)?;
         
-        if kind == 256 {
-            Some(NodeOffset(data))
+        if node.kind == 256 {
+            Some(NodeOffset(node.data))
         } else {
             None
         }

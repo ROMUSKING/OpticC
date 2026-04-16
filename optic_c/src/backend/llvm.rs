@@ -152,7 +152,7 @@ pub fn compile(&mut self, arena: &Arena, root: NodeOffset) -> Result<(), Backend
                             if let Some(ident) = arena.get(child.first_child) {
                                 if ident.kind == 60 { // IDENT
                                     if let Some(name) = arena.get_string(NodeOffset(ident.data)) {
-                                        func_name = name;
+                                        func_name = name.to_string();
                                     }
                                 }
                                 // Walk siblings of IDENT to find PARAM nodes
@@ -175,7 +175,7 @@ pub fn compile(&mut self, arena: &Arena, root: NodeOffset) -> Result<(), Backend
                                                     break;
                                                 }
                                             }
-                                            param_names.push(pname.unwrap_or_else(|| "p".to_string()));
+                                            param_names.push(pname.unwrap_or("p").to_string());
                                         }
                                         sibling = sib.next_sibling;
                                     } else {
@@ -496,12 +496,12 @@ pub fn compile(&mut self, arena: &Arena, root: NodeOffset) -> Result<(), Backend
     fn lower_ident(&self, arena: &Arena, node: &CAstNode) -> Result<Option<BasicValueEnum<'ctx>>, BackendError> {
         let name_offset = NodeOffset(node.data);
         if let Some(name) = arena.get_string(name_offset) {
-            if let Some(ptr) = self.variables.get(&name) {
-                let val = self.builder.build_load(*ptr, &name)
+            if let Some(ptr) = self.variables.get(name) {
+                let val = self.builder.build_load(*ptr, name)
                     .map_err(|_| BackendError::InvalidNode)?;
                 return Ok(Some(val));
             }
-            if let Some(func) = self.functions.get(&name) {
+            if let Some(func) = self.functions.get(name) {
                 return Ok(Some(func.as_global_value().as_basic_value_enum()));
             }
         }
@@ -681,7 +681,7 @@ pub fn compile(&mut self, arena: &Arena, root: NodeOffset) -> Result<(), Backend
             }
         }
 
-        if let Some(name) = &func_name {
+        if let Some(name) = func_name {
             if let Some(func) = self.functions.get(name) {
                 eprintln!("    found function in map, building call");
                 let call_site = self.builder.build_call(*func, &args, "call")
@@ -696,7 +696,7 @@ pub fn compile(&mut self, arena: &Arena, root: NodeOffset) -> Result<(), Backend
             // Try to declare an external function
             let fn_type = self.context.i32_type().fn_type(&[], true);
             let ext_func = self.module.add_function(name, fn_type, None);
-            self.functions.insert(name.clone(), ext_func);
+            self.functions.insert(name.to_string(), ext_func);
             let call_site = self.builder.build_call(ext_func, &args, "call")
                 .map_err(|_| BackendError::InvalidNode)?;
             return Ok(Some(match call_site.try_as_basic_value() {
@@ -755,7 +755,7 @@ pub fn compile(&mut self, arena: &Arena, root: NodeOffset) -> Result<(), Backend
         if lhs_node.kind == 60 { // AST_IDENT
             let name_offset = NodeOffset(lhs_node.data);
             if let Some(name) = arena.get_string(name_offset) {
-                if let Some(ptr) = self.variables.get(&name) {
+                if let Some(ptr) = self.variables.get(name) {
                     let val_to_store = if rhs_val.is_int_value() {
                         rhs_val.into_int_value().into()
                     } else {
@@ -776,7 +776,7 @@ pub fn compile(&mut self, arena: &Arena, root: NodeOffset) -> Result<(), Backend
         while child_offset != NodeOffset::NULL {
             if let Some(child) = arena.get(child_offset) {
                 if child.kind == 60 { // AST_IDENT
-                    return arena.get_string(NodeOffset(child.data));
+                    return arena.get_string(NodeOffset(child.data)).map(|s| s.to_string());
                 }
                 // Recurse into declarator nodes
                 if matches!(child.kind, 7..=9) { // PTR, ARRAY, FUNC types

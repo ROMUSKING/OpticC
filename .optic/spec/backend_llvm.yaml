@@ -1,0 +1,8 @@
+api_version: "1.0"
+squad: "backend_llvm"
+domain: "LLVM Lowering"
+
+semantic_description: ""
+memory_layout: ""
+side_effects: ""
+llm_usage_examples: []

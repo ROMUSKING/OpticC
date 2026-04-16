@@ -1,0 +1,8 @@
+api_version: "1.0"
+squad: "parser"
+domain: "AST Construction"
+
+semantic_description: ""
+memory_layout: ""
+side_effects: ""
+llm_usage_examples: []

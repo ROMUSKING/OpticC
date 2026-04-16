@@ -1,5 +1,4 @@
-use crate::arena::{Arena, CAstNode, NodeFlags, NodeOffset};
-use std::io;
+use crate::arena::{Arena, CAstNode, NodeFlags, NodeOffset, SourceLocation};
 
 pub struct Parser {
     pub arena: Arena,
@@ -338,8 +337,14 @@ impl Parser {
             flags: NodeFlags::IS_VALID,
             parent,
             first_child,
+            last_child: NodeOffset::NULL,
             next_sibling,
+            prev_sibling: NodeOffset::NULL,
+            child_count: 0,
             data,
+            source: SourceLocation::unknown(),
+            payload_offset: NodeOffset::NULL,
+            payload_len: 0,
         };
         self.arena.alloc(node).unwrap_or(NodeOffset::NULL)
     }
