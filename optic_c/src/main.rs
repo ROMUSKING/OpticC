@@ -6,6 +6,9 @@ use std::path::{Path, PathBuf};
 use optic_c::arena::Arena;
 use optic_c::backend::llvm::LlvmBackend;
 use optic_c::frontend::parser::Parser as CParser;
+use optic_c::frontend::preprocessor::Preprocessor;
+use optic_c::db::OpticDb;
+use optic_c::types::TypeSystem;
 
 #[derive(Parser)]
 #[command(name = "optic_c")]
@@ -64,25 +67,30 @@ fn compile_file(
     output_path: &Path,
     opt_level: u32,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let source = fs::read_to_string(input_path)
-        .map_err(|e| format!("Failed to read input file '{}': {}", input_path.display(), e))?;
+    let db_path = format!("/tmp/optic_db_{}.redb", std::process::id());
+    let db = OpticDb::new(&db_path)
+        .map_err(|e| format!("Failed to create database: {}", e))?;
 
-    // Estimate arena capacity based on source size
-    let estimated_nodes = (source.len() / 4).max(1024) as u32;
+    let mut pp = Preprocessor::new(db);
+    let tokens = pp.process(input_path.to_str().unwrap())
+        .map_err(|e| format!("Preprocessor error: {}", e))?;
+
+    let estimated_nodes = (tokens.len() / 2).max(1024) as u32;
     let arena_path = format!("/tmp/optic_c_arena_{}.bin", std::process::id());
 
     let arena = Arena::new(&arena_path, estimated_nodes * 2)
         .map_err(|e| format!("Failed to create AST arena: {}", e))?;
 
     let mut parser = CParser::new(arena);
-    let ast_root = parser.parse(&source)
+    let ast_root = parser.parse_tokens(tokens)
         .map_err(|e| format!("Parse error at line {}, column {}: {}", e.line, e.column, e.message))?;
 
     let context = inkwell::context::Context::create();
     let module_name = input_path.file_stem()
         .and_then(|s| s.to_str())
         .unwrap_or("input");
-    let mut backend = LlvmBackend::new(&context, module_name);
+    let type_system = TypeSystem::new();
+    let mut backend = LlvmBackend::with_types(&context, module_name, &type_system);
 
     backend.compile(&parser.arena, ast_root)
         .map_err(|e| format!("Backend compilation error: {}", e))?;
@@ -103,8 +111,9 @@ fn compile_file(
     file.write_all(ir.as_bytes())
         .map_err(|e| format!("Failed to write output file: {}", e))?;
 
-    // Clean up arena file
+    // Clean up arena file and db file
     let _ = std::fs::remove_file(&arena_path);
+    let _ = std::fs::remove_file(&db_path);
 
     println!("Compiled {} -> {}", input_path.display(), output_path.display());
 
