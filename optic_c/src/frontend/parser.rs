@@ -2,7 +2,7 @@ use crate::arena::{Arena, CAstNode, NodeFlags, NodeOffset};
 use std::io;
 
 pub struct Parser {
-    arena: Arena,
+    pub arena: Arena,
     tokens: Vec<Token>,
     current: usize,
 }

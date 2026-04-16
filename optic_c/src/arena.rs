@@ -5,7 +5,7 @@ use std::io;
 use std::path::Path;
 
 #[repr(C)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct NodeOffset(pub u32);
 
 impl NodeOffset {
