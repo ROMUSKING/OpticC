@@ -1,0 +1,6 @@
+api_version: "1.0"
+structs:
+  - name: AliasAnalysis
+    description: "Graph-Based Static Analysis Engine for pointer provenance tracking"
+    fields: []
+functions: []

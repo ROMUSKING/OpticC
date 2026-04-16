@@ -1,0 +1,174 @@
+api_version: "1.0"
+structs:
+  - name: TokenKind
+    description: "Enumeration of token types for C99 lexer"
+    variants:
+      - EndOfFile
+      - Keyword
+      - Identifier
+      - NumericConstant
+      - StringLiteral
+      - Punctuator
+      - Preprocessor
+      - Comment
+      - WhiteSpace
+      - Hash
+      - HashHash
+  - name: Token
+    description: "Represents a lexical token with position and type information"
+    fields:
+      - name: kind
+        type: TokenKind
+      - name: start
+        type: u32
+      - name: end
+        type: u32
+      - name: data
+        type: u32
+  - name: Lexer
+    description: "C99-compliant lexer for tokenizing C source code"
+    fields: []
+  - name: MacroDefinition
+    description: "Macro definition (object-like or function-like)"
+    variants:
+      - name: ObjectLike
+        description: "Simple macros without parameters (e.g., #define X 10)"
+        fields:
+          - name: replacement
+            type: Vec<Token>
+      - name: FunctionLike
+        description: "Function-like macros (e.g., #define MAX(X,Y) ((X)>(Y)?(X):(Y)))"
+        fields:
+          - name: params
+            type: Vec<String>
+          - name: is_variadic
+            type: bool
+          - name: replacement
+            type: Vec<Token>
+  - name: MacroExpander
+    description: |
+      Dual-Node Macro Expansion system for C preprocessor macros.
+      
+      Handles:
+      - Object-like macros (#define X 10)
+      - Function-like macros (#define MAX(X,Y) ((X)>(Y)?(X):(Y)))
+      - Macro argument expansion with proper parenthesization
+      - Token pasting (##) operator
+      - Stringification (#) operator
+      
+      Dual-Node Pattern:
+      - Node A (Invocation): Represents the macro invocation site
+      - Node B (Expansion): Contains the expanded token stream
+      - The invocation node's `data` field points to the expansion node.
+    fields: []
+functions:
+  - name: Lexer::new
+    inputs:
+      - name: source
+        type: "&[u8]"
+    returns: Self
+    description: "Create a new lexer for the given source"
+  - name: Lexer::with_arena
+    inputs:
+      - name: source
+        type: "&[u8]"
+      - name: arena
+        type: "&Arena"
+    returns: Self
+    description: "Create a lexer with arena integration for node allocation"
+  - name: Lexer::next_token
+    inputs:
+      - name: self
+        type: "&mut Self"
+    returns: Token
+    description: "Return the next token from the source"
+  - name: Lexer::token_text
+    inputs:
+      - name: self
+        type: "&Self"
+      - name: token
+        type: "&Token"
+    returns: "&[u8]"
+    description: "Get the source text for a token"
+  - name: Lexer::is_keyword
+    inputs:
+      - name: self
+        type: "&Self"
+      - name: token
+        type: "&Token"
+    returns: bool
+    description: "Check if an identifier token is a C99 keyword"
+  - name: get_keyword_index
+    inputs:
+      - name: text
+        type: "&[u8]"
+    returns: Option<u16>
+    description: "Get keyword ID (256+) or None if not a keyword"
+  - name: MacroExpander::new
+    inputs:
+      - name: arena
+        type: "&mut Arena"
+    returns: Self
+    description: "Create a new MacroExpander with the given Arena allocator"
+  - name: MacroExpander::define_macro
+    inputs:
+      - name: name
+        type: "&str"
+      - name: definition
+        type: MacroDefinition
+    description: "Define a macro with the given name and definition"
+  - name: MacroExpander::is_macro_defined
+    inputs:
+      - name: name
+        type: "&str"
+    returns: bool
+    description: "Check if a macro with the given name is defined"
+  - name: MacroExpander::get_macro_definition
+    inputs:
+      - name: name
+        type: "&str"
+    returns: Option<&MacroDefinition>
+    description: "Retrieve the definition of a macro if it exists"
+  - name: MacroExpander::expand_macros
+    inputs:
+      - name: tokens
+        type: "&[Token]"
+      - name: source
+        type: "&str"
+    returns: Vec<Token>
+    description: |
+      Expand all macros in a token stream recursively.
+      Handles recursive expansion with guard against infinite loops,
+      function-like macro invocation detection, and stringification.
+  - name: MacroExpander::build_expanded_ast
+    inputs:
+      - name: tokens
+        type: "&[Token]"
+      - name: source
+        type: "&str"
+    returns: NodeOffset
+    description: |
+      Build an AST from expanded tokens using the Arena allocator.
+      Creates a tree structure where the root contains the expanded
+      token sequence as children.
+  - name: MacroExpander::expand_to_dual_node
+    inputs:
+      - name: invocation_offset
+        type: NodeOffset
+      - name: name
+        type: "&str"
+      - name: args
+        type: Option<&[Vec<Token>]>
+      - name: source
+        type: "&str"
+    returns: NodeOffset
+    description: |
+      Create a dual-node expansion linking invocation to expansion.
+      Node A (Invocation): data field updated to point to Node B
+      Node B (Expansion): Contains expanded token sequence as children
+  - name: MacroExpander::get_invocation_link
+    inputs:
+      - name: expanded_node
+        type: NodeOffset
+    returns: Option<NodeOffset>
+    description: "Retrieve the invocation node offset from an expansion node"
