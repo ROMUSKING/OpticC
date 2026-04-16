@@ -2,7 +2,243 @@ api_version: "1.0"
 squad: "parser"
 domain: "AST Construction"
 
-semantic_description: ""
-memory_layout: ""
-side_effects: ""
-llm_usage_examples: []
+semantic_description: >
+  The Parser is a recursive descent C99 parser that builds AST nodes directly
+  into the mmap arena. It consumes a source string, performs internal lexing,
+  and constructs a tree of CAstNode structures linked via parent/child/sibling
+  offsets. The parser handles all C99 constructs: translation units, external
+  declarations, type specifiers (including struct/union/enum), declarators
+  (pointers, arrays, function parameters), compound statements, all control
+  flow statements (if/while/for/do/switch/goto/return/break/continue), and
+  the full expression grammar (comma, assignment, conditional, binary, unary,
+  postfix, primary, sizeof, cast). Nodes are allocated sequentially into the
+  Arena using bump allocation, with string interning for identifiers.
+
+memory_layout: |
+  AST Node Kind Mapping (u16 values stored in CAstNode.kind):
+
+  Type Specifiers:
+    1   = void          2   = int           3   = char
+    4   = struct        5   = union         6   = enum
+    10  = short         11  = long          12  = signed
+    13  = unsigned      14  = _Bool         15  = _Complex
+    83  = float         84  = double
+
+  Storage Class Specifiers:
+    101 = typedef       102 = extern        103 = static
+    104 = auto          105 = register
+
+  Type Qualifiers:
+    90  = const         91  = restrict      92  = volatile
+
+  Function Specifiers:
+    93  = inline        94  = _Noreturn
+
+  Declarations:
+    20  = AST_DECL          (external declaration)
+    21  = AST_VAR_DECL      (variable declaration)
+    22  = AST_FUNC_DECL     (function declaration)
+    23  = AST_FUNC_DEF      (function definition with body)
+    24  = AST_PARAM         (function parameter)
+    25  = AST_STRUCT_DECL   (struct member declaration)
+    26  = AST_ENUM_CONST    (enum constant)
+
+  Declarators:
+    7   = AST_PTR       (pointer declarator)
+    8   = AST_ARRAY     (array declarator)
+    9   = AST_FUNC      (function declarator)
+    60  = AST_IDENT     (identifier)
+
+  Statements:
+    40  = AST_COMPOUND      (block { ... })
+    41  = AST_IF            (if/else)
+    42  = AST_WHILE         (while loop)
+    43  = AST_FOR           (for loop)
+    44  = AST_RETURN        (return statement)
+    45  = AST_EXPR_STMT     (expression statement)
+    46  = AST_BREAK         (break)
+    47  = AST_CONTINUE      (continue)
+    48  = AST_EMPTY         (empty statement)
+    49  = AST_GOTO          (goto)
+    50  = AST_SWITCH        (switch)
+
+  Expressions:
+    61  = AST_INT_CONST     (integer constant, value in CAstNode.data)
+    62  = AST_CHAR_CONST    (character constant)
+    63  = AST_STRING        (string literal)
+    64  = AST_BINOP         (binary operator, op code in CAstNode.data)
+    65  = AST_UNOP          (unary operator, op code in CAstNode.data)
+    66  = AST_COND          (ternary conditional)
+    67  = AST_CALL          (function call)
+    68  = AST_SUBSCRIPT     (array subscript [])
+    69  = AST_MEMBER        (struct member access . or ->)
+    70  = AST_CAST          (type cast)
+    71  = AST_SIZEOF        (sizeof expression)
+    72  = AST_COMMA         (comma expression)
+    73  = AST_ASSIGN        (assignment, op code in CAstNode.data)
+    80  = AST_NUM           (numeric literal)
+    81  = AST_STRING        (string literal, alias)
+    82  = AST_FLOAT_CONST   (floating point constant)
+
+  Binary Operator Codes (stored in CAstNode.data for AST_BINOP):
+    1=add  2=sub  3=mul  4=div  5=rem  6=eq  7=ne  8=lt  9=gt
+    10=le  11=ge  12=and 13=or  14=bitand 15=bitor 16=xor
+    17=shl 18=shr
+
+  Unary Operator Codes (stored in CAstNode.data for AST_UNOP):
+    0=plus  1=neg  2=lnot  3=bitnot  4=addr  5=deref  6=preinc  7=predec
+
+  Assignment Operator Codes (stored in CAstNode.data for AST_ASSIGN):
+    19=assign  1=add_assign  2=sub_assign  3=mul_assign
+    4=div_assign  5=rem_assign  14=and_assign  16=xor_assign
+    15=or_assign  17=shl_assign  18=shr_assign
+
+  Tree Structure:
+    - Parent-child links: CAstNode.parent, CAstNode.first_child, CAstNode.last_child
+    - Sibling links: CAstNode.next_sibling, CAstNode.prev_sibling
+    - Count: CAstNode.child_count
+    - Source location: CAstNode.source (file_id, line, column, length)
+    - String data: CAstNode.data holds offset into arena string pool for identifiers
+
+side_effects:
+  - "Parser::parse() consumes the source string and allocates CAstNode structures into the Arena"
+  - "Identifier names are interned via Arena::store_string() during parsing"
+  - "ParseError is returned on syntax errors with line/column information"
+  - "The parser has its own internal lex() method and does not use the lexer.rs module"
+  - "Debug logging via eprintln! is emitted during parsing (can be noisy for large files)"
+  - "Arena is owned by the Parser struct (not borrowed)"
+
+llm_usage_examples:
+  - name: "Parse a simple C function"
+    description: "Create a parser and parse a basic C function definition"
+    code: |
+      use optic_c::arena::Arena;
+      use optic_c::frontend::parser::Parser;
+
+      let temp_file = std::env::temp_dir().join("parser_test.arena");
+      let arena = Arena::new(&temp_file, 1024)?;
+      let mut parser = Parser::new(arena);
+
+      let source = "int main() { return 0; }";
+      let root = parser.parse(source)?;
+
+      // root is a NodeOffset pointing to the first declaration
+      assert!(root != NodeOffset::NULL);
+
+  - name: "Walk the parsed AST"
+    description: "Traverse the AST tree using arena offsets"
+    code: |
+      use optic_c::arena::{Arena, NodeOffset};
+      use optic_c::frontend::parser::Parser;
+
+      fn print_tree(arena: &Arena, offset: NodeOffset, depth: usize) {
+          if offset == NodeOffset::NULL { return; }
+          let node = arena.get(offset).unwrap();
+          let indent = "  ".repeat(depth);
+          println!("{}kind={} data={}", indent, node.kind, node.data);
+
+          // Walk children via first_child
+          let mut child = node.first_child;
+          while child != NodeOffset::NULL {
+              print_tree(arena, child, depth + 1);
+              if let Some(c) = arena.get(child) {
+                  child = c.next_sibling;
+              } else {
+                  break;
+              }
+          }
+      }
+
+  - name: "Parse declarations"
+    description: "Parse variable declarations with various type specifiers"
+    code: |
+      use optic_c::arena::Arena;
+      use optic_c::frontend::parser::Parser;
+
+      let arena = Arena::new("/tmp/decl.arena", 1024)?;
+      let mut parser = Parser::new(arena);
+
+      let source = "int x; char *p; unsigned long count;";
+      let root = parser.parse(source)?;
+      // root points to the first declaration node (kind=20 AST_DECL)
+
+  - name: "Parse expressions"
+    description: "Parse arithmetic and logical expressions"
+    code: |
+      use optic_c::arena::Arena;
+      use optic_c::frontend::parser::Parser;
+
+      let arena = Arena::new("/tmp/expr.arena", 1024)?;
+      let mut parser = Parser::new(arena);
+
+      let source = "int main() { int x = 1 + 2 * 3; return x; }";
+      let root = parser.parse(source)?;
+      // AST_BINOP nodes (kind=64) with data=3 (mul) and data=1 (add)
+      // Operator precedence is handled by the recursive descent parser
+
+api_reference:
+  types:
+    Parser:
+      description: "Recursive descent C99 parser that owns its Arena"
+      fields:
+        - "arena: Arena (owned)"
+        - "tokens: Vec<Token>"
+        - "current: usize"
+      methods:
+        - "new(arena: Arena) -> Self"
+        - "parse(&mut self, source: &str) -> Result<NodeOffset, ParseError>"
+
+    Token:
+      description: "Internal token representation used by the parser's lexer"
+      fields:
+        - "kind: TokenKind"
+        - "text: String"
+        - "line: u32"
+        - "column: u32"
+
+    TokenKind:
+      description: "Internal token types"
+      variants:
+        - "Keyword"
+        - "Identifier"
+        - "IntConstant"
+        - "CharConstant"
+        - "StringLiteral"
+        - "Punctuator"
+        - "EOF"
+
+    ParseError:
+      description: "Error returned on syntax errors"
+      fields:
+        - "message: String"
+        - "line: u32"
+        - "column: u32"
+
+  key_methods:
+    parse_translation_unit:
+      description: "Top-level entry point, parses a sequence of external declarations"
+      returns: "NodeOffset pointing to the first declaration (linked via next_sibling)"
+
+    parse_external_declaration:
+      description: "Parses a single external declaration (function def, variable decl, etc.)"
+      returns: "NodeOffset to the declaration node"
+
+    parse_declaration_specifiers:
+      description: "Parses type, storage class, qualifier, and function specifiers"
+      returns: "NodeOffset to the first specifier (linked via next_sibling)"
+
+    parse_declarator:
+      description: "Parses pointer chains and direct declarators"
+      returns: "NodeOffset to the declarator tree"
+
+    parse_compound_statement:
+      description: "Parses a block of statements enclosed in braces"
+      returns: "NodeOffset to AST_COMPOUND node (kind=40)"
+
+    parse_statement:
+      description: "Dispatches to the appropriate statement parser based on keyword"
+      returns: "NodeOffset to the statement node"
+
+    parse_expression:
+      description: "Parses the full expression grammar with precedence climbing"
+      returns: "NodeOffset to the expression tree root"

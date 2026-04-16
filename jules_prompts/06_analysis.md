@@ -6,3 +6,14 @@ YOUR DIRECTIVES:
 2. Implement DFS pointer provenance tracing in `src/analysis/alias.rs` to promote pointers to `noalias` (AffineGrade).
 3. Implement Taint Tracking to identify Use-After-Free vulnerabilities.
 4. Follow the ASYNC BRANCH PROTOCOL to document the Analysis diagnostics API in `.optic/spec/analysis.yaml`.
+
+## LESSONS LEARNED (Post-Execution Addendum)
+- **Arena::get() returns &CAstNode directly**: Do NOT pattern-match on `Some/None`. The method returns `&CAstNode` directly. If you need Option semantics, check for NULL offsets yourself.
+- **NodeOffset needs Hash**: Add `#[derive(Hash)]` to NodeOffset. Without it, HashMap/HashSet operations fail to compile.
+- **Field name is `data`**: The arena's inline u32 field is named `data`, NOT `data_offset`. Match the arena spec exactly.
+- **No Default for lifetime-bearing types**: `AliasAnalyzer` holds `&'a Arena` and cannot implement `Default`. Remove any `impl Default` that creates temporary arenas.
+- **Borrow checker discipline**: When constructing `PointerProvenance`, compute `is_noalias` BEFORE moving the `provenance` Vec into the struct.
+- **Provenance double-counting**: Do NOT add `node.0` to provenance at the start of `trace_provenance()` AND in match arms. Choose ONE location to record provenance. The fix was to remove the initial push and only record in specific match arms.
+- **is_noalias logic**: Two pointers are noalias if their provenance sets are strictly disjoint (no common source nodes). Shared provenance (len > 1 with common nodes) means they alias.
+- **Taint tracking**: Mark memory as `Tainted` when freed. Check taint status before dereferencing. Report UAF if tainted memory is accessed.
+- **Vulnerability patterns**: The VFS layer detects patterns like strcpy, sprintf, gets (buffer overflow), malloc (unchecked allocation), free (use-after-free).

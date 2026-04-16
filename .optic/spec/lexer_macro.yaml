@@ -2,7 +2,243 @@ api_version: "1.0"
 squad: "lexer_macro"
 domain: "C-Ingestion, Lexing, and Preprocessing"
 
-semantic_description: ""
-memory_layout: ""
-side_effects: ""
-llm_usage_examples: []
+semantic_description: >
+  The Lexer/Macro module provides C99 tokenization and macro expansion.
+  It consists of two components: (1) A byte-level C99 Lexer in lexer.rs that
+  scans raw source bytes into tokens (identifiers, keywords, numeric constants,
+  string literals, punctuators, preprocessor directives, comments, whitespace),
+  and (2) a MacroExpander in macro_expander.rs that handles object-like and
+  function-like macro definitions, expansion, token pasting (##), and
+  stringification (#). The MacroExpander builds AST nodes directly into the
+  mmap arena and maintains a string interner for efficient token text storage.
+  The lexer supports all C99 keywords, multi-character punctuators (++, --, ->,
+  &&, ||, <<, >>, etc.), hex/octal/decimal/float numeric literals, escape
+  sequences in strings, and preprocessor directive detection.
+
+memory_layout: |
+  Lexer Token (lexer.rs):
+    Offset  Size  Field
+    0       1     kind: TokenKind (enum, 9 variants)
+    1       3     (padding)
+    4       4     start: u32 (byte offset into source)
+    8       4     end: u32 (byte offset past token)
+    12      4     data: u32 (reserved for future use)
+    Total: 16 bytes per token
+
+  MacroExpander Token (macro_expander.rs):
+    Offset  Size  Field
+    0       1     kind: TokenKind (enum, 8 variants)
+    1       3     (padding)
+    4       4     offset: u32 (byte offset into source)
+    8       4     length: u32 (token length in bytes)
+    12      4     line: u32
+    16      4     column: u32
+    Total: 20 bytes per token
+
+  MacroExpander Internal State:
+    - definitions: HashMap<String, MacroDefinition>
+    - string_interner: HashMap<String, u32> (maps string -> offset in string_data)
+    - string_data: Vec<u8> (null-terminated string pool)
+    - active_macros: Vec<String> (recursion guard for macro expansion)
+
+  MacroDefinition Variants:
+    ObjectLike { replacement: Vec<Token> }
+    FunctionLike { params: Vec<String>, is_variadic: bool, replacement: Vec<Token> }
+
+side_effects:
+  - "Lexer::new() borrows the source slice; no allocation"
+  - "Lexer::with_arena() stores a reference to the Arena for potential node allocation"
+  - "MacroExpander::new() takes a mutable reference to the Arena"
+  - "MacroExpander::expand_macros() allocates CAstNode structures into the Arena"
+  - "MacroExpander::build_expanded_ast() creates a root node and child nodes in the Arena"
+  - "MacroExpander::expand_to_dual_node() creates dual-node representation (invocation + expansion)"
+  - "String interning appends to string_data Vec; no deduplication beyond HashMap lookup"
+  - "The lexer.rs module and macro_expander.rs module have DIFFERENT Token structs"
+
+llm_usage_examples:
+  - name: "Basic lexing"
+    description: "Tokenize a C source string using the byte-level lexer"
+    code: |
+      use optic_c::frontend::lexer::{Lexer, TokenKind};
+
+      let source = b"int main() { return 42; }";
+      let mut lexer = Lexer::new(source);
+
+      loop {
+          let token = lexer.next_token();
+          if token.kind == TokenKind::EndOfFile {
+              break;
+          }
+          let text = lexer.token_text(&token);
+          println!("token: {:?} text: {:?}", token.kind, text);
+      }
+
+  - name: "Keyword detection"
+    description: "Check if an identifier token is a C99 keyword"
+    code: |
+      use optic_c::frontend::lexer::{Lexer, TokenKind, get_keyword_index};
+
+      let source = b"if while for return";
+      let mut lexer = Lexer::new(source);
+
+      let t1 = lexer.next_token();
+      assert!(lexer.is_keyword(&t1)); // "if" is a keyword
+
+      let text = lexer.token_text(&t1);
+      if let Some(idx) = get_keyword_index(text) {
+          println!("Keyword index: {}", idx); // idx >= 256
+      }
+
+  - name: "Macro definition and expansion"
+    description: "Define and expand object-like and function-like macros"
+    code: |
+      use optic_c::arena::Arena;
+      use optic_c::frontend::macro_expander::{MacroExpander, MacroDefinition, Token, TokenKind};
+
+      let mut arena = Arena::new("/tmp/macro.arena", 1024)?;
+      let mut expander = MacroExpander::new(&mut arena);
+
+      // Define an object-like macro
+      expander.define_macro("PI", MacroDefinition::ObjectLike {
+          replacement: vec![/* tokens for 3.14 */],
+      });
+
+      // Define a function-like macro
+      expander.define_macro("MAX", MacroDefinition::FunctionLike {
+          params: vec!["a".to_string(), "b".to_string()],
+          is_variadic: false,
+          replacement: vec![/* tokens for (a > b ? a : b) */],
+      });
+
+      // Expand macros in a token stream
+      let expanded = expander.expand_macros(&tokens, source);
+
+  - name: "Build expanded AST"
+    description: "Expand macros and build an AST directly into the arena"
+    code: |
+      use optic_c::arena::Arena;
+      use optic_c::frontend::macro_expander::MacroExpander;
+
+      let mut arena = Arena::new("/tmp/macro_ast.arena", 4096)?;
+      let mut expander = MacroExpander::new(&mut arena);
+
+      // Define macros first
+      expander.define_macro("NULL", MacroDefinition::ObjectLike {
+          replacement: vec![],
+      });
+
+      // Build AST from tokens with macro expansion
+      let root = expander.build_expanded_ast(&tokens, source);
+      // root is a NodeOffset to the arena root node
+
+  - name: "Dual-node macro expansion"
+    description: "Create a dual-node representation linking invocation to expansion"
+    code: |
+      use optic_c::arena::{Arena, NodeOffset};
+      use optic_c::frontend::macro_expander::MacroExpander;
+
+      let mut arena = Arena::new("/tmp/dual.arena", 4096)?;
+      let mut expander = MacroExpander::new(&mut arena);
+
+      // invocation_offset is the NodeOffset of the macro invocation site
+      let expanded = expander.expand_to_dual_node(
+          invocation_offset,
+          "MAX",
+          Some(&[arg_tokens]),
+          source,
+      )?;
+
+      // Link back from invocation to expansion
+      let invocation = expander.get_invocation_link(expanded);
+
+api_reference:
+  types:
+    Lexer:
+      description: "Byte-level C99 lexer that tokenizes source into tokens"
+      fields:
+        - "source: &'a [u8]"
+        - "position: u32"
+        - "arena: Option<&'a Arena>"
+      methods:
+        - "new(source: &'a [u8]) -> Self"
+        - "with_arena(source: &'a [u8], arena: &'a Arena) -> Self"
+        - "next_token(&mut self) -> Token"
+        - "token_text(&self, token: &Token) -> &'a [u8]"
+        - "is_keyword(&self, token: &Token) -> bool"
+
+    TokenKind (lexer.rs):
+      description: "Token types for the byte-level lexer"
+      variants:
+        - "EndOfFile"
+        - "Keyword"
+        - "Identifier"
+        - "NumericConstant"
+        - "StringLiteral"
+        - "Punctuator"
+        - "Preprocessor"
+        - "Comment"
+        - "WhiteSpace"
+
+    Token (lexer.rs):
+      description: "Token from the byte-level lexer"
+      fields:
+        - "kind: TokenKind"
+        - "start: u32"
+        - "end: u32"
+        - "data: u32"
+
+    MacroExpander:
+      description: "Macro expansion engine that builds AST nodes into the arena"
+      fields:
+        - "arena: &'a mut Arena"
+        - "definitions: HashMap<String, MacroDefinition>"
+        - "string_interner: HashMap<String, u32>"
+        - "string_data: Vec<u8>"
+        - "active_macros: Vec<String>"
+      methods:
+        - "new(arena: &'a mut Arena) -> Self"
+        - "define_macro(&mut self, name: &str, definition: MacroDefinition)"
+        - "is_macro_defined(&self, name: &str) -> bool"
+        - "get_macro_definition(&self, name: &str) -> Option<&MacroDefinition>"
+        - "expand_macros(&mut self, tokens: &[Token], source: &str) -> Vec<Token>"
+        - "build_expanded_ast(&mut self, tokens: &[Token], source: &str) -> NodeOffset"
+        - "expand_to_dual_node(&mut self, invocation_offset: NodeOffset, name: &str, args: Option<&[Vec<Token>]>, source: &str) -> NodeOffset"
+        - "get_invocation_link(&self, expanded_node: NodeOffset) -> Option<NodeOffset>"
+
+    MacroDefinition:
+      description: "Represents a macro definition"
+      variants:
+        - "ObjectLike { replacement: Vec<Token> }"
+        - "FunctionLike { params: Vec<String>, is_variadic: bool, replacement: Vec<Token> }"
+
+    Token (macro_expander.rs):
+      description: "Token from the macro expander's internal lexer"
+      fields:
+        - "kind: TokenKind"
+        - "offset: u32"
+        - "length: u32"
+        - "line: u32"
+        - "column: u32"
+
+    TokenKind (macro_expander.rs):
+      description: "Token types for the macro expander"
+      variants:
+        - "EndOfFile"
+        - "Identifier"
+        - "Number"
+        - "StringLiteral"
+        - "Punctuator"
+        - "Whitespace"
+        - "Hash"
+        - "HashHash"
+
+  supported_keywords:
+    - "auto, break, case, char, const, continue, default, do, double, else"
+    - "enum, extern, float, for, goto, if, inline, int, long, register"
+    - "restrict, return, short, signed, sizeof, static, struct, switch"
+    - "typedef, union, unsigned, void, volatile, while"
+    - "_Bool, _Complex, _Imaginary"
+
+  supported_punctuators:
+    - "Single: [ ] ( ) { } . & * + - ~ ! / % < > ^ | ? : ; = , # @"
+    - "Multi: ... >>= <<= += -= *= /= %= &= ^= |= >> << ++ -- -> && || <= >= == != ##"
