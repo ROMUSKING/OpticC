@@ -1,9 +1,61 @@
+# --- Rust ---
+target/
+Cargo.lock
+
+# --- SQLite amalgamation (download at build time) ---
+sqlite-amalgamation-*.zip
+sqlite-amalgamation-*/
+libsqlite3.so
+
+# --- LLVM IR output (build artifacts) ---
+*.ll
+*.bc
+
+# --- VFS output (runtime generated) ---
+vfs_output/
+
+# --- Temporary directory ---
+tmp/
+
+# --- OS files ---
+.DS_Store
+Thumbs.db
+
+# --- IDE/Editor ---
+.vscode/
+.idea/
+*.iml
+*.swp
+*~
+
+# --- Build artifacts ---
+*.o
+*.a
+*.so
+*.exe
+*.dSYM/
+*.dll
+*.dylib
+
+# --- Debug/Arena files ---
+*.arena
+*.bin
+
+# --- Temporary files ---
+*.tmp
+*.bak
+
+# --- Environment ---
+.env
+
+# --- Node/JS ---
 node_modules/
 build/
 dist/
 coverage/
-.DS_Store
-*.log
-.env*
-!.env.example
-target/
+
+# --- Python ---
+__pycache__/
+*.pyc
+.venv/
+venv/
