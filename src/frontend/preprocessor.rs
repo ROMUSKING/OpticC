@@ -357,6 +357,29 @@ impl Preprocessor {
         let mut col: u32 = 1;
 
         while let Some(&ch) = chars.peek() {
+            if ch == '\\' {
+                let mut lookahead = chars.clone();
+                lookahead.next();
+                match lookahead.next() {
+                    Some('\n') => {
+                        chars.next();
+                        chars.next();
+                        line += 1;
+                        col = 1;
+                        continue;
+                    }
+                    Some('\r') if lookahead.next() == Some('\n') => {
+                        chars.next();
+                        chars.next();
+                        chars.next();
+                        line += 1;
+                        col = 1;
+                        continue;
+                    }
+                    _ => {}
+                }
+            }
+
             match ch {
                 '\n' => {
                     chars.next();
@@ -548,6 +571,16 @@ impl Preprocessor {
                     let ch = chars.next().unwrap();
                     col += 1;
                     let mut text = ch.to_string();
+                    if ch == '.' && chars.peek() == Some(&'.') {
+                        let mut ellipsis = chars.clone();
+                        ellipsis.next();
+                        if ellipsis.next() == Some('.') {
+                            chars.next();
+                            chars.next();
+                            col += 2;
+                            text = "...".to_string();
+                        }
+                    }
                     if let Some(&next) = chars.peek() {
                         let two_char = format!("{}{}", ch, next);
                         if matches!(two_char.as_str(), "==" | "!=" | "<=" | ">=" | "&&" | "||" | "<<" | ">>") {
@@ -1909,7 +1942,16 @@ impl Preprocessor {
                     // __VA_ARGS__ is replaced with all arguments beyond the named params
                     let va_start = params.len();
                     if va_start < args.len() {
-                        for arg in args.iter().skip(va_start) {
+                        for (idx, arg) in args.iter().skip(va_start).enumerate() {
+                            if idx > 0 {
+                                result.push(Token::new(
+                                    TokenKind::Punctuator,
+                                    ",".to_string(),
+                                    replacement[i].line,
+                                    replacement[i].column,
+                                    replacement[i].file.clone(),
+                                ));
+                            }
                             result.extend(arg.clone());
                         }
                     }
@@ -2058,6 +2100,32 @@ const char *s = STR(hello world);"#;
 
         let non_ws: Vec<&Token> = tokens.iter().filter(|t| !t.is_whitespace()).collect();
         assert!(non_ws.iter().any(|t| t.text == "xy"));
+    }
+
+    #[test]
+    fn test_variadic_macro_expansion_preserves_commas() {
+        let (mut pp, _temp_dir) = create_test_preprocessor();
+
+        let source = "#define TRACE(fmt, ...) log(fmt, __VA_ARGS__)\nTRACE(\"%d\", x, y);";
+        let tokens = pp.process_source(source, "test.c").unwrap();
+
+        let non_ws: Vec<&Token> = tokens.iter().filter(|t| !t.is_whitespace()).collect();
+        let texts: Vec<&str> = non_ws.iter().map(|t| t.text.as_str()).collect();
+        assert!(texts.windows(8).any(|window| {
+            window == ["log", "(", "\"%d\"", ",", "x", ",", "y", ")"]
+        }));
+    }
+
+    #[test]
+    fn test_define_line_continuation() {
+        let (mut pp, _temp_dir) = create_test_preprocessor();
+
+        let source = "#define ADD(a, b) a + \\\n b\nint x = ADD(1, 2);";
+        let tokens = pp.process_source(source, "test.c").unwrap();
+
+        let non_ws: Vec<&Token> = tokens.iter().filter(|t| !t.is_whitespace()).collect();
+        let texts: Vec<&str> = non_ws.iter().map(|t| t.text.as_str()).collect();
+        assert!(texts.windows(3).any(|window| window == ["1", "+", "2"]));
     }
 
     #[test]
