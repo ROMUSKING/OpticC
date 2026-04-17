@@ -69,6 +69,7 @@ OpticC is organized into 4 milestone phases. Each phase has a Definition of Done
 | 15 | `15_benchmark.md` | Jules-Benchmark | 14 | ✅ COMPLETE (31 tests) |
 | - | Parser wiring | Jules-Parser | 10 | ✅ COMPLETE (6 integration tests) |
 | - | Backend types | Jules-Backend | 11 | ✅ COMPLETE (13 tests, typed codegen) |
+| - | Integration test | Jules-Integration | 10-15 | ✅ COMPLETE (20 tests) |
 
 **Definition of Done**:
 - [x] Preprocessor handles `#include`, `#define`, `#ifdef`, `#pragma` (21 tests)
@@ -78,7 +79,8 @@ OpticC is organized into 4 milestone phases. Each phase has a Definition of Done
 - [x] Inline assembly with operands, clobbers, volatile flag (15 tests)
 - [x] Build system: multi-file compilation, linking, parallel builds (22 tests)
 - [x] Benchmark suite vs GCC/Clang (31 tests)
-- [ ] `optic_c build` compiles SQLite to `libsqlite3.so` (integration test)
+- [x] Integration test module with SQLite pipeline (20 tests)
+- [ ] `optic_c build` compiles SQLite to `libsqlite3.so` (requires LLVM toolchain)
 - [ ] SQLite's test suite passes with the compiled library
 
 ### Phase 3: Linux Kernel Compilation (FUTURE)
