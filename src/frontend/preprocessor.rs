@@ -208,30 +208,30 @@ impl Preprocessor {
     }
 
     fn define_predefined_macros(&mut self) {
-        self.macros.insert(
-            "__STDC__".to_string(),
-            MacroDefinition::ObjectLike {
-                replacement: vec![Token::new(TokenKind::IntLiteral, "1".to_string(), 0, 0, String::new())],
-            },
-        );
-        self.macros.insert(
-            "__STDC_VERSION__".to_string(),
-            MacroDefinition::ObjectLike {
-                replacement: vec![Token::new(TokenKind::IntLiteral, "201112L".to_string(), 0, 0, String::new())],
-            },
-        );
-        self.macros.insert(
-            "__GNUC__".to_string(),
-            MacroDefinition::ObjectLike {
-                replacement: vec![Token::new(TokenKind::IntLiteral, "4".to_string(), 0, 0, String::new())],
-            },
-        );
-        self.macros.insert(
-            "__GNUC_MINOR__".to_string(),
-            MacroDefinition::ObjectLike {
-                replacement: vec![Token::new(TokenKind::IntLiteral, "2".to_string(), 0, 0, String::new())],
-            },
-        );
+        let predefined_int_macros = [
+            ("__STDC__", "1".to_string()),
+            ("__STDC_VERSION__", "201112L".to_string()),
+            ("__STDC_HOSTED__", "1".to_string()),
+            ("__GNUC__", "4".to_string()),
+            ("__GNUC_MINOR__", "2".to_string()),
+            ("__GNUC_PATCHLEVEL__", "1".to_string()),
+            ("__SIZEOF_SHORT__", std::mem::size_of::<i16>().to_string()),
+            ("__SIZEOF_INT__", std::mem::size_of::<i32>().to_string()),
+            ("__SIZEOF_LONG__", std::mem::size_of::<libc::c_long>().to_string()),
+            ("__SIZEOF_LONG_LONG__", std::mem::size_of::<i64>().to_string()),
+            ("__SIZEOF_POINTER__", std::mem::size_of::<usize>().to_string()),
+            ("__SIZEOF_SIZE_T__", std::mem::size_of::<usize>().to_string()),
+            ("__SIZEOF_PTRDIFF_T__", std::mem::size_of::<isize>().to_string()),
+        ];
+
+        for (name, value) in predefined_int_macros {
+            self.macros.insert(
+                name.to_string(),
+                MacroDefinition::ObjectLike {
+                    replacement: vec![Token::new(TokenKind::IntLiteral, value, 0, 0, String::new())],
+                },
+            );
+        }
     }
 
     fn tokenize_replacement(&self, text: &str) -> Vec<Token> {
@@ -1427,8 +1427,18 @@ impl Preprocessor {
                 match def {
                     MacroDefinition::ObjectLike { replacement } => {
                         if let Some(first) = replacement.iter().find(|t| !t.is_whitespace()) {
-                            if let Ok(val) = first.text.parse::<i64>() {
-                                return Ok((val, j + 1));
+                            match first.kind {
+                                TokenKind::IntLiteral => {
+                                    return Ok((self.parse_int_literal(&first.text), j + 1));
+                                }
+                                TokenKind::CharLiteral => {
+                                    return Ok((self.parse_char_literal(&first.text), j + 1));
+                                }
+                                _ => {
+                                    if let Ok(val) = first.text.parse::<i64>() {
+                                        return Ok((val, j + 1));
+                                    }
+                                }
                             }
                         }
                         Ok((1, j + 1))
@@ -1439,18 +1449,7 @@ impl Preprocessor {
                 Ok((0, j + 1))
             }
         } else if tokens[j].kind == PpTokenKind::CharLit {
-            let text = &tokens[j].text;
-            if text.len() >= 2 {
-                let inner = &text[1..text.len() - 1];
-                if !inner.is_empty() {
-                    let ch = inner.chars().next().unwrap_or('\0');
-                    Ok((ch as i64, j + 1))
-                } else {
-                    Ok((0, j + 1))
-                }
-            } else {
-                Ok((0, j + 1))
-            }
+            Ok((self.parse_char_literal(&tokens[j].text), j + 1))
         } else {
             Err(PreprocessorError::ConditionalError(format!(
                 "unexpected token in #if expression: {}",
@@ -1510,6 +1509,16 @@ impl Preprocessor {
         } else {
             text.parse::<i64>().unwrap_or(0)
         }
+    }
+
+    fn parse_char_literal(&self, text: &str) -> i64 {
+        if text.len() >= 2 {
+            let inner = &text[1..text.len() - 1];
+            if !inner.is_empty() {
+                return inner.chars().next().unwrap_or('\0') as i64;
+            }
+        }
+        0
     }
 
     fn parse_pragma_text(&self, tokens: &[PpToken], start: usize) -> (String, usize) {
@@ -2129,11 +2138,34 @@ const char *s = STR(hello world);"#;
     fn test_predefined_macros() {
         let (mut pp, _temp_dir) = create_test_preprocessor();
 
-        let source = "int a = __STDC__;";
+        let source = "int a = __STDC__; int b = __GNUC_PATCHLEVEL__; int c = __SIZEOF_POINTER__;";
         let tokens = pp.process_source(source, "test.c").unwrap();
 
         let non_ws: Vec<&Token> = tokens.iter().filter(|t| !t.is_whitespace()).collect();
         assert!(non_ws.iter().any(|t| t.text == "1"));
+        assert!(non_ws.iter().any(|t| t.text == &std::mem::size_of::<usize>().to_string()));
+    }
+
+    #[test]
+    fn test_predefined_macros_in_if_expressions() {
+        let (mut pp, _temp_dir) = create_test_preprocessor();
+
+        let source = "#if __STDC_VERSION__ >= 201112L && __GNUC_PATCHLEVEL__ >= 0\nint standards_ok = 1;\n#endif";
+        let tokens = pp.process_source(source, "test.c").unwrap();
+
+        let non_ws: Vec<&Token> = tokens.iter().filter(|t| !t.is_whitespace()).collect();
+        assert!(non_ws.iter().any(|t| t.text == "standards_ok"));
+    }
+
+    #[test]
+    fn test_sizeof_predefined_macros_in_if_expressions() {
+        let (mut pp, _temp_dir) = create_test_preprocessor();
+
+        let source = "#if __SIZEOF_POINTER__ >= 4 && __STDC_HOSTED__ == 1\nint abi_ok = 1;\n#endif";
+        let tokens = pp.process_source(source, "test.c").unwrap();
+
+        let non_ws: Vec<&Token> = tokens.iter().filter(|t| !t.is_whitespace()).collect();
+        assert!(non_ws.iter().any(|t| t.text == "abi_ok"));
     }
 
     #[test]
