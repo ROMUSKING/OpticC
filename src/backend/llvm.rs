@@ -1,10 +1,10 @@
-use crate::arena::{Arena, CAstNode, NodeOffset, NodeFlags};
-use crate::types::{TypeSystem, TypeId, CType};
+use crate::arena::{Arena, CAstNode, NodeFlags, NodeOffset};
+use crate::types::{CType, TypeId, TypeSystem};
+use inkwell::builder::Builder;
 use inkwell::context::Context;
 use inkwell::module::Module;
-use inkwell::builder::Builder;
-use inkwell::types::{BasicType, BasicTypeEnum, BasicMetadataTypeEnum};
-use inkwell::values::{BasicValueEnum, FunctionValue, PointerValue, BasicValue};
+use inkwell::types::{BasicMetadataTypeEnum, BasicType, BasicTypeEnum};
+use inkwell::values::{BasicValue, BasicValueEnum, FunctionValue, PointerValue};
 use inkwell::AddressSpace;
 use std::collections::HashMap;
 
@@ -47,7 +47,11 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
         }
     }
 
-    pub fn with_types(context: &'ctx Context, module_name: &str, types: &'types TypeSystem) -> LlvmBackend<'ctx, 'types> {
+    pub fn with_types(
+        context: &'ctx Context,
+        module_name: &str,
+        types: &'types TypeSystem,
+    ) -> LlvmBackend<'ctx, 'types> {
         let module = context.create_module(module_name);
         let builder = context.create_builder();
         LlvmBackend {
@@ -83,7 +87,10 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                 Some(CType::Float) => self.context.f32_type().as_basic_type_enum(),
                 Some(CType::Double) => self.context.f64_type().as_basic_type_enum(),
                 Some(CType::LongDouble) => self.context.f64_type().as_basic_type_enum(),
-                Some(CType::Pointer { .. }) => self.context.ptr_type(AddressSpace::default()).as_basic_type_enum(),
+                Some(CType::Pointer { .. }) => self
+                    .context
+                    .ptr_type(AddressSpace::default())
+                    .as_basic_type_enum(),
                 Some(CType::Array { element, size }) => {
                     let elem_type = self.to_llvm_type(element.0);
                     let len = size.unwrap_or(0);
@@ -97,14 +104,18 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                     if field_types.is_empty() {
                         self.context.i8_type().as_basic_type_enum()
                     } else {
-                        self.context.struct_type(&field_types, false).as_basic_type_enum()
+                        self.context
+                            .struct_type(&field_types, false)
+                            .as_basic_type_enum()
                     }
                 }
                 Some(CType::Enum { .. }) => self.context.i32_type().as_basic_type_enum(),
                 Some(CType::Function { .. }) => self.context.i32_type().as_basic_type_enum(),
                 Some(CType::Typedef { underlying, .. }) => self.to_llvm_type(underlying.0),
                 Some(CType::Qualified { base, .. }) => self.to_llvm_type(base.0),
-                Some(CType::Union { .. }) => self.context.i8_type().array_type(1).as_basic_type_enum(),
+                Some(CType::Union { .. }) => {
+                    self.context.i8_type().array_type(1).as_basic_type_enum()
+                }
                 None => self.context.i32_type().as_basic_type_enum(),
             }
         } else {
@@ -131,7 +142,7 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
         7
     }
 
-pub fn compile(&mut self, arena: &Arena, root: NodeOffset) -> Result<(), BackendError> {
+    pub fn compile(&mut self, arena: &Arena, root: NodeOffset) -> Result<(), BackendError> {
         self.lower_translation_unit(arena, root)?;
         Ok(())
     }
@@ -140,24 +151,51 @@ pub fn compile(&mut self, arena: &Arena, root: NodeOffset) -> Result<(), Backend
         &self.module
     }
 
-    fn lower_translation_unit(&mut self, arena: &Arena, offset: NodeOffset) -> Result<(), BackendError> {
+    fn lower_translation_unit(
+        &mut self,
+        arena: &Arena,
+        offset: NodeOffset,
+    ) -> Result<(), BackendError> {
         eprintln!("lower_translation_unit: starting at offset={:?}", offset);
         let mut child_offset = offset;
         while child_offset != NodeOffset::NULL {
             if let Some(node) = arena.get(child_offset) {
-                eprintln!("  visiting node kind={} data={} first_child={:?} next_sibling={:?}",
-                    node.kind, node.data, node.first_child, node.next_sibling);
+                eprintln!(
+                    "  visiting node kind={} data={} first_child={:?} next_sibling={:?}",
+                    node.kind, node.data, node.first_child, node.next_sibling
+                );
                 match node.kind {
-                    1..=9 | 83 => { eprintln!("    -> skipped type node"); }
-                    20 => { eprintln!("    -> processing as decl"); self.lower_decl(arena, node)?; }
-                    22 => { eprintln!("    -> processing as func_decl"); self.lower_func_decl(arena, node)?; }
-                    23 => { eprintln!("    -> processing as func_def"); self.lower_func_def(arena, node)?; }
-                    101..=105 => { eprintln!("    -> skipped storage class"); }
-                    _ => { eprintln!("  WARNING: skipping unknown node kind={} at top level", node.kind); }
+                    1..=9 | 83 => {
+                        eprintln!("    -> skipped type node");
+                    }
+                    20 => {
+                        eprintln!("    -> processing as decl");
+                        self.lower_decl(arena, node)?;
+                    }
+                    22 => {
+                        eprintln!("    -> processing as func_decl");
+                        self.lower_func_decl(arena, node)?;
+                    }
+                    23 => {
+                        eprintln!("    -> processing as func_def");
+                        self.lower_func_def(arena, node)?;
+                    }
+                    101..=105 => {
+                        eprintln!("    -> skipped storage class");
+                    }
+                    _ => {
+                        eprintln!(
+                            "  WARNING: skipping unknown node kind={} at top level",
+                            node.kind
+                        );
+                    }
                 }
                 child_offset = node.next_sibling;
             } else {
-                eprintln!("  child_offset {:?} is NULL/invalid, breaking", child_offset);
+                eprintln!(
+                    "  child_offset {:?} is NULL/invalid, breaking",
+                    child_offset
+                );
                 break;
             }
         }
@@ -166,16 +204,33 @@ pub fn compile(&mut self, arena: &Arena, root: NodeOffset) -> Result<(), Backend
     }
 
     fn lower_decl(&mut self, arena: &Arena, node: &CAstNode) -> Result<(), BackendError> {
-        eprintln!("  lower_decl: node kind={} first_child={:?}", node.kind, node.first_child);
+        eprintln!(
+            "  lower_decl: node kind={} first_child={:?}",
+            node.kind, node.first_child
+        );
         let mut child_offset = node.first_child;
         while child_offset != NodeOffset::NULL {
             if let Some(child) = arena.get(child_offset) {
-                eprintln!("    decl child: kind={} data={} first_child={:?}", child.kind, child.data, child.first_child);
+                eprintln!(
+                    "    decl child: kind={} data={} first_child={:?}",
+                    child.kind, child.data, child.first_child
+                );
                 match child.kind {
-                    21 => { eprintln!("      -> var_decl"); self.lower_var_decl(arena, &child)?; }
-                    22 => { eprintln!("      -> func_decl"); self.lower_func_decl(arena, &child)?; }
-                    23 => { eprintln!("      -> func_def"); self.lower_func_def(arena, &child)?; }
-                    _ => { eprintln!("      -> unknown, skipped"); }
+                    21 => {
+                        eprintln!("      -> var_decl");
+                        self.lower_var_decl(arena, &child)?;
+                    }
+                    22 => {
+                        eprintln!("      -> func_decl");
+                        self.lower_func_decl(arena, &child)?;
+                    }
+                    23 => {
+                        eprintln!("      -> func_def");
+                        self.lower_func_def(arena, &child)?;
+                    }
+                    _ => {
+                        eprintln!("      -> unknown, skipped");
+                    }
                 }
                 child_offset = child.next_sibling;
             } else {
@@ -190,7 +245,9 @@ pub fn compile(&mut self, arena: &Arena, root: NodeOffset) -> Result<(), Backend
         let var_name = name.as_deref().unwrap_or("var");
         let type_id = self.default_type();
         let alloca_type = self.to_llvm_type(type_id);
-        let var_ptr = self.builder.build_alloca(alloca_type, var_name)
+        let var_ptr = self
+            .builder
+            .build_alloca(alloca_type, var_name)
             .map_err(|_| BackendError::InvalidNode)?;
         if let Some(n) = name {
             self.variables.insert(
@@ -207,7 +264,9 @@ pub fn compile(&mut self, arena: &Arena, root: NodeOffset) -> Result<(), Backend
             if let Some(child) = arena.get(child_offset) {
                 if matches!(child.kind, 64..=73 | 80..=82 | 60..=62) {
                     if let Some(val) = self.lower_expr(arena, child_offset)? {
-                        let _ = self.builder.build_store(var_ptr, val)
+                        let _ = self
+                            .builder
+                            .build_store(var_ptr, val)
                             .map_err(|_| BackendError::InvalidNode);
                     }
                 }
@@ -261,7 +320,8 @@ pub fn compile(&mut self, arena: &Arena, root: NodeOffset) -> Result<(), Backend
                                             while decl != NodeOffset::NULL {
                                                 if let Some(d) = arena.get(decl) {
                                                     if d.kind == 60 {
-                                                        pname = arena.get_string(NodeOffset(d.data));
+                                                        pname =
+                                                            arena.get_string(NodeOffset(d.data));
                                                         break;
                                                     }
                                                     decl = d.next_sibling;
@@ -322,11 +382,15 @@ pub fn compile(&mut self, arena: &Arena, root: NodeOffset) -> Result<(), Backend
         for (i, pname) in param_names.iter().enumerate() {
             let param_type_id = self.default_type();
             let param_llvm_type = self.to_llvm_type(param_type_id);
-            let param_ptr = self.builder.build_alloca(param_llvm_type, pname)
+            let param_ptr = self
+                .builder
+                .build_alloca(param_llvm_type, pname)
                 .map_err(|_| BackendError::InvalidNode)?;
-            let param_val = function.get_nth_param(i as u32)
+            let param_val = function
+                .get_nth_param(i as u32)
                 .ok_or(BackendError::InvalidNode)?;
-            self.builder.build_store(param_ptr, param_val)
+            self.builder
+                .build_store(param_ptr, param_val)
                 .map_err(|_| BackendError::InvalidNode)?;
             self.variables.insert(
                 pname.clone(),
@@ -347,12 +411,14 @@ pub fn compile(&mut self, arena: &Arena, root: NodeOffset) -> Result<(), Backend
         if let Some(bb) = last_block {
             if bb.get_terminator().is_none() {
                 if is_void_ret {
-                    self.builder.build_return(None)
+                    self.builder
+                        .build_return(None)
                         .map_err(|_| BackendError::InvalidNode)?;
                 } else {
                     let ret_bt = self.to_llvm_type(return_type_id);
                     let int_type = ret_bt.into_int_type();
-                    self.builder.build_return(Some(&int_type.const_int(0, false)))
+                    self.builder
+                        .build_return(Some(&int_type.const_int(0, false)))
                         .map_err(|_| BackendError::InvalidNode)?;
                 }
             }
@@ -410,14 +476,25 @@ pub fn compile(&mut self, arena: &Arena, root: NodeOffset) -> Result<(), Backend
 
     fn lower_if_stmt(&mut self, arena: &Arena, node: &CAstNode) -> Result<(), BackendError> {
         let cond_offset = node.first_child;
-        let then_offset = if let Some(c) = arena.get(cond_offset) { c.next_sibling } else { NodeOffset::NULL };
-        let else_offset = if let Some(c) = arena.get(then_offset) { c.next_sibling } else { NodeOffset::NULL };
+        let then_offset = if let Some(c) = arena.get(cond_offset) {
+            c.next_sibling
+        } else {
+            NodeOffset::NULL
+        };
+        let else_offset = if let Some(c) = arena.get(then_offset) {
+            c.next_sibling
+        } else {
+            NodeOffset::NULL
+        };
 
-        let function = self.builder.get_insert_block()
+        let function = self
+            .builder
+            .get_insert_block()
             .and_then(|bb| bb.get_parent())
             .ok_or(BackendError::InvalidNode)?;
 
-        let cond_val = self.lower_expr(arena, cond_offset)?
+        let cond_val = self
+            .lower_expr(arena, cond_offset)?
             .ok_or(BackendError::InvalidNode)?;
 
         let cond_int = if cond_val.is_int_value() {
@@ -430,13 +507,20 @@ pub fn compile(&mut self, arena: &Arena, root: NodeOffset) -> Result<(), Backend
         let else_bb = self.context.append_basic_block(function, "else");
         let merge_bb = self.context.append_basic_block(function, "merge");
 
-        self.builder.build_conditional_branch(cond_int, then_bb, else_bb)
+        self.builder
+            .build_conditional_branch(cond_int, then_bb, else_bb)
             .map_err(|_| BackendError::InvalidNode)?;
 
         self.builder.position_at_end(then_bb);
         self.lower_stmt(arena, then_offset)?;
-        if self.builder.get_insert_block().and_then(|bb| bb.get_terminator()).is_none() {
-            self.builder.build_unconditional_branch(merge_bb)
+        if self
+            .builder
+            .get_insert_block()
+            .and_then(|bb| bb.get_terminator())
+            .is_none()
+        {
+            self.builder
+                .build_unconditional_branch(merge_bb)
                 .map_err(|_| BackendError::InvalidNode)?;
         }
 
@@ -444,8 +528,14 @@ pub fn compile(&mut self, arena: &Arena, root: NodeOffset) -> Result<(), Backend
         if else_offset != NodeOffset::NULL {
             self.lower_stmt(arena, else_offset)?;
         }
-        if self.builder.get_insert_block().and_then(|bb| bb.get_terminator()).is_none() {
-            self.builder.build_unconditional_branch(merge_bb)
+        if self
+            .builder
+            .get_insert_block()
+            .and_then(|bb| bb.get_terminator())
+            .is_none()
+        {
+            self.builder
+                .build_unconditional_branch(merge_bb)
                 .map_err(|_| BackendError::InvalidNode)?;
         }
 
@@ -455,9 +545,15 @@ pub fn compile(&mut self, arena: &Arena, root: NodeOffset) -> Result<(), Backend
 
     fn lower_while_stmt(&mut self, arena: &Arena, node: &CAstNode) -> Result<(), BackendError> {
         let cond_offset = node.first_child;
-        let body_offset = if let Some(c) = arena.get(cond_offset) { c.next_sibling } else { NodeOffset::NULL };
+        let body_offset = if let Some(c) = arena.get(cond_offset) {
+            c.next_sibling
+        } else {
+            NodeOffset::NULL
+        };
 
-        let function = self.builder.get_insert_block()
+        let function = self
+            .builder
+            .get_insert_block()
             .and_then(|bb| bb.get_parent())
             .ok_or(BackendError::InvalidNode)?;
 
@@ -465,20 +561,33 @@ pub fn compile(&mut self, arena: &Arena, root: NodeOffset) -> Result<(), Backend
         let body_bb = self.context.append_basic_block(function, "while.body");
         let end_bb = self.context.append_basic_block(function, "while.end");
 
-        self.builder.build_unconditional_branch(cond_bb)
+        self.builder
+            .build_unconditional_branch(cond_bb)
             .map_err(|_| BackendError::InvalidNode)?;
 
         self.builder.position_at_end(cond_bb);
-        let cond_val = self.lower_expr(arena, cond_offset)?
+        let cond_val = self
+            .lower_expr(arena, cond_offset)?
             .ok_or(BackendError::InvalidNode)?;
-        let cond_int = if cond_val.is_int_value() { cond_val.into_int_value() } else { return Ok(()); };
-        self.builder.build_conditional_branch(cond_int, body_bb, end_bb)
+        let cond_int = if cond_val.is_int_value() {
+            cond_val.into_int_value()
+        } else {
+            return Ok(());
+        };
+        self.builder
+            .build_conditional_branch(cond_int, body_bb, end_bb)
             .map_err(|_| BackendError::InvalidNode)?;
 
         self.builder.position_at_end(body_bb);
         self.lower_stmt(arena, body_offset)?;
-        if self.builder.get_insert_block().and_then(|bb| bb.get_terminator()).is_none() {
-            self.builder.build_unconditional_branch(cond_bb)
+        if self
+            .builder
+            .get_insert_block()
+            .and_then(|bb| bb.get_terminator())
+            .is_none()
+        {
+            self.builder
+                .build_unconditional_branch(cond_bb)
                 .map_err(|_| BackendError::InvalidNode)?;
         }
 
@@ -487,7 +596,9 @@ pub fn compile(&mut self, arena: &Arena, root: NodeOffset) -> Result<(), Backend
     }
 
     fn lower_for_stmt(&mut self, arena: &Arena, node: &CAstNode) -> Result<(), BackendError> {
-        let function = self.builder.get_insert_block()
+        let function = self
+            .builder
+            .get_insert_block()
             .and_then(|bb| bb.get_parent())
             .ok_or(BackendError::InvalidNode)?;
 
@@ -500,40 +611,68 @@ pub fn compile(&mut self, arena: &Arena, root: NodeOffset) -> Result<(), Backend
         let body_bb = self.context.append_basic_block(function, "for.body");
         let end_bb = self.context.append_basic_block(function, "for.end");
 
-        self.builder.build_unconditional_branch(cond_bb)
+        self.builder
+            .build_unconditional_branch(cond_bb)
             .map_err(|_| BackendError::InvalidNode)?;
 
         self.builder.position_at_end(cond_bb);
-        let cond_offset = if let Some(c) = arena.get(init_offset) { c.next_sibling } else { NodeOffset::NULL };
+        let cond_offset = if let Some(c) = arena.get(init_offset) {
+            c.next_sibling
+        } else {
+            NodeOffset::NULL
+        };
         if cond_offset != NodeOffset::NULL {
             if let Some(cond_val) = self.lower_expr(arena, cond_offset)? {
-                let cond_int = if cond_val.is_int_value() { cond_val.into_int_value() } else { return Ok(()); };
-                self.builder.build_conditional_branch(cond_int, body_bb, end_bb)
+                let cond_int = if cond_val.is_int_value() {
+                    cond_val.into_int_value()
+                } else {
+                    return Ok(());
+                };
+                self.builder
+                    .build_conditional_branch(cond_int, body_bb, end_bb)
                     .map_err(|_| BackendError::InvalidNode)?;
             } else {
-                self.builder.build_unconditional_branch(body_bb)
+                self.builder
+                    .build_unconditional_branch(body_bb)
                     .map_err(|_| BackendError::InvalidNode)?;
             }
         } else {
-            self.builder.build_unconditional_branch(body_bb)
+            self.builder
+                .build_unconditional_branch(body_bb)
                 .map_err(|_| BackendError::InvalidNode)?;
         }
 
         self.builder.position_at_end(body_bb);
-        let body_offset = if let Some(c) = arena.get(cond_offset) { c.next_sibling } else { NodeOffset::NULL };
+        let body_offset = if let Some(c) = arena.get(cond_offset) {
+            c.next_sibling
+        } else {
+            NodeOffset::NULL
+        };
         if body_offset != NodeOffset::NULL {
             self.lower_stmt(arena, body_offset)?;
         }
 
         let incr_offset = if body_offset != NodeOffset::NULL {
-            if let Some(c) = arena.get(body_offset) { c.next_sibling } else { NodeOffset::NULL }
-        } else { NodeOffset::NULL };
+            if let Some(c) = arena.get(body_offset) {
+                c.next_sibling
+            } else {
+                NodeOffset::NULL
+            }
+        } else {
+            NodeOffset::NULL
+        };
         if incr_offset != NodeOffset::NULL {
             let _ = self.lower_expr(arena, incr_offset)?;
         }
 
-        if self.builder.get_insert_block().and_then(|bb| bb.get_terminator()).is_none() {
-            self.builder.build_unconditional_branch(cond_bb)
+        if self
+            .builder
+            .get_insert_block()
+            .and_then(|bb| bb.get_terminator())
+            .is_none()
+        {
+            self.builder
+                .build_unconditional_branch(cond_bb)
                 .map_err(|_| BackendError::InvalidNode)?;
         }
 
@@ -545,27 +684,37 @@ pub fn compile(&mut self, arena: &Arena, root: NodeOffset) -> Result<(), Backend
         eprintln!("lower_return_stmt: first_child={:?}", node.first_child);
         if node.first_child != NodeOffset::NULL {
             if let Some(val) = self.lower_expr(arena, node.first_child)? {
-                eprintln!("lower_return_stmt: val is_int={} is_float={}", val.is_int_value(), val.is_float_value());
+                eprintln!(
+                    "lower_return_stmt: val is_int={} is_float={}",
+                    val.is_int_value(),
+                    val.is_float_value()
+                );
                 if val.is_int_value() {
                     let int_val = val.into_int_value();
-                    self.builder.build_return(Some(&int_val))
-                        .map_err(|e| { eprintln!("build_return error: {:?}", e); BackendError::InvalidNode })?;
+                    self.builder.build_return(Some(&int_val)).map_err(|e| {
+                        eprintln!("build_return error: {:?}", e);
+                        BackendError::InvalidNode
+                    })?;
                 } else if val.is_float_value() {
                     let float_val = val.into_float_value();
-                    self.builder.build_return(Some(&float_val))
-                        .map_err(|e| { eprintln!("build_return error: {:?}", e); BackendError::InvalidNode })?;
+                    self.builder.build_return(Some(&float_val)).map_err(|e| {
+                        eprintln!("build_return error: {:?}", e);
+                        BackendError::InvalidNode
+                    })?;
                 } else {
                     eprintln!("lower_return_stmt: val not int/float, returning Ok");
                     return Ok(());
                 }
             } else {
                 eprintln!("lower_return_stmt: val is None, returning 0");
-                self.builder.build_return(Some(&self.context.i32_type().const_int(0, false)))
+                self.builder
+                    .build_return(Some(&self.context.i32_type().const_int(0, false)))
                     .map_err(|_| BackendError::InvalidNode)?;
             }
         } else {
             eprintln!("lower_return_stmt: no first_child, returning void");
-            self.builder.build_return(None)
+            self.builder
+                .build_return(None)
                 .map_err(|_| BackendError::InvalidNode)?;
         }
         Ok(())
@@ -578,7 +727,11 @@ pub fn compile(&mut self, arena: &Arena, root: NodeOffset) -> Result<(), Backend
         Ok(())
     }
 
-    fn lower_expr(&mut self, arena: &Arena, offset: NodeOffset) -> Result<Option<BasicValueEnum<'ctx>>, BackendError> {
+    fn lower_expr(
+        &mut self,
+        arena: &Arena,
+        offset: NodeOffset,
+    ) -> Result<Option<BasicValueEnum<'ctx>>, BackendError> {
         let node = match arena.get(offset) {
             Some(n) => n,
             None => return Ok(None),
@@ -588,7 +741,10 @@ pub fn compile(&mut self, arena: &Arena, root: NodeOffset) -> Result<(), Backend
             return Ok(None);
         }
 
-        eprintln!("lower_expr: offset={:?} kind={} data={}", offset, node.kind, node.data);
+        eprintln!(
+            "lower_expr: offset={:?} kind={} data={}",
+            offset, node.kind, node.data
+        );
         match node.kind {
             60 => self.lower_ident(arena, &node),
             61 => self.lower_int_const(&node),
@@ -615,11 +771,17 @@ pub fn compile(&mut self, arena: &Arena, root: NodeOffset) -> Result<(), Backend
         }
     }
 
-    fn lower_ident(&self, arena: &Arena, node: &CAstNode) -> Result<Option<BasicValueEnum<'ctx>>, BackendError> {
+    fn lower_ident(
+        &self,
+        arena: &Arena,
+        node: &CAstNode,
+    ) -> Result<Option<BasicValueEnum<'ctx>>, BackendError> {
         let name_offset = NodeOffset(node.data);
         if let Some(name) = arena.get_string(name_offset) {
             if let Some(ptr) = self.variables.get(name) {
-                let val = self.builder.build_load(ptr.pointee_type, ptr.ptr, name)
+                let val = self
+                    .builder
+                    .build_load(ptr.pointee_type, ptr.ptr, name)
                     .map_err(|_| BackendError::InvalidNode)?;
                 return Ok(Some(val));
             }
@@ -630,7 +792,10 @@ pub fn compile(&mut self, arena: &Arena, root: NodeOffset) -> Result<(), Backend
         Ok(None)
     }
 
-    fn lower_int_const(&self, node: &CAstNode) -> Result<Option<BasicValueEnum<'ctx>>, BackendError> {
+    fn lower_int_const(
+        &self,
+        node: &CAstNode,
+    ) -> Result<Option<BasicValueEnum<'ctx>>, BackendError> {
         let value = node.data as u64;
         if let Some(ts) = self.types {
             let type_id = 7;
@@ -639,7 +804,9 @@ pub fn compile(&mut self, arena: &Arena, root: NodeOffset) -> Result<(), Backend
                     CType::Char { .. } => self.context.i8_type().const_int(value, false).into(),
                     CType::Short { .. } => self.context.i16_type().const_int(value, false).into(),
                     CType::Int { .. } => self.context.i32_type().const_int(value, false).into(),
-                    CType::Long { .. } | CType::LongLong { .. } => self.context.i64_type().const_int(value, false).into(),
+                    CType::Long { .. } | CType::LongLong { .. } => {
+                        self.context.i64_type().const_int(value, false).into()
+                    }
                     _ => self.context.i32_type().const_int(value, false).into(),
                 }
             } else {
@@ -651,33 +818,53 @@ pub fn compile(&mut self, arena: &Arena, root: NodeOffset) -> Result<(), Backend
         }
     }
 
-    fn lower_char_const(&self, node: &CAstNode) -> Result<Option<BasicValueEnum<'ctx>>, BackendError> {
+    fn lower_char_const(
+        &self,
+        node: &CAstNode,
+    ) -> Result<Option<BasicValueEnum<'ctx>>, BackendError> {
         let value = node.data as u64;
         Ok(Some(self.context.i8_type().const_int(value, false).into()))
     }
 
-    fn lower_string_const(&self, node: &CAstNode) -> Result<Option<BasicValueEnum<'ctx>>, BackendError> {
+    fn lower_string_const(
+        &self,
+        node: &CAstNode,
+    ) -> Result<Option<BasicValueEnum<'ctx>>, BackendError> {
         let byte = node.data as u8;
         let string_val = self.context.const_string(&[byte], true);
-        let global = self.module.add_global(string_val.get_type(), Some(AddressSpace::default()), "str");
+        let global =
+            self.module
+                .add_global(string_val.get_type(), Some(AddressSpace::default()), "str");
         global.set_initializer(&string_val);
         global.set_constant(true);
         Ok(Some(global.as_pointer_value().into()))
     }
 
-    fn lower_float_const(&self, node: &CAstNode) -> Result<Option<BasicValueEnum<'ctx>>, BackendError> {
+    fn lower_float_const(
+        &self,
+        node: &CAstNode,
+    ) -> Result<Option<BasicValueEnum<'ctx>>, BackendError> {
         let val = node.data as f64;
         Ok(Some(self.context.f64_type().const_float(val).into()))
     }
 
-    fn lower_binop(&mut self, arena: &Arena, node: &CAstNode) -> Result<Option<BasicValueEnum<'ctx>>, BackendError> {
+    fn lower_binop(
+        &mut self,
+        arena: &Arena,
+        node: &CAstNode,
+    ) -> Result<Option<BasicValueEnum<'ctx>>, BackendError> {
         let lhs_offset = node.first_child;
         let rhs_offset = node.next_sibling;
 
-        eprintln!("lower_binop: node.data={} lhs_offset={:?} rhs_offset={:?}", node.data, lhs_offset, rhs_offset);
-        let lhs_val = self.lower_expr(arena, lhs_offset)?
+        eprintln!(
+            "lower_binop: node.data={} lhs_offset={:?} rhs_offset={:?}",
+            node.data, lhs_offset, rhs_offset
+        );
+        let lhs_val = self
+            .lower_expr(arena, lhs_offset)?
             .ok_or(BackendError::InvalidNode)?;
-        let rhs_val = self.lower_expr(arena, rhs_offset)?
+        let rhs_val = self
+            .lower_expr(arena, rhs_offset)?
             .ok_or(BackendError::InvalidNode)?;
 
         eprintln!("lower_binop: lhs_val={} rhs_val={}", lhs_val, rhs_val);
@@ -689,38 +876,70 @@ pub fn compile(&mut self, arena: &Arena, root: NodeOffset) -> Result<(), Backend
                 lhs_val.into_float_value()
             } else {
                 let int_val = lhs_val.into_int_value();
-                self.builder.build_unsigned_int_to_float(int_val, self.context.f64_type(), "uitofp")
+                self.builder
+                    .build_unsigned_int_to_float(int_val, self.context.f64_type(), "uitofp")
                     .map_err(|_| BackendError::InvalidNode)?
             };
             let rhs_float = if rhs_val.is_float_value() {
                 rhs_val.into_float_value()
             } else {
                 let int_val = rhs_val.into_int_value();
-                self.builder.build_unsigned_int_to_float(int_val, self.context.f64_type(), "uitofp")
+                self.builder
+                    .build_unsigned_int_to_float(int_val, self.context.f64_type(), "uitofp")
                     .map_err(|_| BackendError::InvalidNode)?
             };
 
             match node.data {
-                1 => self.builder.build_float_add(lhs_float, rhs_float, "fadd")
-                    .map_err(|_| BackendError::InvalidNode)?.into(),
-                2 => self.builder.build_float_sub(lhs_float, rhs_float, "fsub")
-                    .map_err(|_| BackendError::InvalidNode)?.into(),
-                3 => self.builder.build_float_mul(lhs_float, rhs_float, "fmul")
-                    .map_err(|_| BackendError::InvalidNode)?.into(),
-                4 => self.builder.build_float_div(lhs_float, rhs_float, "fdiv")
-                    .map_err(|_| BackendError::InvalidNode)?.into(),
-                6 => self.builder.build_float_compare(inkwell::FloatPredicate::OEQ, lhs_float, rhs_float, "feq")
-                    .map_err(|_| BackendError::InvalidNode)?.into(),
-                7 => self.builder.build_float_compare(inkwell::FloatPredicate::ONE, lhs_float, rhs_float, "fne")
-                    .map_err(|_| BackendError::InvalidNode)?.into(),
-                8 => self.builder.build_float_compare(inkwell::FloatPredicate::OLT, lhs_float, rhs_float, "flt")
-                    .map_err(|_| BackendError::InvalidNode)?.into(),
-                9 => self.builder.build_float_compare(inkwell::FloatPredicate::OGT, lhs_float, rhs_float, "fgt")
-                    .map_err(|_| BackendError::InvalidNode)?.into(),
-                10 => self.builder.build_float_compare(inkwell::FloatPredicate::OLE, lhs_float, rhs_float, "fle")
-                    .map_err(|_| BackendError::InvalidNode)?.into(),
-                11 => self.builder.build_float_compare(inkwell::FloatPredicate::OGE, lhs_float, rhs_float, "fge")
-                    .map_err(|_| BackendError::InvalidNode)?.into(),
+                1 => self
+                    .builder
+                    .build_float_add(lhs_float, rhs_float, "fadd")
+                    .map_err(|_| BackendError::InvalidNode)?
+                    .into(),
+                2 => self
+                    .builder
+                    .build_float_sub(lhs_float, rhs_float, "fsub")
+                    .map_err(|_| BackendError::InvalidNode)?
+                    .into(),
+                3 => self
+                    .builder
+                    .build_float_mul(lhs_float, rhs_float, "fmul")
+                    .map_err(|_| BackendError::InvalidNode)?
+                    .into(),
+                4 => self
+                    .builder
+                    .build_float_div(lhs_float, rhs_float, "fdiv")
+                    .map_err(|_| BackendError::InvalidNode)?
+                    .into(),
+                6 => self
+                    .builder
+                    .build_float_compare(inkwell::FloatPredicate::OEQ, lhs_float, rhs_float, "feq")
+                    .map_err(|_| BackendError::InvalidNode)?
+                    .into(),
+                7 => self
+                    .builder
+                    .build_float_compare(inkwell::FloatPredicate::ONE, lhs_float, rhs_float, "fne")
+                    .map_err(|_| BackendError::InvalidNode)?
+                    .into(),
+                8 => self
+                    .builder
+                    .build_float_compare(inkwell::FloatPredicate::OLT, lhs_float, rhs_float, "flt")
+                    .map_err(|_| BackendError::InvalidNode)?
+                    .into(),
+                9 => self
+                    .builder
+                    .build_float_compare(inkwell::FloatPredicate::OGT, lhs_float, rhs_float, "fgt")
+                    .map_err(|_| BackendError::InvalidNode)?
+                    .into(),
+                10 => self
+                    .builder
+                    .build_float_compare(inkwell::FloatPredicate::OLE, lhs_float, rhs_float, "fle")
+                    .map_err(|_| BackendError::InvalidNode)?
+                    .into(),
+                11 => self
+                    .builder
+                    .build_float_compare(inkwell::FloatPredicate::OGE, lhs_float, rhs_float, "fge")
+                    .map_err(|_| BackendError::InvalidNode)?
+                    .into(),
                 _ => return Err(BackendError::InvalidOperator(node.data)),
             }
         } else {
@@ -728,51 +947,106 @@ pub fn compile(&mut self, arena: &Arena, root: NodeOffset) -> Result<(), Backend
             let rhs_int = rhs_val.into_int_value();
 
             match node.data {
-                1 => self.builder.build_int_add(lhs_int, rhs_int, "add")
-                    .map_err(|_| BackendError::InvalidNode)?.into(),
-                2 => self.builder.build_int_sub(lhs_int, rhs_int, "sub")
-                    .map_err(|_| BackendError::InvalidNode)?.into(),
-                3 => self.builder.build_int_mul(lhs_int, rhs_int, "mul")
-                    .map_err(|_| BackendError::InvalidNode)?.into(),
-                4 => self.builder.build_int_signed_div(lhs_int, rhs_int, "div")
-                    .map_err(|_| BackendError::InvalidNode)?.into(),
-                5 => self.builder.build_int_signed_rem(lhs_int, rhs_int, "rem")
-                    .map_err(|_| BackendError::InvalidNode)?.into(),
-                6 => self.builder.build_int_compare(inkwell::IntPredicate::EQ, lhs_int, rhs_int, "eq")
-                    .map_err(|_| BackendError::InvalidNode)?.into(),
-                7 => self.builder.build_int_compare(inkwell::IntPredicate::NE, lhs_int, rhs_int, "ne")
-                    .map_err(|_| BackendError::InvalidNode)?.into(),
-                8 => self.builder.build_int_compare(inkwell::IntPredicate::SLT, lhs_int, rhs_int, "lt")
-                    .map_err(|_| BackendError::InvalidNode)?.into(),
-                9 => self.builder.build_int_compare(inkwell::IntPredicate::SGT, lhs_int, rhs_int, "gt")
-                    .map_err(|_| BackendError::InvalidNode)?.into(),
-                10 => self.builder.build_int_compare(inkwell::IntPredicate::SLE, lhs_int, rhs_int, "le")
-                    .map_err(|_| BackendError::InvalidNode)?.into(),
-                11 => self.builder.build_int_compare(inkwell::IntPredicate::SGE, lhs_int, rhs_int, "ge")
-                    .map_err(|_| BackendError::InvalidNode)?.into(),
-                12 => self.builder.build_and(lhs_int, rhs_int, "and")
-                    .map_err(|_| BackendError::InvalidNode)?.into(),
-                13 => self.builder.build_or(lhs_int, rhs_int, "or")
-                    .map_err(|_| BackendError::InvalidNode)?.into(),
-                14 => self.builder.build_and(lhs_int, rhs_int, "bitand")
-                    .map_err(|_| BackendError::InvalidNode)?.into(),
-                15 => self.builder.build_or(lhs_int, rhs_int, "bitor")
-                    .map_err(|_| BackendError::InvalidNode)?.into(),
-                16 => self.builder.build_xor(lhs_int, rhs_int, "xor")
-                    .map_err(|_| BackendError::InvalidNode)?.into(),
-                17 => self.builder.build_left_shift(lhs_int, rhs_int, "shl")
-                    .map_err(|_| BackendError::InvalidNode)?.into(),
-                18 => self.builder.build_right_shift(lhs_int, rhs_int, false, "shr")
-                    .map_err(|_| BackendError::InvalidNode)?.into(),
+                1 => self
+                    .builder
+                    .build_int_add(lhs_int, rhs_int, "add")
+                    .map_err(|_| BackendError::InvalidNode)?
+                    .into(),
+                2 => self
+                    .builder
+                    .build_int_sub(lhs_int, rhs_int, "sub")
+                    .map_err(|_| BackendError::InvalidNode)?
+                    .into(),
+                3 => self
+                    .builder
+                    .build_int_mul(lhs_int, rhs_int, "mul")
+                    .map_err(|_| BackendError::InvalidNode)?
+                    .into(),
+                4 => self
+                    .builder
+                    .build_int_signed_div(lhs_int, rhs_int, "div")
+                    .map_err(|_| BackendError::InvalidNode)?
+                    .into(),
+                5 => self
+                    .builder
+                    .build_int_signed_rem(lhs_int, rhs_int, "rem")
+                    .map_err(|_| BackendError::InvalidNode)?
+                    .into(),
+                6 => self
+                    .builder
+                    .build_int_compare(inkwell::IntPredicate::EQ, lhs_int, rhs_int, "eq")
+                    .map_err(|_| BackendError::InvalidNode)?
+                    .into(),
+                7 => self
+                    .builder
+                    .build_int_compare(inkwell::IntPredicate::NE, lhs_int, rhs_int, "ne")
+                    .map_err(|_| BackendError::InvalidNode)?
+                    .into(),
+                8 => self
+                    .builder
+                    .build_int_compare(inkwell::IntPredicate::SLT, lhs_int, rhs_int, "lt")
+                    .map_err(|_| BackendError::InvalidNode)?
+                    .into(),
+                9 => self
+                    .builder
+                    .build_int_compare(inkwell::IntPredicate::SGT, lhs_int, rhs_int, "gt")
+                    .map_err(|_| BackendError::InvalidNode)?
+                    .into(),
+                10 => self
+                    .builder
+                    .build_int_compare(inkwell::IntPredicate::SLE, lhs_int, rhs_int, "le")
+                    .map_err(|_| BackendError::InvalidNode)?
+                    .into(),
+                11 => self
+                    .builder
+                    .build_int_compare(inkwell::IntPredicate::SGE, lhs_int, rhs_int, "ge")
+                    .map_err(|_| BackendError::InvalidNode)?
+                    .into(),
+                12 => self
+                    .builder
+                    .build_and(lhs_int, rhs_int, "and")
+                    .map_err(|_| BackendError::InvalidNode)?
+                    .into(),
+                13 => self
+                    .builder
+                    .build_or(lhs_int, rhs_int, "or")
+                    .map_err(|_| BackendError::InvalidNode)?
+                    .into(),
+                14 => self
+                    .builder
+                    .build_and(lhs_int, rhs_int, "bitand")
+                    .map_err(|_| BackendError::InvalidNode)?
+                    .into(),
+                15 => self
+                    .builder
+                    .build_or(lhs_int, rhs_int, "bitor")
+                    .map_err(|_| BackendError::InvalidNode)?
+                    .into(),
+                16 => self
+                    .builder
+                    .build_xor(lhs_int, rhs_int, "xor")
+                    .map_err(|_| BackendError::InvalidNode)?
+                    .into(),
+                17 => self
+                    .builder
+                    .build_left_shift(lhs_int, rhs_int, "shl")
+                    .map_err(|_| BackendError::InvalidNode)?
+                    .into(),
+                18 => self
+                    .builder
+                    .build_right_shift(lhs_int, rhs_int, false, "shr")
+                    .map_err(|_| BackendError::InvalidNode)?
+                    .into(),
                 19 => {
                     if lhs_val.is_pointer_value() {
-                        self.builder.build_store(lhs_val.into_pointer_value(), rhs_int)
+                        self.builder
+                            .build_store(lhs_val.into_pointer_value(), rhs_int)
                             .map_err(|_| BackendError::InvalidNode)?;
                         rhs_int.into()
                     } else {
                         rhs_int.into()
                     }
-                },
+                }
                 _ => return Err(BackendError::InvalidOperator(node.data)),
             }
         };
@@ -780,28 +1054,39 @@ pub fn compile(&mut self, arena: &Arena, root: NodeOffset) -> Result<(), Backend
         Ok(Some(result))
     }
 
-    fn lower_unop(&mut self, arena: &Arena, node: &CAstNode) -> Result<Option<BasicValueEnum<'ctx>>, BackendError> {
+    fn lower_unop(
+        &mut self,
+        arena: &Arena,
+        node: &CAstNode,
+    ) -> Result<Option<BasicValueEnum<'ctx>>, BackendError> {
         let child_offset = node.first_child;
-        let operand = self.lower_expr(arena, child_offset)?
+        let operand = self
+            .lower_expr(arena, child_offset)?
             .ok_or(BackendError::InvalidNode)?;
 
         let result: BasicValueEnum = match node.data {
             1 => {
                 if operand.is_float_value() {
-                    self.builder.build_float_neg(operand.into_float_value(), "fneg")
-                        .map_err(|_| BackendError::InvalidNode)?.into()
+                    self.builder
+                        .build_float_neg(operand.into_float_value(), "fneg")
+                        .map_err(|_| BackendError::InvalidNode)?
+                        .into()
                 } else {
                     let int_op = operand.into_int_value();
-                    self.builder.build_int_neg(int_op, "neg")
-                        .map_err(|_| BackendError::InvalidNode)?.into()
+                    self.builder
+                        .build_int_neg(int_op, "neg")
+                        .map_err(|_| BackendError::InvalidNode)?
+                        .into()
                 }
             }
             2 => {
                 if operand.is_int_value() {
                     let int_op = operand.into_int_value();
                     let zero = self.context.i32_type().const_int(0, false);
-                    self.builder.build_int_compare(inkwell::IntPredicate::EQ, int_op, zero, "lnot")
-                        .map_err(|_| BackendError::InvalidNode)?.into()
+                    self.builder
+                        .build_int_compare(inkwell::IntPredicate::EQ, int_op, zero, "lnot")
+                        .map_err(|_| BackendError::InvalidNode)?
+                        .into()
                 } else {
                     operand
                 }
@@ -809,24 +1094,22 @@ pub fn compile(&mut self, arena: &Arena, root: NodeOffset) -> Result<(), Backend
             3 => {
                 if operand.is_int_value() {
                     let int_op = operand.into_int_value();
-                    self.builder.build_not(int_op, "bnot")
-                        .map_err(|_| BackendError::InvalidNode)?.into()
+                    self.builder
+                        .build_not(int_op, "bnot")
+                        .map_err(|_| BackendError::InvalidNode)?
+                        .into()
                 } else {
                     operand
                 }
             }
-            4 => {
-                operand
-            }
+            4 => operand,
             5 => {
                 if operand.is_pointer_value() {
                     let pointee_type = self.to_llvm_type(self.default_type());
-                    self.builder.build_load(
-                        pointee_type,
-                        operand.into_pointer_value(),
-                        "deref",
-                    )
-                        .map_err(|_| BackendError::InvalidNode)?.into()
+                    self.builder
+                        .build_load(pointee_type, operand.into_pointer_value(), "deref")
+                        .map_err(|_| BackendError::InvalidNode)?
+                        .into()
                 } else {
                     operand
                 }
@@ -837,10 +1120,22 @@ pub fn compile(&mut self, arena: &Arena, root: NodeOffset) -> Result<(), Backend
         Ok(Some(result))
     }
 
-    fn lower_cond_expr(&mut self, arena: &Arena, node: &CAstNode) -> Result<Option<BasicValueEnum<'ctx>>, BackendError> {
+    fn lower_cond_expr(
+        &mut self,
+        arena: &Arena,
+        node: &CAstNode,
+    ) -> Result<Option<BasicValueEnum<'ctx>>, BackendError> {
         let cond_offset = node.first_child;
-        let then_offset = if let Some(c) = arena.get(cond_offset) { c.next_sibling } else { NodeOffset::NULL };
-        let else_offset = if let Some(c) = arena.get(then_offset) { c.next_sibling } else { NodeOffset::NULL };
+        let then_offset = if let Some(c) = arena.get(cond_offset) {
+            c.next_sibling
+        } else {
+            NodeOffset::NULL
+        };
+        let else_offset = if let Some(c) = arena.get(then_offset) {
+            c.next_sibling
+        } else {
+            NodeOffset::NULL
+        };
 
         let cond_val = self.lower_expr(arena, cond_offset)?;
         let then_val = self.lower_expr(arena, then_offset)?;
@@ -850,15 +1145,21 @@ pub fn compile(&mut self, arena: &Arena, root: NodeOffset) -> Result<(), Backend
         Ok(then_val)
     }
 
-    fn lower_call_expr(&mut self, arena: &Arena, node: &CAstNode) -> Result<Option<BasicValueEnum<'ctx>>, BackendError> {
+    fn lower_call_expr(
+        &mut self,
+        arena: &Arena,
+        node: &CAstNode,
+    ) -> Result<Option<BasicValueEnum<'ctx>>, BackendError> {
         let first_child_offset = node.first_child;
         let first_child = arena.get(first_child_offset);
 
-        let func_name = first_child
-            .and_then(|c| arena.get_string(NodeOffset(c.data)));
+        let func_name = first_child.and_then(|c| arena.get_string(NodeOffset(c.data)));
 
         eprintln!("    lower_call_expr: func_name={:?}", func_name);
-        eprintln!("    available functions: {:?}", self.functions.keys().collect::<Vec<_>>());
+        eprintln!(
+            "    available functions: {:?}",
+            self.functions.keys().collect::<Vec<_>>()
+        );
 
         let mut args: Vec<inkwell::values::BasicMetadataValueEnum> = Vec::new();
         if let Some(fc) = first_child {
@@ -878,11 +1179,15 @@ pub fn compile(&mut self, arena: &Arena, root: NodeOffset) -> Result<(), Backend
         if let Some(name) = func_name {
             if let Some(func) = self.functions.get(name) {
                 eprintln!("    found function in map, building call");
-                let call_site = self.builder.build_call(*func, &args, "call")
+                let call_site = self
+                    .builder
+                    .build_call(*func, &args, "call")
                     .map_err(|_| BackendError::InvalidNode)?;
                 return Ok(Some(match call_site.try_as_basic_value() {
                     inkwell::values::ValueKind::Basic(v) => v,
-                    inkwell::values::ValueKind::Instruction(_) => self.context.i32_type().const_int(0, false).into(),
+                    inkwell::values::ValueKind::Instruction(_) => {
+                        self.context.i32_type().const_int(0, false).into()
+                    }
                 }));
             }
 
@@ -890,18 +1195,26 @@ pub fn compile(&mut self, arena: &Arena, root: NodeOffset) -> Result<(), Backend
             let fn_type = self.context.i32_type().fn_type(&[], true);
             let ext_func = self.module.add_function(name, fn_type, None);
             self.functions.insert(name.to_string(), ext_func);
-            let call_site = self.builder.build_call(ext_func, &args, "call")
+            let call_site = self
+                .builder
+                .build_call(ext_func, &args, "call")
                 .map_err(|_| BackendError::InvalidNode)?;
             return Ok(Some(match call_site.try_as_basic_value() {
                 inkwell::values::ValueKind::Basic(v) => v,
-                inkwell::values::ValueKind::Instruction(_) => self.context.i32_type().const_int(0, false).into(),
+                inkwell::values::ValueKind::Instruction(_) => {
+                    self.context.i32_type().const_int(0, false).into()
+                }
             }));
         }
 
         Ok(None)
     }
 
-    fn lower_cast_expr(&mut self, arena: &Arena, node: &CAstNode) -> Result<Option<BasicValueEnum<'ctx>>, BackendError> {
+    fn lower_cast_expr(
+        &mut self,
+        arena: &Arena,
+        node: &CAstNode,
+    ) -> Result<Option<BasicValueEnum<'ctx>>, BackendError> {
         let child_offset = node.first_child;
         if child_offset != NodeOffset::NULL {
             if let Some(child) = arena.get(child_offset) {
@@ -916,11 +1229,23 @@ pub fn compile(&mut self, arena: &Arena, root: NodeOffset) -> Result<(), Backend
         }
     }
 
-    fn lower_sizeof_expr(&self, _node: &CAstNode) -> Result<Option<BasicValueEnum<'ctx>>, BackendError> {
-        Ok(Some(self.context.i64_type().const_int(std::mem::size_of::<i32>() as u64, false).into()))
+    fn lower_sizeof_expr(
+        &self,
+        _node: &CAstNode,
+    ) -> Result<Option<BasicValueEnum<'ctx>>, BackendError> {
+        Ok(Some(
+            self.context
+                .i64_type()
+                .const_int(std::mem::size_of::<i32>() as u64, false)
+                .into(),
+        ))
     }
 
-    fn lower_comma_expr(&mut self, arena: &Arena, node: &CAstNode) -> Result<Option<BasicValueEnum<'ctx>>, BackendError> {
+    fn lower_comma_expr(
+        &mut self,
+        arena: &Arena,
+        node: &CAstNode,
+    ) -> Result<Option<BasicValueEnum<'ctx>>, BackendError> {
         let mut last_val: Option<BasicValueEnum> = None;
         let mut child_offset = node.first_child;
         while child_offset != NodeOffset::NULL {
@@ -934,11 +1259,16 @@ pub fn compile(&mut self, arena: &Arena, root: NodeOffset) -> Result<(), Backend
         Ok(last_val)
     }
 
-    fn lower_assign_expr(&mut self, arena: &Arena, node: &CAstNode) -> Result<Option<BasicValueEnum<'ctx>>, BackendError> {
+    fn lower_assign_expr(
+        &mut self,
+        arena: &Arena,
+        node: &CAstNode,
+    ) -> Result<Option<BasicValueEnum<'ctx>>, BackendError> {
         let lhs_offset = node.first_child;
         let rhs_offset = node.next_sibling;
 
-        let rhs_val = self.lower_expr(arena, rhs_offset)?
+        let rhs_val = self
+            .lower_expr(arena, rhs_offset)?
             .ok_or(BackendError::InvalidNode)?;
 
         let lhs_node = arena.get(lhs_offset).ok_or(BackendError::InvalidNode)?;
@@ -946,7 +1276,8 @@ pub fn compile(&mut self, arena: &Arena, root: NodeOffset) -> Result<(), Backend
             let name_offset = NodeOffset(lhs_node.data);
             if let Some(name) = arena.get_string(name_offset) {
                 if let Some(ptr) = self.variables.get(name) {
-                    self.builder.build_store(ptr.ptr, rhs_val)
+                    self.builder
+                        .build_store(ptr.ptr, rhs_val)
                         .map_err(|_| BackendError::InvalidNode)?;
                 }
             }
@@ -955,7 +1286,11 @@ pub fn compile(&mut self, arena: &Arena, root: NodeOffset) -> Result<(), Backend
         Ok(Some(rhs_val))
     }
 
-    fn lower_typeof(&mut self, arena: &Arena, node: &CAstNode) -> Result<Option<BasicValueEnum<'ctx>>, BackendError> {
+    fn lower_typeof(
+        &mut self,
+        arena: &Arena,
+        node: &CAstNode,
+    ) -> Result<Option<BasicValueEnum<'ctx>>, BackendError> {
         if node.first_child != NodeOffset::NULL {
             self.lower_expr(arena, node.first_child)
         } else {
@@ -963,7 +1298,11 @@ pub fn compile(&mut self, arena: &Arena, root: NodeOffset) -> Result<(), Backend
         }
     }
 
-    fn lower_stmt_expr(&mut self, arena: &Arena, node: &CAstNode) -> Result<Option<BasicValueEnum<'ctx>>, BackendError> {
+    fn lower_stmt_expr(
+        &mut self,
+        arena: &Arena,
+        node: &CAstNode,
+    ) -> Result<Option<BasicValueEnum<'ctx>>, BackendError> {
         let mut last_val: Option<BasicValueEnum<'ctx>> = None;
         let mut child_offset = node.first_child;
         while child_offset != NodeOffset::NULL {
@@ -977,14 +1316,24 @@ pub fn compile(&mut self, arena: &Arena, root: NodeOffset) -> Result<(), Backend
         Ok(last_val)
     }
 
-    fn lower_label_addr(&mut self, _arena: &Arena, node: &CAstNode) -> Result<Option<BasicValueEnum<'ctx>>, BackendError> {
+    fn lower_label_addr(
+        &mut self,
+        _arena: &Arena,
+        node: &CAstNode,
+    ) -> Result<Option<BasicValueEnum<'ctx>>, BackendError> {
         let ptr = self.context.ptr_type(AddressSpace::default()).const_null();
         Ok(Some(ptr.into()))
     }
 
-    fn lower_builtin_call(&mut self, arena: &Arena, node: &CAstNode) -> Result<Option<BasicValueEnum<'ctx>>, BackendError> {
+    fn lower_builtin_call(
+        &mut self,
+        arena: &Arena,
+        node: &CAstNode,
+    ) -> Result<Option<BasicValueEnum<'ctx>>, BackendError> {
         let builtin_name = if node.data != 0 {
-            arena.get_string(NodeOffset(node.data)).map(|s| s.to_string())
+            arena
+                .get_string(NodeOffset(node.data))
+                .map(|s| s.to_string())
         } else {
             None
         };
@@ -1008,9 +1357,15 @@ pub fn compile(&mut self, arena: &Arena, root: NodeOffset) -> Result<(), Backend
             "__builtin_expect" => {
                 if let Some(arg) = args.first() {
                     match arg {
-                        inkwell::values::BasicMetadataValueEnum::IntValue(v) => return Ok(Some((*v).into())),
-                        inkwell::values::BasicMetadataValueEnum::PointerValue(v) => return Ok(Some((*v).into())),
-                        inkwell::values::BasicMetadataValueEnum::FloatValue(v) => return Ok(Some((*v).into())),
+                        inkwell::values::BasicMetadataValueEnum::IntValue(v) => {
+                            return Ok(Some((*v).into()))
+                        }
+                        inkwell::values::BasicMetadataValueEnum::PointerValue(v) => {
+                            return Ok(Some((*v).into()))
+                        }
+                        inkwell::values::BasicMetadataValueEnum::FloatValue(v) => {
+                            return Ok(Some((*v).into()))
+                        }
                         _ => return Ok(None),
                     }
                 }
@@ -1027,9 +1382,7 @@ pub fn compile(&mut self, arena: &Arena, root: NodeOffset) -> Result<(), Backend
                 let val = if is_const { 1u64 } else { 0u64 };
                 Ok(Some(self.context.i32_type().const_int(val, false).into()))
             }
-            "__builtin_offsetof" => {
-                Ok(Some(self.context.i64_type().const_int(0, false).into()))
-            }
+            "__builtin_offsetof" => Ok(Some(self.context.i64_type().const_int(0, false).into())),
             "__builtin_memcpy" | "__builtin_memset" | "__builtin_strlen" => {
                 let intrinsic_name = match builtin_name.as_str() {
                     "__builtin_memcpy" => "llvm.memcpy.p0.p0.i64",
@@ -1039,7 +1392,9 @@ pub fn compile(&mut self, arena: &Arena, root: NodeOffset) -> Result<(), Backend
                 };
 
                 if let Some(func) = self.functions.get(&builtin_name) {
-                    let call_site = self.builder.build_call(*func, &args, "builtin_call")
+                    let call_site = self
+                        .builder
+                        .build_call(*func, &args, "builtin_call")
                         .map_err(|_| BackendError::InvalidNode)?;
                     return Ok(Some(match call_site.try_as_basic_value() {
                         inkwell::values::ValueKind::Basic(v) => v,
@@ -1047,35 +1402,51 @@ pub fn compile(&mut self, arena: &Arena, root: NodeOffset) -> Result<(), Backend
                     }));
                 }
 
-                let fn_type = self.context.i64_type().fn_type(&args.iter().map(|a| {
-                    match a {
-                        inkwell::values::BasicMetadataValueEnum::IntValue(v) => v.get_type().into(),
-                        inkwell::values::BasicMetadataValueEnum::PointerValue(v) => v.get_type().into(),
-                        inkwell::values::BasicMetadataValueEnum::FloatValue(v) => v.get_type().into(),
-                        _ => self.context.i64_type().into(),
-                    }
-                }).collect::<Vec<_>>(), false);
+                let fn_type = self.context.i64_type().fn_type(
+                    &args
+                        .iter()
+                        .map(|a| match a {
+                            inkwell::values::BasicMetadataValueEnum::IntValue(v) => {
+                                v.get_type().into()
+                            }
+                            inkwell::values::BasicMetadataValueEnum::PointerValue(v) => {
+                                v.get_type().into()
+                            }
+                            inkwell::values::BasicMetadataValueEnum::FloatValue(v) => {
+                                v.get_type().into()
+                            }
+                            _ => self.context.i64_type().into(),
+                        })
+                        .collect::<Vec<_>>(),
+                    false,
+                );
                 let func = self.module.add_function(&builtin_name, fn_type, None);
                 self.functions.insert(builtin_name.clone(), func);
-                let call_site = self.builder.build_call(func, &args, "builtin_call")
+                let call_site = self
+                    .builder
+                    .build_call(func, &args, "builtin_call")
                     .map_err(|_| BackendError::InvalidNode)?;
                 Ok(Some(match call_site.try_as_basic_value() {
                     inkwell::values::ValueKind::Basic(v) => v,
                     _ => self.context.i32_type().const_int(0, false).into(),
                 }))
             }
-            "__builtin_va_arg" => {
-                Ok(Some(self.context.i32_type().const_int(0, false).into()))
-            }
+            "__builtin_va_arg" => Ok(Some(self.context.i32_type().const_int(0, false).into())),
             "__builtin_types_compatible_p" => {
                 Ok(Some(self.context.i32_type().const_int(1, false).into()))
             }
             "__builtin_choose_expr" => {
                 if args.len() >= 3 {
                     match &args[1] {
-                        inkwell::values::BasicMetadataValueEnum::IntValue(v) => return Ok(Some((*v).into())),
-                        inkwell::values::BasicMetadataValueEnum::PointerValue(v) => return Ok(Some((*v).into())),
-                        inkwell::values::BasicMetadataValueEnum::FloatValue(v) => return Ok(Some((*v).into())),
+                        inkwell::values::BasicMetadataValueEnum::IntValue(v) => {
+                            return Ok(Some((*v).into()))
+                        }
+                        inkwell::values::BasicMetadataValueEnum::PointerValue(v) => {
+                            return Ok(Some((*v).into()))
+                        }
+                        inkwell::values::BasicMetadataValueEnum::FloatValue(v) => {
+                            return Ok(Some((*v).into()))
+                        }
                         _ => return Ok(None),
                     }
                 }
@@ -1083,7 +1454,9 @@ pub fn compile(&mut self, arena: &Arena, root: NodeOffset) -> Result<(), Backend
             }
             _ => {
                 if let Some(func) = self.functions.get(&builtin_name) {
-                    let call_site = self.builder.build_call(*func, &args, "builtin_call")
+                    let call_site = self
+                        .builder
+                        .build_call(*func, &args, "builtin_call")
                         .map_err(|_| BackendError::InvalidNode)?;
                     return Ok(Some(match call_site.try_as_basic_value() {
                         inkwell::values::ValueKind::Basic(v) => v,
@@ -1094,7 +1467,9 @@ pub fn compile(&mut self, arena: &Arena, root: NodeOffset) -> Result<(), Backend
                 let fn_type = self.context.i32_type().fn_type(&[], true);
                 let func = self.module.add_function(&builtin_name, fn_type, None);
                 self.functions.insert(builtin_name.clone(), func);
-                let call_site = self.builder.build_call(func, &args, "builtin_call")
+                let call_site = self
+                    .builder
+                    .build_call(func, &args, "builtin_call")
                     .map_err(|_| BackendError::InvalidNode)?;
                 Ok(Some(match call_site.try_as_basic_value() {
                     inkwell::values::ValueKind::Basic(v) => v,
@@ -1104,7 +1479,11 @@ pub fn compile(&mut self, arena: &Arena, root: NodeOffset) -> Result<(), Backend
         }
     }
 
-    fn lower_designated_init(&mut self, arena: &Arena, node: &CAstNode) -> Result<Option<BasicValueEnum<'ctx>>, BackendError> {
+    fn lower_designated_init(
+        &mut self,
+        arena: &Arena,
+        node: &CAstNode,
+    ) -> Result<Option<BasicValueEnum<'ctx>>, BackendError> {
         let mut child_offset = node.first_child;
         while child_offset != NodeOffset::NULL {
             if let Some(child) = arena.get(child_offset) {
@@ -1119,7 +1498,11 @@ pub fn compile(&mut self, arena: &Arena, root: NodeOffset) -> Result<(), Backend
         Ok(None)
     }
 
-    fn lower_extension(&mut self, arena: &Arena, node: &CAstNode) -> Result<Option<BasicValueEnum<'ctx>>, BackendError> {
+    fn lower_extension(
+        &mut self,
+        arena: &Arena,
+        node: &CAstNode,
+    ) -> Result<Option<BasicValueEnum<'ctx>>, BackendError> {
         if node.first_child != NodeOffset::NULL {
             self.lower_expr(arena, node.first_child)
         } else {
@@ -1132,7 +1515,9 @@ pub fn compile(&mut self, arena: &Arena, root: NodeOffset) -> Result<(), Backend
         while child_offset != NodeOffset::NULL {
             if let Some(child) = arena.get(child_offset) {
                 if child.kind == 60 {
-                    return arena.get_string(NodeOffset(child.data)).map(|s| s.to_string());
+                    return arena
+                        .get_string(NodeOffset(child.data))
+                        .map(|s| s.to_string());
                 }
                 if matches!(child.kind, 7..=9) {
                     if let Some(name) = self.find_ident_name(arena, &child) {
@@ -1153,7 +1538,9 @@ pub fn compile(&mut self, arena: &Arena, root: NodeOffset) -> Result<(), Backend
 
     pub fn verify(&self) -> Result<(), BackendError> {
         if self.module.verify().is_err() {
-            return Err(BackendError::VerificationFailed(self.module.print_to_string().to_string()));
+            return Err(BackendError::VerificationFailed(
+                self.module.print_to_string().to_string(),
+            ));
         }
         Ok(())
     }
@@ -1190,7 +1577,10 @@ impl std::fmt::Display for BackendError {
 
 impl std::error::Error for BackendError {}
 
-pub fn create_backend<'ctx>(context: &'ctx Context, module_name: &str) -> LlvmBackend<'ctx, 'static> {
+pub fn create_backend<'ctx>(
+    context: &'ctx Context,
+    module_name: &str,
+) -> LlvmBackend<'ctx, 'static> {
     LlvmBackend::new(context, module_name)
 }
 

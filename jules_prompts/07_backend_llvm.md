@@ -30,6 +30,8 @@ The LLVM backend now supports typed lowering for several core C types. Current w
 - [ ] **Phi nodes for ternary**: Ternary expressions currently evaluate both branches. Proper SSA form requires phi nodes.
 - [ ] **LLVM attributes from __attribute__**: Set function attributes (noreturn, noalias, etc.) from `__attribute__` annotations.
 - [ ] **Inline asm**: Use `inkwell::values::InlineAsm::get()` for asm blocks (depends on `13_inline_asm.md`).
+- **LLVM 18 target**: the repository now targets `inkwell`'s `llvm18-1-prefer-dynamic` feature and the Cargo env should point `LLVM_SYS_181_PREFIX` at `/usr/lib/llvm-18`.
+- **Opaque pointers**: LLVM 18 uses opaque pointers, so loads must carry an explicit pointee type; locals now retain their allocated LLVM type for identifier loads, while raw dereference fallback still uses the backend default type when no better type data is available.
 - **inkwell 0.9 API changes**: The pass manager API changed in inkwell 0.9. The `optimize()` method had to be stubbed out as a no-op. Check the inkwell changelog for the new optimization API.
 - **Fallback typing**: The backend can still fall back to `i32` when no resolved type information is available. Keep that compatibility path narrow and prefer real type propagation.
 - **External function declarations**: When a function is called but not defined, auto-declare it with a variadic i32 signature. This works for simple cases but is incorrect for functions like `printf`.

@@ -83,7 +83,7 @@ pub struct CacheKey {
 
 impl CacheKey {
     pub fn new(source: &str, flags: &[String]) -> Self {
-        use sha2::{Sha256, Digest};
+        use sha2::{Digest, Sha256};
         let mut h1 = Sha256::new();
         h1.update(source.as_bytes());
         let source_hash: [u8; 32] = h1.finalize().into();
@@ -94,7 +94,10 @@ impl CacheKey {
         }
         let flags_hash: [u8; 32] = h2.finalize().into();
 
-        CacheKey { source_hash, flags_hash }
+        CacheKey {
+            source_hash,
+            flags_hash,
+        }
     }
 }
 
@@ -285,13 +288,7 @@ impl Builder {
             .map_with(
                 (temp_dir, include_paths, defines, optimization),
                 |(temp_dir, include_paths, defines, optimization), source| {
-                    compile_file_to_object(
-                        source,
-                        temp_dir,
-                        include_paths,
-                        defines,
-                        *optimization,
-                    )
+                    compile_file_to_object(source, temp_dir, include_paths, defines, *optimization)
                 },
             )
             .collect();
@@ -347,7 +344,9 @@ impl Builder {
 
     fn create_static_lib(&self) -> Result<(), BuildError> {
         if self.object_files.is_empty() {
-            return Err(BuildError::LinkError("no object files to archive".to_string()));
+            return Err(BuildError::LinkError(
+                "no object files to archive".to_string(),
+            ));
         }
 
         let ar = find_tool(&["ar"])?;
@@ -473,23 +472,31 @@ fn compile_file_to_object(
         .map_err(|e| BuildError::CompileError(source.display().to_string(), e.to_string()))?;
 
     let estimated_nodes = (tokens.len() / 2).max(1024) as u32;
-    let arena_path = format!("/tmp/optic_c_arena_build_{}_{}.bin", std::process::id(), stem);
+    let arena_path = format!(
+        "/tmp/optic_c_arena_build_{}_{}.bin",
+        std::process::id(),
+        stem
+    );
 
     let arena = Arena::new(&arena_path, estimated_nodes * 2)
         .map_err(|e| BuildError::CompileError(source.display().to_string(), e.to_string()))?;
 
     let mut parser = CParser::new(arena);
-    let ast_root = parser
-        .parse_tokens(tokens)
-        .map_err(|e| {
-            BuildError::CompileError(
-                source.display().to_string(),
-                format!("parse error at line {}, column {}: {}", e.line, e.column, e.message),
-            )
-        })?;
+    let ast_root = parser.parse_tokens(tokens).map_err(|e| {
+        BuildError::CompileError(
+            source.display().to_string(),
+            format!(
+                "parse error at line {}, column {}: {}",
+                e.line, e.column, e.message
+            ),
+        )
+    })?;
 
     let context = inkwell::context::Context::create();
-    let module_name = source.file_stem().and_then(|s| s.to_str()).unwrap_or("input");
+    let module_name = source
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("input");
     let type_system = TypeSystem::new();
     let mut backend = LlvmBackend::with_types(&context, module_name, &type_system);
 
@@ -513,7 +520,7 @@ fn compile_file_to_object(
     file.write_all(ir.as_bytes())
         .map_err(|e| BuildError::CompileError(source.display().to_string(), e.to_string()))?;
 
-    let llc = find_tool(&["llc", "llc-18", "llc-17", "llc-16"])?;
+    let llc = find_tool(&["llc-18", "llc", "llc-17", "llc-16"])?;
     let llc_output = Command::new(&llc)
         .arg("-filetype=obj")
         .arg("-o")
@@ -544,8 +551,7 @@ pub fn compile_single_file(
     defines: &HashMap<String, String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let db_path = format!("/tmp/optic_db_{}.redb", std::process::id());
-    let db = OpticDb::new(&db_path)
-        .map_err(|e| format!("Failed to create database: {}", e))?;
+    let db = OpticDb::new(&db_path).map_err(|e| format!("Failed to create database: {}", e))?;
 
     let mut pp = Preprocessor::new(db);
 
@@ -567,9 +573,12 @@ pub fn compile_single_file(
         .map_err(|e| format!("Failed to create AST arena: {}", e))?;
 
     let mut parser = CParser::new(arena);
-    let ast_root = parser
-        .parse_tokens(tokens)
-        .map_err(|e| format!("Parse error at line {}, column {}: {}", e.line, e.column, e.message))?;
+    let ast_root = parser.parse_tokens(tokens).map_err(|e| {
+        format!(
+            "Parse error at line {}, column {}: {}",
+            e.line, e.column, e.message
+        )
+    })?;
 
     let context = inkwell::context::Context::create();
     let module_name = input_path
@@ -593,8 +602,13 @@ pub fn compile_single_file(
 
     let ir = backend.dump_ir();
 
-    let mut file = fs::File::create(output_path)
-        .map_err(|e| format!("Failed to create output file '{}': {}", output_path.display(), e))?;
+    let mut file = fs::File::create(output_path).map_err(|e| {
+        format!(
+            "Failed to create output file '{}': {}",
+            output_path.display(),
+            e
+        )
+    })?;
 
     file.write_all(ir.as_bytes())
         .map_err(|e| format!("Failed to write output file: {}", e))?;
@@ -648,11 +662,26 @@ mod tests {
 
     #[test]
     fn test_output_type_from_extension() {
-        assert_eq!(OutputType::from_extension(Path::new("foo.o")), OutputType::Object);
-        assert_eq!(OutputType::from_extension(Path::new("foo.a")), OutputType::StaticLib);
-        assert_eq!(OutputType::from_extension(Path::new("foo.so")), OutputType::SharedLib);
-        assert_eq!(OutputType::from_extension(Path::new("foo")), OutputType::Executable);
-        assert_eq!(OutputType::from_extension(Path::new("foo.exe")), OutputType::Executable);
+        assert_eq!(
+            OutputType::from_extension(Path::new("foo.o")),
+            OutputType::Object
+        );
+        assert_eq!(
+            OutputType::from_extension(Path::new("foo.a")),
+            OutputType::StaticLib
+        );
+        assert_eq!(
+            OutputType::from_extension(Path::new("foo.so")),
+            OutputType::SharedLib
+        );
+        assert_eq!(
+            OutputType::from_extension(Path::new("foo")),
+            OutputType::Executable
+        );
+        assert_eq!(
+            OutputType::from_extension(Path::new("foo.exe")),
+            OutputType::Executable
+        );
     }
 
     #[test]
@@ -660,7 +689,10 @@ mod tests {
         assert_eq!(OutputType::from_str("object"), Some(OutputType::Object));
         assert_eq!(OutputType::from_str("static"), Some(OutputType::StaticLib));
         assert_eq!(OutputType::from_str("shared"), Some(OutputType::SharedLib));
-        assert_eq!(OutputType::from_str("executable"), Some(OutputType::Executable));
+        assert_eq!(
+            OutputType::from_str("executable"),
+            Some(OutputType::Executable)
+        );
         assert_eq!(OutputType::from_str("auto"), None);
         assert_eq!(OutputType::from_str("unknown"), None);
     }
@@ -693,11 +725,14 @@ mod tests {
 
     #[test]
     fn test_config_validate_missing_file() {
-        let config = BuildConfig::new()
-            .with_source_files(vec![PathBuf::from("/nonexistent/file.c")]);
+        let config =
+            BuildConfig::new().with_source_files(vec![PathBuf::from("/nonexistent/file.c")]);
         let result = config.validate();
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), BuildError::CompileError(_, _)));
+        assert!(matches!(
+            result.unwrap_err(),
+            BuildError::CompileError(_, _)
+        ));
     }
 
     #[test]
@@ -817,7 +852,10 @@ mod tests {
         let builder = Builder::new(config);
         let result = builder.run_external("false", &[]);
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), BuildError::ExternalToolError { .. }));
+        assert!(matches!(
+            result.unwrap_err(),
+            BuildError::ExternalToolError { .. }
+        ));
     }
 
     #[test]

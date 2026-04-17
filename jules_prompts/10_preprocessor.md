@@ -78,7 +78,7 @@ OpticC already includes a substantial preprocessor implementation. The current c
   - Variadic macros with complex argument patterns
   - Macros that expand to partial syntax (e.g., `#define BEGIN {` without matching `}`)
   - Nested macro definitions with conditional compilation
-- **LLVM toolchain caveat**: this repository still targets the LLVM 14 C API through `inkwell`/`llvm-sys`. Newer LLVM installs may be sufficient for `cargo check`, but full test binaries still need LLVM 14-era symbols for successful linking.
+- **LLVM toolchain caveat**: the repository now targets the LLVM 18 C API through `inkwell`/`llvm-sys`; keep Cargo pointed at `/usr/lib/llvm-18` via `LLVM_SYS_181_PREFIX` when validating.
 - **Next step**: Enhance preprocessor to handle attribute-style macros and complex variadic patterns for SQLite compilation.
 
 ## ACCEPTANCE CRITERIA

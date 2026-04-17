@@ -68,7 +68,7 @@ clang -c "$SQLITE_C" -o sqlite3.o \
 
 ## LESSONS LEARNED (Post-Execution Addendum)
 - **SQLite download URL**: The SQLite amalgamation URL changes with each release. Prefer the current URL from the CLI defaults or verify the latest package before testing.
-- **Toolchain installation**: All required tools (gcc 11.4, clang 14, LLVM 14, rustc 1.95) install cleanly via apt-get + rustup. Total install time ~2 minutes in cloud agent.
+- **Toolchain installation**: The current environment provides clang/LLVM 18, and the repository now targets LLVM 18 through `inkwell`/`llvm-sys`.
 - **clang compiles sqlite3.c**: Full 255K LOC compiles with clang in seconds, producing 1.5MB object file. This validates the toolchain works with large C files.
 - **OpticC preprocessor limitation**: sqlite3.c uses complex macro patterns (SQLITE_API, SQLITE_EXTERN, variadic macros) that the OpticC preprocessor doesn't yet handle. Even 500-line subsets fail. Preprocessor enhancement needed for production C code.
 - **Build environment**: The Rust toolchain may not be available in all environments. Check for `cargo` availability before attempting builds. If unavailable, document this as an environment limitation.

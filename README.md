@@ -6,7 +6,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-2024-blue.svg)](https://www.rust-lang.org)
-[![LLVM](https://img.shields.io/badge/LLVM-14.0-blue.svg)](https://llvm.org)
+[![LLVM](https://img.shields.io/badge/LLVM-18.1-blue.svg)](https://llvm.org)
 [![Tests](https://img.shields.io/badge/tests-261%2B%20passing-brightgreen.svg)]()
 
 </div>
@@ -93,7 +93,7 @@ Optimization pipeline, DWARF debug info, LTO, cross-compilation.
 ### Prerequisites
 - **Ubuntu 22.04** (or Debian-based Linux)
 - **Rust 1.95+** (via rustup)
-- **LLVM 14** (for inkwell bindings)
+- **LLVM 18** (for inkwell bindings)
 - **gcc/clang** (for linking)
 - **FUSE** (optional, for VFS projection)
 
@@ -108,8 +108,8 @@ source $HOME/.cargo/env
 
 # Verify installation
 gcc --version    # gcc 11.4.0
-clang --version  # clang 14.0.0
-llvm-config --version  # 14.0.0
+clang --version  # clang 18.1.3
+llvm-config-18 --version  # 18.1.x
 rustc --version  # rustc 1.95.0
 ```
 
