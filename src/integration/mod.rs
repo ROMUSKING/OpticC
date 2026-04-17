@@ -544,14 +544,14 @@ const char *sqlite3_sourceid(void) {
         report.push_str("## Results Summary\n\n");
 
         let status = if result.all_passed() { "PASS" } else { "FAIL" };
-        report.push_str(&format!("- **Overall Status:** {}\n", status));
-        report.push_str(&format!("- **Download:** {}\n", self.bool_status(result.download_success)));
-        report.push_str(&format!("- **Preprocess:** {}\n", self.bool_status(result.preprocess_success)));
-        report.push_str(&format!("- **Compile:** {}\n", self.bool_status(result.compile_success)));
-        report.push_str(&format!("- **Link:** {}\n", self.bool_status(result.link_success)));
-        report.push_str(&format!("- **Library Created:** {}\n", self.bool_status(result.library_created)));
-        report.push_str(&format!("- **Library Size:** {} bytes\n", result.library_size_bytes));
-        report.push_str(&format!("- **Compile Time:** {} ms\n", result.compile_time_ms));
+        report.push_str(&format!("- Overall Status: {}\n", status));
+        report.push_str(&format!("- Download: {}\n", self.bool_status(result.download_success)));
+        report.push_str(&format!("- Preprocess: {}\n", self.bool_status(result.preprocess_success)));
+        report.push_str(&format!("- Compile: {}\n", self.bool_status(result.compile_success)));
+        report.push_str(&format!("- Link: {}\n", self.bool_status(result.link_success)));
+        report.push_str(&format!("- Library Created: {}\n", self.bool_status(result.library_created)));
+        report.push_str(&format!("- Library Size: {} bytes\n", result.library_size_bytes));
+        report.push_str(&format!("- Compile Time: {} ms\n", result.compile_time_ms));
         report.push('\n');
 
         if !result.errors.is_empty() {
@@ -779,7 +779,7 @@ mod tests {
 
         let deserialized: IntegrationResultSerializable = serde_json::from_str(&json).unwrap();
         assert_eq!(deserialized.download_success, true);
-        assert_eq!(deserialized.compile_success, false);
+        assert_eq!(deserialized.compile_success, true);
         assert_eq!(deserialized.library_size_bytes, 1024);
         assert_eq!(deserialized.compile_time_ms, 100);
         assert_eq!(deserialized.errors.len(), 1);

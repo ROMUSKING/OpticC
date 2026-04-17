@@ -879,7 +879,9 @@ mod tests {
 
     #[test]
     fn test_measure_output_size() {
-        let temp_dir = std::env::temp_dir().join(format!("optic_bench_test_{}", std::process::id()));
+        // Use a test-specific suffix to avoid colliding with test_measure_correctness_pass
+        // which runs in parallel and uses the same process ID.
+        let temp_dir = std::env::temp_dir().join(format!("optic_bench_size_test_{}", std::process::id()));
         fs::create_dir_all(&temp_dir).unwrap();
         let test_file = temp_dir.join("test_output");
         fs::write(&test_file, "hello world").unwrap();
@@ -904,7 +906,9 @@ mod tests {
 
     #[test]
     fn test_measure_correctness_pass() {
-        let temp_dir = std::env::temp_dir().join(format!("optic_bench_test_{}", std::process::id()));
+        // Use a test-specific suffix to avoid colliding with test_measure_output_size
+        // which runs in parallel and uses the same process ID.
+        let temp_dir = std::env::temp_dir().join(format!("optic_bench_pass_test_{}", std::process::id()));
         fs::create_dir_all(&temp_dir).unwrap();
 
         #[cfg(target_os = "linux")]
