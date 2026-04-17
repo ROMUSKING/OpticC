@@ -115,8 +115,18 @@ cargo run -- compile input.c -o output.ll
 # Compile with optimization
 cargo run -- compile input.c -o output.ll -O2
 
-# Run the test suite
-./test_integration.sh
+# Multi-file build
+cargo run -- build --src-dir ./src -o lib.so -j 8
+
+# Multi-file build with libraries
+cargo run -- build --src-dir ./src -o myapp -t executable --link-libs m,pthread
+
+# Run benchmarks
+cargo run -- benchmark --suite all --compilers all --output-dir results
+
+# Run SQLite integration test
+cargo run -- integration-test --test-dir /tmp/optic_test
+```
 ```
 
 ### Test Samples
@@ -195,6 +205,7 @@ OpticC was built using an **autonomous multi-agent workflow**:
 
 | Module | Tests | Status |
 |--------|-------|--------|
+| Integration | 20 | ✅ |
 | Benchmark | 31 | ✅ |
 | Build System | 22 | ✅ |
 | GNU Extensions | 46 | ✅ |
@@ -203,13 +214,12 @@ OpticC was built using an **autonomous multi-agent workflow**:
 | Type System (resolve) | 44 | ✅ |
 | Backend LLVM | 13 | ✅ |
 | Preprocessor | 21 | ✅ |
-| Integration | 6 | ✅ |
 | Analysis | 5 | ✅ |
 | Arena | 10 | ✅ |
 | DB | 11 | ✅ |
 | Parser | 9 | ✅ |
 | Lexer | 6 | ✅ |
-| **Total** | **266** | **261 passing, 5 pre-existing** |
+| **Total** | **286** | **281 passing, 5 pre-existing** |
 
 ## Roadmap
 
