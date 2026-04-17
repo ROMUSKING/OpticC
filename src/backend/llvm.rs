@@ -1,11 +1,13 @@
 use crate::arena::{Arena, CAstNode, NodeOffset, NodeFlags};
 use crate::types::{TypeSystem, TypeId, CType};
+use crate::frontend::inline_asm::{ASM_OPERAND_OUTPUT, ASM_OPERAND_INPUT, ASM_CLOBBER, ASM_GOTO_LABEL, build_constraints_string, AsmOperand};
 use inkwell::context::Context;
 use inkwell::module::Module;
 use inkwell::builder::Builder;
 use inkwell::types::{BasicType, BasicTypeEnum, BasicMetadataTypeEnum};
-use inkwell::values::{BasicValueEnum, FunctionValue, PointerValue, BasicValue};
+use inkwell::values::{BasicValueEnum, FunctionValue, PointerValue, BasicValue, CallableValue};
 use inkwell::AddressSpace;
+use inkwell::InlineAsmDialect;
 use std::collections::HashMap;
 
 pub struct LlvmBackend<'ctx, 'types> {
@@ -592,6 +594,7 @@ pub fn compile(&mut self, arena: &Arena, root: NodeOffset) -> Result<(), Backend
             204 => self.lower_builtin_call(arena, &node),
             205 => self.lower_designated_init(arena, &node),
             206 => self.lower_extension(arena, &node),
+            207 => self.lower_asm_stmt(arena, &node),
             1..=9 | 83 | 90..=94 | 101..=105 | 200 => Ok(None),
             _ => Ok(None),
         }
@@ -954,8 +957,8 @@ pub fn compile(&mut self, arena: &Arena, root: NodeOffset) -> Result<(), Backend
         Ok(last_val)
     }
 
-    fn lower_label_addr(&mut self, _arena: &Arena, node: &CAstNode) -> Result<Option<BasicValueEnum<'ctx>>, BackendError> {
-        let ptr = self.context.ptr_type(AddressSpace::default()).const_null();
+    fn lower_label_addr(&mut self, _arena: &Arena, _node: &CAstNode) -> Result<Option<BasicValueEnum<'ctx>>, BackendError> {
+        let ptr = self.context.i8_type().ptr_type(AddressSpace::default()).const_null();
         Ok(Some(ptr.into()))
     }
 
@@ -984,7 +987,9 @@ pub fn compile(&mut self, arena: &Arena, root: NodeOffset) -> Result<(), Backend
         match builtin_name.as_str() {
             "__builtin_expect" => {
                 if let Some(arg) = args.first() {
-                    return Ok(Some(arg.to_owned()));
+                    if let Ok(val) = BasicValueEnum::try_from(arg.to_owned()) {
+                        return Ok(Some(val));
+                    }
                 }
                 Ok(None)
             }
@@ -1020,10 +1025,8 @@ pub fn compile(&mut self, arena: &Arena, root: NodeOffset) -> Result<(), Backend
                 }
 
                 let fn_type = self.context.i64_type().fn_type(&args.iter().map(|a| {
-                    if let Some(int_val) = a.int_value() {
-                        int_val.get_type().into()
-                    } else if let Some(ptr_val) = a.pointer_value() {
-                        ptr_val.get_type().into()
+                    if let Ok(bv) = BasicValueEnum::try_from(a.to_owned()) {
+                        bv.get_type().into()
                     } else {
                         self.context.i64_type().into()
                     }
@@ -1045,7 +1048,9 @@ pub fn compile(&mut self, arena: &Arena, root: NodeOffset) -> Result<(), Backend
             }
             "__builtin_choose_expr" => {
                 if args.len() >= 3 {
-                    return Ok(Some(args[1].to_owned()));
+                    if let Ok(val) = BasicValueEnum::try_from(args[1].to_owned()) {
+                        return Ok(Some(val));
+                    }
                 }
                 Ok(None)
             }
@@ -1093,6 +1098,113 @@ pub fn compile(&mut self, arena: &Arena, root: NodeOffset) -> Result<(), Backend
         } else {
             Ok(None)
         }
+    }
+
+    fn lower_asm_stmt(&mut self, arena: &Arena, node: &CAstNode) -> Result<Option<BasicValueEnum<'ctx>>, BackendError> {
+        let is_volatile = (node.data & 1) != 0;
+
+        let template = arena.get_string(NodeOffset(node.data)).map(|s| s.to_string()).unwrap_or_default();
+
+        let mut outputs: Vec<AsmOperand> = Vec::new();
+        let mut inputs: Vec<AsmOperand> = Vec::new();
+        let mut clobbers: Vec<String> = Vec::new();
+        let mut output_values: Vec<BasicValueEnum<'ctx>> = Vec::new();
+        let mut input_values: Vec<BasicValueEnum<'ctx>> = Vec::new();
+
+        let mut child = node.first_child;
+        while child != NodeOffset::NULL {
+            if let Some(child_node) = arena.get(child) {
+                match child_node.kind {
+                    ASM_OPERAND_OUTPUT => {
+                        let constraint = arena.get_string(NodeOffset(child_node.data)).map(|s| s.to_string()).unwrap_or_default();
+                        let expr_offset = child_node.first_child;
+                        let expr_val = if expr_offset != NodeOffset::NULL {
+                            self.lower_expr(arena, expr_offset)?
+                        } else {
+                            None
+                        };
+                        let is_readwrite = constraint.starts_with('+');
+                        outputs.push(AsmOperand {
+                            constraint: constraint.trim_start_matches('=').trim_start_matches('+').to_string(),
+                            expr_offset,
+                            is_output: true,
+                            is_readwrite,
+                        });
+                        if let Some(val) = expr_val {
+                            output_values.push(val);
+                        }
+                    }
+                    ASM_OPERAND_INPUT => {
+                        let constraint = arena.get_string(NodeOffset(child_node.data)).map(|s| s.to_string()).unwrap_or_default();
+                        let expr_offset = child_node.first_child;
+                        let expr_val = if expr_offset != NodeOffset::NULL {
+                            self.lower_expr(arena, expr_offset)?
+                        } else {
+                            None
+                        };
+                        inputs.push(AsmOperand {
+                            constraint,
+                            expr_offset,
+                            is_output: false,
+                            is_readwrite: false,
+                        });
+                        if let Some(val) = expr_val {
+                            input_values.push(val);
+                        }
+                    }
+                    ASM_CLOBBER => {
+                        let clobber = arena.get_string(NodeOffset(child_node.data)).map(|s| s.to_string()).unwrap_or_default();
+                        clobbers.push(clobber);
+                    }
+                    ASM_GOTO_LABEL => {}
+                    _ => {}
+                }
+                child = child_node.next_sibling;
+            } else {
+                break;
+            }
+        }
+
+        let has_memory_clobber = clobbers.iter().any(|c| c == "memory");
+        let side_effects = is_volatile || has_memory_clobber;
+
+        let constraints = build_constraints_string(&outputs, &inputs, &clobbers);
+
+        let mut arg_types: Vec<BasicMetadataTypeEnum<'ctx>> = Vec::new();
+        let mut arg_values: Vec<inkwell::values::BasicMetadataValueEnum<'ctx>> = Vec::new();
+
+        for val in &output_values {
+            arg_types.push(val.get_type().into());
+            arg_values.push((*val).into());
+        }
+        for val in &input_values {
+            arg_types.push(val.get_type().into());
+            arg_values.push((*val).into());
+        }
+
+        let void_type = self.context.void_type();
+        let fn_type = void_type.fn_type(&arg_types, false);
+
+        let asm_ptr = self.context.create_inline_asm(
+            fn_type,
+            template,
+            constraints,
+            side_effects,
+            false,
+            Some(InlineAsmDialect::ATT),
+            false,
+        );
+
+        let callable = CallableValue::try_from(asm_ptr)
+            .map_err(|_| BackendError::InvalidNode)?;
+        let _call = self.builder.build_call(callable, &arg_values, "asm")
+            .map_err(|_| BackendError::InvalidNode)?;
+
+        if !output_values.is_empty() {
+            return Ok(Some(output_values[0]));
+        }
+
+        Ok(None)
     }
 
     fn find_ident_name(&self, arena: &Arena, node: &CAstNode) -> Option<String> {
