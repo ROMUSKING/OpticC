@@ -139,11 +139,8 @@ impl OpticDb {
         let write_txn = self.db.begin_write().map_err(DbError::from)?;
         let old_value = {
             let mut table = write_txn.open_table(FILE_HASHES_TABLE).map_err(DbError::from)?;
-            if let Some(g) = table.remove(hash).map_err(DbError::from)? {
-                Some(g.value().to_string())
-            } else {
-                None
-            }
+            let result = table.remove(hash).map_err(DbError::from)?;
+            result.map(|g| g.value().to_string())
         };
         write_txn.commit().map_err(DbError::from)?;
         Ok(old_value)
@@ -153,11 +150,8 @@ impl OpticDb {
         let write_txn = self.db.begin_write().map_err(DbError::from)?;
         let old_value = {
             let mut table = write_txn.open_table(MACROS_TABLE).map_err(DbError::from)?;
-            if let Some(g) = table.remove(name).map_err(DbError::from)? {
-                Some(g.value().to_string())
-            } else {
-                None
-            }
+            let result = table.remove(name).map_err(DbError::from)?;
+            result.map(|g| g.value().to_string())
         };
         write_txn.commit().map_err(DbError::from)?;
         Ok(old_value)
