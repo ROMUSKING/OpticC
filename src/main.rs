@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 
 use optic_c::benchmark::{BenchmarkRunner, BenchmarkSuite, CompilerConfig};
 use optic_c::build::{BuildConfig, Builder, OutputType, compile_single_file};
+use optic_c::integration::IntegrationTest;
 
 #[derive(Parser)]
 #[command(name = "optic_c")]
@@ -50,6 +51,14 @@ enum Commands {
         output_dir: PathBuf,
         #[arg(long, default_value = "5")]
         runs: usize,
+    },
+    IntegrationTest {
+        #[arg(long, default_value = "/tmp/optic_integration")]
+        test_dir: PathBuf,
+        #[arg(long, short = 'o', default_value = "/tmp/optic_integration/output")]
+        output_dir: PathBuf,
+        #[arg(long, default_value = "https://www.sqlite.org/2026/sqlite-amalgamation-3490200.zip")]
+        sqlite_url: String,
     },
 }
 
@@ -201,6 +210,59 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 
             println!("Benchmark completed: {} results", results.len());
             println!("Report written to: {}", report_path.display());
+        }
+        Commands::IntegrationTest {
+            test_dir,
+            output_dir,
+            sqlite_url,
+        } => {
+            let test = IntegrationTest::new(test_dir.clone(), output_dir.clone(), sqlite_url);
+
+            println!("Running SQLite integration test...");
+            println!("  SQLite URL: {}", test.sqlite_url);
+            println!("  Version: {}", test.sqlite_version);
+            println!("  Test dir: {}", test_dir.display());
+            println!("  Output dir: {}", output_dir.display());
+            println!();
+
+            let result = test.run();
+
+            let report = test.generate_report(&result);
+            let report_path = output_dir.join("integration_report.md");
+            std::fs::write(&report_path, &report)?;
+
+            println!();
+            println!("Integration test completed.");
+            println!("  Download: {}", if result.download_success { "SUCCESS" } else { "FAILED" });
+            println!("  Preprocess: {}", if result.preprocess_success { "SUCCESS" } else { "FAILED" });
+            println!("  Compile: {}", if result.compile_success { "SUCCESS" } else { "FAILED" });
+            println!("  Link: {}", if result.link_success { "SUCCESS" } else { "FAILED" });
+            println!("  Library: {}", if result.library_created { "CREATED" } else { "NOT CREATED" });
+            println!("  Size: {} bytes", result.library_size_bytes);
+            println!("  Time: {} ms", result.compile_time_ms);
+
+            if !result.errors.is_empty() {
+                println!();
+                println!("Errors:");
+                for error in &result.errors {
+                    println!("  - {}", error);
+                }
+            }
+
+            if !result.warnings.is_empty() {
+                println!();
+                println!("Warnings:");
+                for warning in &result.warnings {
+                    println!("  - {}", warning);
+                }
+            }
+
+            println!();
+            println!("Report written to: {}", report_path.display());
+
+            if !result.all_passed() {
+                std::process::exit(1);
+            }
         }
     }
 

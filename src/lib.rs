@@ -6,4 +6,5 @@ pub mod backend;
 pub mod analysis;
 pub mod types;
 pub mod benchmark;
+pub mod integration;
 // pub mod vfs;
