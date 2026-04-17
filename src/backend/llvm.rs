@@ -955,7 +955,7 @@ pub fn compile(&mut self, arena: &Arena, root: NodeOffset) -> Result<(), Backend
     }
 
     fn lower_label_addr(&mut self, _arena: &Arena, node: &CAstNode) -> Result<Option<BasicValueEnum<'ctx>>, BackendError> {
-        let ptr = self.context.ptr_type(AddressSpace::default()).const_null();
+        let ptr = self.context.i8_type().ptr_type(AddressSpace::default()).const_null();
         Ok(Some(ptr.into()))
     }
 
@@ -984,7 +984,12 @@ pub fn compile(&mut self, arena: &Arena, root: NodeOffset) -> Result<(), Backend
         match builtin_name.as_str() {
             "__builtin_expect" => {
                 if let Some(arg) = args.first() {
-                    return Ok(Some(arg.to_owned()));
+                    match arg {
+                        inkwell::values::BasicMetadataValueEnum::IntValue(v) => return Ok(Some((*v).into())),
+                        inkwell::values::BasicMetadataValueEnum::PointerValue(v) => return Ok(Some((*v).into())),
+                        inkwell::values::BasicMetadataValueEnum::FloatValue(v) => return Ok(Some((*v).into())),
+                        _ => return Ok(None),
+                    }
                 }
                 Ok(None)
             }
@@ -1020,12 +1025,11 @@ pub fn compile(&mut self, arena: &Arena, root: NodeOffset) -> Result<(), Backend
                 }
 
                 let fn_type = self.context.i64_type().fn_type(&args.iter().map(|a| {
-                    if let Some(int_val) = a.int_value() {
-                        int_val.get_type().into()
-                    } else if let Some(ptr_val) = a.pointer_value() {
-                        ptr_val.get_type().into()
-                    } else {
-                        self.context.i64_type().into()
+                    match a {
+                        inkwell::values::BasicMetadataValueEnum::IntValue(v) => v.get_type().into(),
+                        inkwell::values::BasicMetadataValueEnum::PointerValue(v) => v.get_type().into(),
+                        inkwell::values::BasicMetadataValueEnum::FloatValue(v) => v.get_type().into(),
+                        _ => self.context.i64_type().into(),
                     }
                 }).collect::<Vec<_>>(), false);
                 let func = self.module.add_function(&builtin_name, fn_type, None);
@@ -1045,7 +1049,12 @@ pub fn compile(&mut self, arena: &Arena, root: NodeOffset) -> Result<(), Backend
             }
             "__builtin_choose_expr" => {
                 if args.len() >= 3 {
-                    return Ok(Some(args[1].to_owned()));
+                    match &args[1] {
+                        inkwell::values::BasicMetadataValueEnum::IntValue(v) => return Ok(Some((*v).into())),
+                        inkwell::values::BasicMetadataValueEnum::PointerValue(v) => return Ok(Some((*v).into())),
+                        inkwell::values::BasicMetadataValueEnum::FloatValue(v) => return Ok(Some((*v).into())),
+                        _ => return Ok(None),
+                    }
                 }
                 Ok(None)
             }
