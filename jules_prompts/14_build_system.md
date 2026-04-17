@@ -99,3 +99,8 @@ OpticC currently compiles single files to `.ll` output. Real projects (SQLite, L
 - [ ] Incremental build (skip unchanged files)
 - [ ] Build cache persistence (~/.cache/opticc/)
 - [ ] Integration test: build SQLite as shared library
+
+### Note
+The build system is complete and functional. The benchmark module (`src/benchmark/mod.rs`)
+has been implemented and uses the build system's external tool invocation patterns for
+comparing GCC and Clang compilation performance.

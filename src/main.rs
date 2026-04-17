@@ -2,6 +2,7 @@ use clap::{Parser, Subcommand};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+use optic_c::benchmark::{BenchmarkRunner, BenchmarkSuite, CompilerConfig};
 use optic_c::build::{BuildConfig, Builder, OutputType, compile_single_file};
 
 #[derive(Parser)]
@@ -39,6 +40,16 @@ enum Commands {
         output_type: String,
         #[arg(long)]
         source_files: Vec<PathBuf>,
+    },
+    Benchmark {
+        #[arg(long, short = 's', default_value = "all")]
+        suite: String,
+        #[arg(long, short = 'c', default_value = "all")]
+        compilers: String,
+        #[arg(long, short = 'o', default_value = "output")]
+        output_dir: PathBuf,
+        #[arg(long, default_value = "5")]
+        runs: usize,
     },
 }
 
@@ -124,6 +135,72 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             builder.build()?;
 
             println!("Build completed successfully");
+        }
+        Commands::Benchmark {
+            suite,
+            compilers,
+            output_dir,
+            runs,
+        } => {
+            let mut runner = BenchmarkRunner::new()
+                .with_results_dir(output_dir.clone())
+                .with_runs_per_benchmark(runs);
+
+            match suite.as_str() {
+                "all" => {
+                    runner.add_suite(BenchmarkSuite::Micro);
+                    runner.add_suite(BenchmarkSuite::Coreutils);
+                    runner.add_suite(BenchmarkSuite::Synthetic);
+                }
+                "micro" => {
+                    runner.add_suite(BenchmarkSuite::Micro);
+                }
+                "coreutils" => {
+                    runner.add_suite(BenchmarkSuite::Coreutils);
+                }
+                "synthetic" => {
+                    runner.add_suite(BenchmarkSuite::Synthetic);
+                }
+                _ => {
+                    eprintln!("Unknown suite: {}", suite);
+                    eprintln!("Available: all, micro, coreutils, synthetic");
+                    std::process::exit(1);
+                }
+            }
+
+            if compilers != "all" {
+                runner.compilers.clear();
+                for name in compilers.split(',') {
+                    let name = name.trim();
+                    let config = match name {
+                        "gcc" => CompilerConfig::new("gcc", "gcc"),
+                        "clang" => CompilerConfig::new("clang", "clang"),
+                        _ => {
+                            eprintln!("Unknown compiler: {}", name);
+                            continue;
+                        }
+                    };
+                    if config.is_available() {
+                        runner.add_compiler(config);
+                    } else {
+                        eprintln!("Warning: {} not available, skipping", name);
+                    }
+                }
+            }
+
+            if runner.compilers.is_empty() {
+                eprintln!("Error: no compilers available");
+                std::process::exit(1);
+            }
+
+            let results = runner.run()?;
+
+            let md_report = optic_c::benchmark::generate_markdown_report(&results);
+            let report_path = output_dir.join("report.md");
+            std::fs::write(&report_path, &md_report)?;
+
+            println!("Benchmark completed: {} results", results.len());
+            println!("Report written to: {}", report_path.display());
         }
     }
 
