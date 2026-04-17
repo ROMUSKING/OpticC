@@ -56,7 +56,7 @@ OpticC is organized into 4 milestone phases. Each phase has a Definition of Done
 - ✅ Static Analysis (pointer provenance, taint tracking, UAF detection)
 - ✅ VFS Projection (FUSE, shadow comment injection)
 
-### Phase 2: SQLite Compilation (COMPLETE — Core Modules)
+### Phase 2: SQLite Compilation (Core Modules COMPLETE, Integration In Progress)
 **Goal**: Compile SQLite Amalgamation (255K LOC) to a working shared library.
 
 | # | Prompt | Agent | Dependency | Status |
@@ -70,6 +70,17 @@ OpticC is organized into 4 milestone phases. Each phase has a Definition of Done
 | - | Parser wiring | Jules-Parser | 10 | ✅ COMPLETE (6 integration tests) |
 | - | Backend types | Jules-Backend | 11 | ✅ COMPLETE (13 tests, typed codegen) |
 | - | Integration test | Jules-Integration | 10-15 | ✅ COMPLETE (20 tests) |
+
+### Toolchain Installation (Cloud Agent Environment)
+```bash
+# Ubuntu 22.04 container
+apt-get update && apt-get install -y build-essential clang llvm llvm-dev lld binutils unzip curl
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+source $HOME/.cargo/env
+# Verify: gcc 11.4, clang 14, LLVM 14, rustc 1.95
+cargo build  # 0 errors
+cargo test   # 259 passing
+```
 
 **Definition of Done**:
 - [x] Preprocessor handles `#include`, `#define`, `#ifdef`, `#pragma` (21 tests)

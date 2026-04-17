@@ -91,20 +91,32 @@ Optimization pipeline, DWARF debug info, LTO, cross-compilation.
 ## Quick Start
 
 ### Prerequisites
-- **Rust 2024 edition** (nightly or recent stable)
+- **Ubuntu 22.04** (or Debian-based Linux)
+- **Rust 1.95+** (via rustup)
 - **LLVM 14** (for inkwell bindings)
+- **gcc/clang** (for linking)
 - **FUSE** (optional, for VFS projection)
+
+### Toolchain Installation (Cloud Agent / Ubuntu)
+```bash
+# Install system dependencies
+apt-get update && apt-get install -y build-essential clang llvm llvm-dev lld binutils unzip curl
+
+# Install Rust
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+source $HOME/.cargo/env
+
+# Verify installation
+gcc --version    # gcc 11.4.0
+clang --version  # clang 14.0.0
+llvm-config --version  # 14.0.0
+rustc --version  # rustc 1.95.0
+```
 
 ### Build
 ```bash
-# Install LLVM 14 (Ubuntu/Debian)
-./llvm.sh 14
-
-# Build the compiler
-cargo build --release
-
-# Run tests
-cargo test
+cargo build        # 0 errors
+cargo test         # 259 passing
 ```
 
 ### Usage
