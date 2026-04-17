@@ -110,7 +110,7 @@ impl<'a> AliasAnalyzer<'a> {
                 }
             }
             AST_VAR_DECL => {
-                provenance.push(node.0);
+                // node.0 is already in provenance from the initial vec![node.0]
             }
             AST_PTR => {
                 if ast_node.first_child.0 != 0 {
@@ -128,10 +128,10 @@ impl<'a> AliasAnalyzer<'a> {
                 }
             }
             AST_IDENT | AST_MEMBER => {
-                provenance.push(node.0);
+                // node.0 is already in provenance from the initial vec![node.0]
             }
             AST_CALL => {
-                provenance.push(node.0);
+                // node.0 is already in provenance from the initial vec![node.0]
             }
             _ => {}
         }
@@ -195,6 +195,7 @@ impl<'a> AliasAnalyzer<'a> {
     }
 
     pub fn detect_uaf(&self, deref: NodeOffset) -> Option<UafDiagnostic> {
+        // Case 1: the node itself is tainted (e.g. direct use of a freed pointer).
         let taint = self.check_taint(deref);
         if let TaintState::Tainted { source } = taint {
             return Some(UafDiagnostic {
@@ -203,6 +204,23 @@ impl<'a> AliasAnalyzer<'a> {
                 path: vec![deref],
             });
         }
+
+        // Case 2: the node is a dereference (*p) whose operand p is a freed pointer.
+        if let Some(ast_node) = self.arena.get(deref) {
+            if ast_node.kind == AST_UNOP && ast_node.data == OP_DEREF
+                && ast_node.first_child.0 != 0
+            {
+                let child_taint = self.check_taint(ast_node.first_child);
+                if let TaintState::Tainted { source } = child_taint {
+                    return Some(UafDiagnostic {
+                        freed_node: source,
+                        deref_node: deref,
+                        path: vec![deref, ast_node.first_child],
+                    });
+                }
+            }
+        }
+
         None
     }
 
