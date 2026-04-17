@@ -7,8 +7,11 @@ domain: "Graph Infrastructure"
 
 structs:
   - name: "CAstNode"
-    semantic_description: "The fundamental unit of the AST. Represents a single operation, declaration, or macro invocation."
-    memory_layout: "Uses #[repr(C)] to ensure predictable layout in the mmap arena. Keep field names aligned with the real CAstNode definition in src/arena.rs."
+    semantic_description: "The fundamental unit of the AST. Represents a single
+      operation, declaration, or macro invocation."
+    memory_layout: "Uses #[repr(C)] to ensure predictable layout in the mmap arena.
+      Keep field names aligned with the real CAstNode definition in
+      src/arena.rs."
     fields:
       - name: "kind"
         type: "u16"
@@ -29,7 +32,8 @@ structs:
 functions:
   - name: "Arena::alloc"
     semantic_description: "Allocates a new CAstNode sequentially in the memory-mapped file."
-    side_effects: "Advances the arena allocation cursor by one slot and writes directly into the mmap-backed storage."
+    side_effects: "Advances the arena allocation cursor by one slot and writes
+      directly into the mmap-backed storage."
     parameters:
       - name: "node"
         type: "CAstNode"
