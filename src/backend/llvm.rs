@@ -379,23 +379,37 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                 match child.kind {
                     // Kind=73: init-declarator with optional initializer
                     73 => {
-                        // first_child = kind=60(name) or pointer_decl
+                        // first_child = kind=60(name), kind=8(array decl), or pointer_decl
                         // declarator.next_sibling = init_expr (stored there to survive link_siblings)
                         let declarator_node = arena.get(child.first_child);
+
+                        // Detect array declarator (kind=8): data=array_size, first_child=ident
+                        let (actual_alloca_type, is_array) = if let Some(dn) = declarator_node {
+                            if dn.kind == 8 {
+                                let array_size = dn.data;
+                                let arr_type = alloca_type.array_type(array_size).as_basic_type_enum();
+                                (arr_type, true)
+                            } else {
+                                (alloca_type, false)
+                            }
+                        } else {
+                            (alloca_type, false)
+                        };
+
                         let var_name_opt: Option<String> = declarator_node.and_then(|n| {
                             if n.kind == 60 {
                                 arena.get_string(NodeOffset(n.data))
                                     .filter(|s| !s.is_empty())
                                     .map(|s| s.to_string())
                             } else {
-                                // For pointer declarators (kind=7/8/9), find the ident deeper
+                                // For pointer/array declarators (kind=7/8/9), find the ident deeper
                                 self.find_ident_name_in(arena, n)
                             }
                         });
                         if let Some(var_name) = var_name_opt {
                             let var_ptr = self
                                 .builder
-                                .build_alloca(alloca_type, &var_name)
+                                .build_alloca(actual_alloca_type, &var_name)
                                 .map_err(|_| BackendError::InvalidNode)?;
                             if spec_kind == 4 || spec_kind == 5 {
                                 if let Some(sn) = spec_node {
@@ -414,20 +428,23 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                                 var_name.clone(),
                                 VariableBinding {
                                     ptr: var_ptr,
-                                    pointee_type: alloca_type,
+                                    pointee_type: actual_alloca_type,
                                 },
                             );
-                            // Process initializer: stored as declarator.next_sibling
-                            let init_offset = declarator_node
-                                .map(|d| d.next_sibling)
-                                .unwrap_or(NodeOffset::NULL);
-                            if init_offset != NodeOffset::NULL {
-                                if let Some(val) = self.lower_expr(arena, init_offset)? {
-                                    if Self::types_compatible(alloca_type, val) {
-                                        let _ = self
-                                            .builder
-                                            .build_store(var_ptr, val)
-                                            .map_err(|_| BackendError::InvalidNode);
+                            // Process initializer only for non-array types
+                            // (array initializers require separate aggregate handling)
+                            if !is_array {
+                                let init_offset = declarator_node
+                                    .map(|d| d.next_sibling)
+                                    .unwrap_or(NodeOffset::NULL);
+                                if init_offset != NodeOffset::NULL {
+                                    if let Some(val) = self.lower_expr(arena, init_offset)? {
+                                        if Self::types_compatible(actual_alloca_type, val) {
+                                            let _ = self
+                                                .builder
+                                                .build_store(var_ptr, val)
+                                                .map_err(|_| BackendError::InvalidNode);
+                                        }
                                     }
                                 }
                             }
