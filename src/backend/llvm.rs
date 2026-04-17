@@ -586,7 +586,13 @@ pub fn compile(&mut self, arena: &Arena, root: NodeOffset) -> Result<(), Backend
             73 => self.lower_assign_expr(arena, &node),
             80 => self.lower_int_const(&node),
             82 => self.lower_float_const(&node),
-            1..=9 | 83 | 90..=94 | 101..=105 => Ok(None),
+            201 => self.lower_typeof(arena, &node),
+            202 => self.lower_stmt_expr(arena, &node),
+            203 => self.lower_label_addr(arena, &node),
+            204 => self.lower_builtin_call(arena, &node),
+            205 => self.lower_designated_init(arena, &node),
+            206 => self.lower_extension(arena, &node),
+            1..=9 | 83 | 90..=94 | 101..=105 | 200 => Ok(None),
             _ => Ok(None),
         }
     }
@@ -924,6 +930,169 @@ pub fn compile(&mut self, arena: &Arena, root: NodeOffset) -> Result<(), Backend
         }
 
         Ok(Some(rhs_val))
+    }
+
+    fn lower_typeof(&mut self, arena: &Arena, node: &CAstNode) -> Result<Option<BasicValueEnum<'ctx>>, BackendError> {
+        if node.first_child != NodeOffset::NULL {
+            self.lower_expr(arena, node.first_child)
+        } else {
+            Ok(None)
+        }
+    }
+
+    fn lower_stmt_expr(&mut self, arena: &Arena, node: &CAstNode) -> Result<Option<BasicValueEnum<'ctx>>, BackendError> {
+        let mut last_val: Option<BasicValueEnum<'ctx>> = None;
+        let mut child_offset = node.first_child;
+        while child_offset != NodeOffset::NULL {
+            if let Some(child) = arena.get(child_offset) {
+                last_val = self.lower_expr(arena, child_offset)?;
+                child_offset = child.next_sibling;
+            } else {
+                break;
+            }
+        }
+        Ok(last_val)
+    }
+
+    fn lower_label_addr(&mut self, _arena: &Arena, node: &CAstNode) -> Result<Option<BasicValueEnum<'ctx>>, BackendError> {
+        let ptr = self.context.ptr_type(AddressSpace::default()).const_null();
+        Ok(Some(ptr.into()))
+    }
+
+    fn lower_builtin_call(&mut self, arena: &Arena, node: &CAstNode) -> Result<Option<BasicValueEnum<'ctx>>, BackendError> {
+        let builtin_name = if node.data != 0 {
+            arena.get_string(NodeOffset(node.data)).map(|s| s.to_string())
+        } else {
+            None
+        };
+
+        let builtin_name = builtin_name.unwrap_or_else(|| "__builtin_unknown".to_string());
+
+        let mut args: Vec<inkwell::values::BasicMetadataValueEnum> = Vec::new();
+        let mut child_offset = node.first_child;
+        while child_offset != NodeOffset::NULL {
+            if let Some(child) = arena.get(child_offset) {
+                if let Some(arg_val) = self.lower_expr(arena, child_offset)? {
+                    args.push(arg_val.into());
+                }
+                child_offset = child.next_sibling;
+            } else {
+                break;
+            }
+        }
+
+        match builtin_name.as_str() {
+            "__builtin_expect" => {
+                if let Some(arg) = args.first() {
+                    return Ok(Some(arg.to_owned()));
+                }
+                Ok(None)
+            }
+            "__builtin_constant_p" => {
+                let is_const = node.first_child != NodeOffset::NULL && {
+                    if let Some(child) = arena.get(node.first_child) {
+                        matches!(child.kind, 61 | 62 | 63 | 80 | 82)
+                    } else {
+                        false
+                    }
+                };
+                let val = if is_const { 1u64 } else { 0u64 };
+                Ok(Some(self.context.i32_type().const_int(val, false).into()))
+            }
+            "__builtin_offsetof" => {
+                Ok(Some(self.context.i64_type().const_int(0, false).into()))
+            }
+            "__builtin_memcpy" | "__builtin_memset" | "__builtin_strlen" => {
+                let intrinsic_name = match builtin_name.as_str() {
+                    "__builtin_memcpy" => "llvm.memcpy.p0.p0.i64",
+                    "__builtin_memset" => "llvm.memset.p0.i64",
+                    "__builtin_strlen" => "llvm.strlen",
+                    _ => unreachable!(),
+                };
+
+                if let Some(func) = self.functions.get(&builtin_name) {
+                    let call_site = self.builder.build_call(*func, &args, "builtin_call")
+                        .map_err(|_| BackendError::InvalidNode)?;
+                    return Ok(Some(match call_site.try_as_basic_value() {
+                        inkwell::values::ValueKind::Basic(v) => v,
+                        _ => self.context.i32_type().const_int(0, false).into(),
+                    }));
+                }
+
+                let fn_type = self.context.i64_type().fn_type(&args.iter().map(|a| {
+                    if let Some(int_val) = a.int_value() {
+                        int_val.get_type().into()
+                    } else if let Some(ptr_val) = a.pointer_value() {
+                        ptr_val.get_type().into()
+                    } else {
+                        self.context.i64_type().into()
+                    }
+                }).collect::<Vec<_>>(), false);
+                let func = self.module.add_function(&builtin_name, fn_type, None);
+                self.functions.insert(builtin_name.clone(), func);
+                let call_site = self.builder.build_call(func, &args, "builtin_call")
+                    .map_err(|_| BackendError::InvalidNode)?;
+                Ok(Some(match call_site.try_as_basic_value() {
+                    inkwell::values::ValueKind::Basic(v) => v,
+                    _ => self.context.i32_type().const_int(0, false).into(),
+                }))
+            }
+            "__builtin_va_arg" => {
+                Ok(Some(self.context.i32_type().const_int(0, false).into()))
+            }
+            "__builtin_types_compatible_p" => {
+                Ok(Some(self.context.i32_type().const_int(1, false).into()))
+            }
+            "__builtin_choose_expr" => {
+                if args.len() >= 3 {
+                    return Ok(Some(args[1].to_owned()));
+                }
+                Ok(None)
+            }
+            _ => {
+                if let Some(func) = self.functions.get(&builtin_name) {
+                    let call_site = self.builder.build_call(*func, &args, "builtin_call")
+                        .map_err(|_| BackendError::InvalidNode)?;
+                    return Ok(Some(match call_site.try_as_basic_value() {
+                        inkwell::values::ValueKind::Basic(v) => v,
+                        _ => self.context.i32_type().const_int(0, false).into(),
+                    }));
+                }
+
+                let fn_type = self.context.i32_type().fn_type(&[], true);
+                let func = self.module.add_function(&builtin_name, fn_type, None);
+                self.functions.insert(builtin_name.clone(), func);
+                let call_site = self.builder.build_call(func, &args, "builtin_call")
+                    .map_err(|_| BackendError::InvalidNode)?;
+                Ok(Some(match call_site.try_as_basic_value() {
+                    inkwell::values::ValueKind::Basic(v) => v,
+                    _ => self.context.i32_type().const_int(0, false).into(),
+                }))
+            }
+        }
+    }
+
+    fn lower_designated_init(&mut self, arena: &Arena, node: &CAstNode) -> Result<Option<BasicValueEnum<'ctx>>, BackendError> {
+        let mut child_offset = node.first_child;
+        while child_offset != NodeOffset::NULL {
+            if let Some(child) = arena.get(child_offset) {
+                if matches!(child.kind, 60..=82) {
+                    return self.lower_expr(arena, child_offset);
+                }
+                child_offset = child.next_sibling;
+            } else {
+                break;
+            }
+        }
+        Ok(None)
+    }
+
+    fn lower_extension(&mut self, arena: &Arena, node: &CAstNode) -> Result<Option<BasicValueEnum<'ctx>>, BackendError> {
+        if node.first_child != NodeOffset::NULL {
+            self.lower_expr(arena, node.first_child)
+        } else {
+            Ok(None)
+        }
     }
 
     fn find_ident_name(&self, arena: &Arena, node: &CAstNode) -> Option<String> {
