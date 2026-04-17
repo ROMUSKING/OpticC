@@ -358,6 +358,25 @@ impl Preprocessor {
 
         while let Some(&ch) = chars.peek() {
             match ch {
+                '\\' => {
+                    // Check for line continuation: \ followed by \n
+                    chars.next();
+                    col += 1;
+                    if let Some(&'\n') = chars.peek() {
+                        // Line continuation: skip \ and newline, continue on next line
+                        chars.next();
+                        line += 1;
+                        col = 1;
+                    } else {
+                        // Just a backslash, emit as punctuator
+                        tokens.push(PpToken {
+                            kind: PpTokenKind::Punctuator,
+                            text: "\\".to_string(),
+                            line,
+                            column: col - 1,
+                        });
+                    }
+                }
                 '\n' => {
                     chars.next();
                     tokens.push(PpToken {
@@ -968,10 +987,8 @@ impl Preprocessor {
         let name = tokens[j].text.clone();
         j += 1;
 
-        if j < tokens.len() && tokens[j].kind == PpTokenKind::Whitespace {
-            j += 1;
-        }
-
+        // C standard: function-like macros require NO whitespace between name and '('
+        // If there's whitespace, it's an object-like macro (even if followed by '(')
         if j < tokens.len() && tokens[j].text == "(" {
             let (params, is_variadic, end_params) = self.parse_macro_params(tokens, j, file)?;
             j = end_params;

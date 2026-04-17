@@ -23,6 +23,8 @@ enum Commands {
         output: Option<PathBuf>,
         #[arg(short = 'O', long, default_value = "0")]
         optimization: u32,
+        #[arg(long, short = 'I')]
+        include_paths: Vec<PathBuf>,
     },
     Build {
         #[arg(long)]
@@ -77,6 +79,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             input,
             output,
             optimization,
+            include_paths,
         } => {
             let input_path = input.as_path();
             let output_path = output
@@ -87,7 +90,13 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     Path::new(&format!("{}.ll", stem)).to_path_buf()
                 });
 
-            compile_single_file(input_path, &output_path, optimization, &[], &HashMap::new())?;
+            // Add system include paths by default
+            let mut sys_includes = include_paths;
+            sys_includes.push(PathBuf::from("/usr/include"));
+            sys_includes.push(PathBuf::from("/usr/lib/llvm-14/lib/clang/14.0.0/include"));
+            sys_includes.push(PathBuf::from("/usr/lib/gcc/x86_64-linux-gnu/11/include"));
+
+            compile_single_file(input_path, &output_path, optimization, &sys_includes, &HashMap::new())?;
 
             println!("Compiled {} -> {}", input_path.display(), output_path.display());
         }
