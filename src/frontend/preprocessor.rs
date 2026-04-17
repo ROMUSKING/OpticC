@@ -215,13 +215,13 @@ impl Preprocessor {
             ("__GNUC__", "4".to_string()),
             ("__GNUC_MINOR__", "2".to_string()),
             ("__GNUC_PATCHLEVEL__", "1".to_string()),
-            ("__SIZEOF_SHORT__", std::mem::size_of::<i16>().to_string()),
-            ("__SIZEOF_INT__", std::mem::size_of::<i32>().to_string()),
+            ("__SIZEOF_SHORT__", std::mem::size_of::<libc::c_short>().to_string()),
+            ("__SIZEOF_INT__", std::mem::size_of::<libc::c_int>().to_string()),
             ("__SIZEOF_LONG__", std::mem::size_of::<libc::c_long>().to_string()),
-            ("__SIZEOF_LONG_LONG__", std::mem::size_of::<i64>().to_string()),
+            ("__SIZEOF_LONG_LONG__", std::mem::size_of::<libc::c_longlong>().to_string()),
             ("__SIZEOF_POINTER__", std::mem::size_of::<usize>().to_string()),
-            ("__SIZEOF_SIZE_T__", std::mem::size_of::<usize>().to_string()),
-            ("__SIZEOF_PTRDIFF_T__", std::mem::size_of::<isize>().to_string()),
+            ("__SIZEOF_SIZE_T__", std::mem::size_of::<libc::size_t>().to_string()),
+            ("__SIZEOF_PTRDIFF_T__", std::mem::size_of::<libc::ptrdiff_t>().to_string()),
         ];
 
         for (name, value) in predefined_int_macros {
