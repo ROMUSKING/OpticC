@@ -168,8 +168,6 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
         arena: &Arena,
         offset: NodeOffset,
     ) -> Result<(), BackendError> {
-        eprintln!("lower_translation_unit: starting at offset={:?}", offset);
-
         // First pass: register all struct/union type definitions
         let mut scan_offset = offset;
         while scan_offset != NodeOffset::NULL {
@@ -184,77 +182,31 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
         let mut child_offset = offset;
         while child_offset != NodeOffset::NULL {
             if let Some(node) = arena.get(child_offset) {
-                eprintln!(
-                    "  visiting node kind={} data={} first_child={:?} next_sibling={:?}",
-                    node.kind, node.data, node.first_child, node.next_sibling
-                );
                 match node.kind {
-                    1..=9 | 83 => {
-                        eprintln!("    -> skipped type node");
-                    }
-                    20 => {
-                        eprintln!("    -> processing as decl");
-                        self.lower_decl(arena, node)?;
-                    }
-                    22 => {
-                        eprintln!("    -> processing as func_decl");
-                        self.lower_func_decl(arena, node)?;
-                    }
-                    23 => {
-                        eprintln!("    -> processing as func_def");
-                        self.lower_func_def(arena, node)?;
-                    }
-                    101..=105 => {
-                        eprintln!("    -> skipped storage class");
-                    }
-                    _ => {
-                        eprintln!(
-                            "  WARNING: skipping unknown node kind={} at top level",
-                            node.kind
-                        );
-                    }
+                    1..=9 | 83 => {}
+                    20 => self.lower_decl(arena, node)?,
+                    22 => self.lower_func_decl(arena, node)?,
+                    23 => self.lower_func_def(arena, node)?,
+                    101..=105 => {}
+                    _ => {}
                 }
                 child_offset = node.next_sibling;
             } else {
-                eprintln!(
-                    "  child_offset {:?} is NULL/invalid, breaking",
-                    child_offset
-                );
                 break;
             }
         }
-        eprintln!("lower_translation_unit: done");
         Ok(())
     }
 
     fn lower_decl(&mut self, arena: &Arena, node: &CAstNode) -> Result<(), BackendError> {
-        eprintln!(
-            "  lower_decl: node kind={} first_child={:?}",
-            node.kind, node.first_child
-        );
         let mut child_offset = node.first_child;
         while child_offset != NodeOffset::NULL {
             if let Some(child) = arena.get(child_offset) {
-                eprintln!(
-                    "    decl child: kind={} data={} first_child={:?}",
-                    child.kind, child.data, child.first_child
-                );
                 match child.kind {
-                    21 => {
-                        eprintln!("      -> var_decl");
-                        self.lower_var_decl(arena, &child)?;
-                    }
-                    22 => {
-                        eprintln!("      -> func_decl");
-                        self.lower_func_decl(arena, &child)?;
-                    }
-                    23 => {
-                        eprintln!("      -> func_def");
-                        self.lower_func_def(arena, &child)?;
-                    }
-                    _ => {
-                        eprintln!("      -> unknown, skipped");
-                    }
+                    21 => self.lower_var_decl(arena, &child)?,
+                    22 => self.lower_func_decl(arena, &child)?,
+                    23 => self.lower_func_def(arena, &child)?,
+                    _ => {}
                 }
                 child_offset = child.next_sibling;
             } else {
@@ -450,21 +402,32 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                             }
                         }
                     }
-                    // Kind=60: plain declarator (no initializer) after a type spec
-                    60 => {
-                        if let Some(var_name) = arena.get_string(NodeOffset(child.data))
-                            .filter(|s| !s.is_empty())
-                            .map(|s| s.to_string())
-                        {
+                    // Kind=60/8: plain scalar or array declarator (no initializer) after a type spec
+                    60 | 8 => {
+                        let (actual_alloca_type, var_name_opt) = if child.kind == 8 {
+                            (
+                                alloca_type.array_type(child.data).as_basic_type_enum(),
+                                self.find_ident_name_in(arena, child),
+                            )
+                        } else {
+                            (
+                                alloca_type,
+                                arena.get_string(NodeOffset(child.data))
+                                    .filter(|s| !s.is_empty())
+                                    .map(|s| s.to_string()),
+                            )
+                        };
+
+                        if let Some(var_name) = var_name_opt {
                             let var_ptr = self
                                 .builder
-                                .build_alloca(alloca_type, &var_name)
+                                .build_alloca(actual_alloca_type, &var_name)
                                 .map_err(|_| BackendError::InvalidNode)?;
                             self.variables.insert(
                                 var_name,
                                 VariableBinding {
                                     ptr: var_ptr,
-                                    pointee_type: alloca_type,
+                                    pointee_type: actual_alloca_type,
                                 },
                             );
                         }
@@ -492,6 +455,146 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
             (BasicTypeEnum::FloatType(_), BasicValueEnum::FloatValue(_)) => true,
             (BasicTypeEnum::PointerType(_), BasicValueEnum::PointerValue(_)) => true,
             _ => false,
+        }
+    }
+
+    fn lower_lvalue_ptr(
+        &mut self,
+        arena: &Arena,
+        offset: NodeOffset,
+    ) -> Result<Option<(PointerValue<'ctx>, BasicTypeEnum<'ctx>)>, BackendError> {
+        let node = match arena.get(offset) {
+            Some(node) => node,
+            None => return Ok(None),
+        };
+
+        match node.kind {
+            60 => {
+                let name = match arena.get_string(NodeOffset(node.data)) {
+                    Some(name) => name,
+                    None => return Ok(None),
+                };
+                let binding = match self.variables.get(name).copied() {
+                    Some(binding) => binding,
+                    None => return Ok(None),
+                };
+
+                if let BasicTypeEnum::ArrayType(array_type) = binding.pointee_type {
+                    let zero = self.context.i32_type().const_zero();
+                    let ptr = unsafe {
+                        self.builder
+                            .build_gep(array_type, binding.ptr, &[zero, zero], "arraybase")
+                            .map_err(|_| BackendError::InvalidNode)?
+                    };
+                    Ok(Some((ptr, array_type.get_element_type())))
+                } else {
+                    Ok(Some((binding.ptr, binding.pointee_type)))
+                }
+            }
+            68 => self.lower_array_element_ptr(arena, node),
+            _ => Ok(None),
+        }
+    }
+
+    fn lower_array_element_ptr(
+        &mut self,
+        arena: &Arena,
+        node: &CAstNode,
+    ) -> Result<Option<(PointerValue<'ctx>, BasicTypeEnum<'ctx>)>, BackendError> {
+        let index_val = match self.lower_expr(arena, node.next_sibling)? {
+            Some(BasicValueEnum::IntValue(index)) => index,
+            _ => return Ok(None),
+        };
+
+        if let Some(base_node) = arena.get(node.first_child) {
+            if base_node.kind == 60 {
+                if let Some(name) = arena.get_string(NodeOffset(base_node.data)) {
+                    if let Some(binding) = self.variables.get(name).copied() {
+                        if let BasicTypeEnum::ArrayType(array_type) = binding.pointee_type {
+                            let zero = self.context.i32_type().const_zero();
+                            let ptr = unsafe {
+                                self.builder
+                                    .build_gep(array_type, binding.ptr, &[zero, index_val], "arrayidx")
+                                    .map_err(|_| BackendError::InvalidNode)?
+                            };
+                            return Ok(Some((ptr, array_type.get_element_type())));
+                        }
+                    }
+                }
+            }
+        }
+
+        let base_ptr = match self.lower_expr(arena, node.first_child)? {
+            Some(BasicValueEnum::PointerValue(ptr)) => ptr,
+            _ => return Ok(None),
+        };
+        let elem_type = self.context.i32_type().as_basic_type_enum();
+        let ptr = unsafe {
+            self.builder
+                .build_gep(elem_type, base_ptr, &[index_val], "arrayidx")
+                .map_err(|_| BackendError::InvalidNode)?
+        };
+        Ok(Some((ptr, elem_type)))
+    }
+
+    fn apply_assignment_op(
+        &mut self,
+        op_code: u32,
+        lhs_val: BasicValueEnum<'ctx>,
+        rhs_val: BasicValueEnum<'ctx>,
+    ) -> Result<BasicValueEnum<'ctx>, BackendError> {
+        if op_code == 19 {
+            return Ok(rhs_val);
+        }
+
+        let use_float = lhs_val.is_float_value() || rhs_val.is_float_value();
+        if use_float {
+            let lhs_float = if lhs_val.is_float_value() {
+                lhs_val.into_float_value()
+            } else {
+                self.builder
+                    .build_unsigned_int_to_float(
+                        lhs_val.into_int_value(),
+                        self.context.f64_type(),
+                        "assign_uitofp_lhs",
+                    )
+                    .map_err(|_| BackendError::InvalidNode)?
+            };
+            let rhs_float = if rhs_val.is_float_value() {
+                rhs_val.into_float_value()
+            } else {
+                self.builder
+                    .build_unsigned_int_to_float(
+                        rhs_val.into_int_value(),
+                        self.context.f64_type(),
+                        "assign_uitofp_rhs",
+                    )
+                    .map_err(|_| BackendError::InvalidNode)?
+            };
+
+            return match op_code {
+                1 => Ok(self.builder.build_float_add(lhs_float, rhs_float, "assign_fadd").map_err(|_| BackendError::InvalidNode)?.into()),
+                2 => Ok(self.builder.build_float_sub(lhs_float, rhs_float, "assign_fsub").map_err(|_| BackendError::InvalidNode)?.into()),
+                3 => Ok(self.builder.build_float_mul(lhs_float, rhs_float, "assign_fmul").map_err(|_| BackendError::InvalidNode)?.into()),
+                4 => Ok(self.builder.build_float_div(lhs_float, rhs_float, "assign_fdiv").map_err(|_| BackendError::InvalidNode)?.into()),
+                _ => Err(BackendError::InvalidOperator(op_code)),
+            };
+        }
+
+        let lhs_int = lhs_val.into_int_value();
+        let rhs_int = rhs_val.into_int_value();
+        match op_code {
+            1 => Ok(self.builder.build_int_add(lhs_int, rhs_int, "assign_add").map_err(|_| BackendError::InvalidNode)?.into()),
+            2 => Ok(self.builder.build_int_sub(lhs_int, rhs_int, "assign_sub").map_err(|_| BackendError::InvalidNode)?.into()),
+            3 => Ok(self.builder.build_int_mul(lhs_int, rhs_int, "assign_mul").map_err(|_| BackendError::InvalidNode)?.into()),
+            4 => Ok(self.builder.build_int_signed_div(lhs_int, rhs_int, "assign_div").map_err(|_| BackendError::InvalidNode)?.into()),
+            5 => Ok(self.builder.build_int_signed_rem(lhs_int, rhs_int, "assign_rem").map_err(|_| BackendError::InvalidNode)?.into()),
+            14 => Ok(self.builder.build_and(lhs_int, rhs_int, "assign_and").map_err(|_| BackendError::InvalidNode)?.into()),
+            15 => Ok(self.builder.build_or(lhs_int, rhs_int, "assign_or").map_err(|_| BackendError::InvalidNode)?.into()),
+            16 => Ok(self.builder.build_xor(lhs_int, rhs_int, "assign_xor").map_err(|_| BackendError::InvalidNode)?.into()),
+            17 => Ok(self.builder.build_left_shift(lhs_int, rhs_int, "assign_shl").map_err(|_| BackendError::InvalidNode)?.into()),
+            18 => Ok(self.builder.build_right_shift(lhs_int, rhs_int, false, "assign_shr").map_err(|_| BackendError::InvalidNode)?.into()),
+            _ => Err(BackendError::InvalidOperator(op_code)),
         }
     }
 
@@ -693,16 +796,11 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
     }
 
     fn lower_compound(&mut self, arena: &Arena, node: &CAstNode) -> Result<(), BackendError> {
-
-        eprintln!("lower_compound: first_child={:?}", node.first_child);
         let mut child_offset = node.first_child;
-        let mut count = 0;
         while child_offset != NodeOffset::NULL {
             if let Some(child) = arena.get(child_offset) {
-                eprintln!("  compound child {}: kind={}", count, child.kind);
                 self.lower_stmt(arena, child_offset)?;
                 child_offset = child.next_sibling;
-                count += 1;
             } else {
                 break;
             }
@@ -992,10 +1090,6 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
             return Ok(None);
         }
 
-        eprintln!(
-            "lower_expr: offset={:?} kind={} data={}",
-            offset, node.kind, node.data
-        );
         match node.kind {
             60 => self.lower_ident(arena, &node),
             61 => self.lower_int_const(&node),
@@ -1025,13 +1119,22 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
     }
 
     fn lower_ident(
-        &self,
+        &mut self,
         arena: &Arena,
         node: &CAstNode,
     ) -> Result<Option<BasicValueEnum<'ctx>>, BackendError> {
         let name_offset = NodeOffset(node.data);
         if let Some(name) = arena.get_string(name_offset) {
             if let Some(ptr) = self.variables.get(name) {
+                if let BasicTypeEnum::ArrayType(array_type) = ptr.pointee_type {
+                    let zero = self.context.i32_type().const_zero();
+                    let array_ptr = unsafe {
+                        self.builder
+                            .build_gep(array_type, ptr.ptr, &[zero, zero], name)
+                            .map_err(|_| BackendError::InvalidNode)?
+                    };
+                    return Ok(Some(array_ptr.into()));
+                }
                 let val = self
                     .builder
                     .build_load(ptr.pointee_type, ptr.ptr, name)
@@ -1402,12 +1505,6 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
 
         let func_name = first_child.and_then(|c| arena.get_string(NodeOffset(c.data)));
 
-        eprintln!("    lower_call_expr: func_name={:?}", func_name);
-        eprintln!(
-            "    available functions: {:?}",
-            self.functions.keys().collect::<Vec<_>>()
-        );
-
         let mut args: Vec<inkwell::values::BasicMetadataValueEnum> = Vec::new();
         if let Some(fc) = first_child {
             let mut arg_offset = fc.next_sibling;
@@ -1425,7 +1522,6 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
 
         if let Some(name) = func_name {
             if let Some(func) = self.functions.get(name) {
-                eprintln!("    found function in map, building call");
                 let call_site = self
                     .builder
                     .build_call(*func, &args, "call")
@@ -1438,7 +1534,6 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                 }));
             }
 
-            eprintln!("    function not found, trying external declaration");
             let fn_type = self.context.i32_type().fn_type(&[], true);
             let ext_func = self.module.add_function(name, fn_type, None);
             self.functions.insert(name.to_string(), ext_func);
@@ -1523,34 +1618,14 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
         arena: &Arena,
         node: &CAstNode,
     ) -> Result<Option<BasicValueEnum<'ctx>>, BackendError> {
-        let base_offset = node.first_child;
-        let index_offset = node.next_sibling;
-
-        let base_val = match self.lower_expr(arena, base_offset)? {
-            Some(v) => v,
-            None => return Ok(None),
+        let Some((elem_ptr, elem_type)) = self.lower_array_element_ptr(arena, node)? else {
+            return Ok(None);
         };
-        let index_val = match self.lower_expr(arena, index_offset)? {
-            Some(v) => v,
-            None => return Ok(None),
-        };
-
-        if let (BasicValueEnum::PointerValue(ptr), BasicValueEnum::IntValue(idx)) =
-            (base_val, index_val)
-        {
-            let elem_type = self.context.i32_type().as_basic_type_enum();
-            let elem_ptr = unsafe {
-                self.builder
-                    .build_gep(elem_type, ptr, &[idx], "gep")
-                    .map_err(|_| BackendError::InvalidNode)?
-            };
-            let val = self
-                .builder
-                .build_load(elem_type, elem_ptr, "idx")
-                .map_err(|_| BackendError::InvalidNode)?;
-            return Ok(Some(val));
-        }
-        Ok(None)
+        let val = self
+            .builder
+            .build_load(elem_type, elem_ptr, "idx")
+            .map_err(|_| BackendError::InvalidNode)?;
+        Ok(Some(val))
     }
 
     fn lower_cast_expr(
@@ -1615,29 +1690,27 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
             None => return Ok(None),
         };
 
-        let lhs_node = match arena.get(lhs_offset) {
-            Some(n) => n,
-            None => return Ok(Some(rhs_val)),
+        let Some((lhs_ptr, lhs_type)) = self.lower_lvalue_ptr(arena, lhs_offset)? else {
+            return Ok(Some(rhs_val));
         };
-        if lhs_node.kind == 60 {
-            let name_offset = NodeOffset(lhs_node.data);
-            if let Some(name) = arena.get_string(name_offset) {
-                if let Some(ptr) = self.variables.get(name) {
-                    let store_ok = match ptr.pointee_type {
-                        BasicTypeEnum::IntType(_) if rhs_val.is_int_value() => {
-                            self.builder.build_store(ptr.ptr, rhs_val).is_ok()
-                        }
-                        BasicTypeEnum::FloatType(_) if rhs_val.is_float_value() => {
-                            self.builder.build_store(ptr.ptr, rhs_val).is_ok()
-                        }
-                        _ => false,
-                    };
-                    let _ = store_ok;
-                }
-            }
+
+        let value_to_store = if node.data == 19 {
+            rhs_val
+        } else {
+            let current_val = self
+                .builder
+                .build_load(lhs_type, lhs_ptr, "assign_lhs")
+                .map_err(|_| BackendError::InvalidNode)?;
+            self.apply_assignment_op(node.data, current_val, rhs_val)?
+        };
+
+        if Self::types_compatible(lhs_type, value_to_store) {
+            self.builder
+                .build_store(lhs_ptr, value_to_store)
+                .map_err(|_| BackendError::InvalidNode)?;
         }
 
-        Ok(Some(rhs_val))
+        Ok(Some(value_to_store))
     }
 
     fn lower_typeof(

@@ -440,7 +440,6 @@ impl Parser {
     }
 
     pub fn skip_punctuator(&mut self, text: &str) -> bool {
-        eprintln!("    skip_punctuator(\"{}\"): current={:?}", text, self.current_token());
         if self.current_token().kind == TokenKind::Punctuator && self.current_token().text == text {
             self.advance();
             true
@@ -484,12 +483,10 @@ impl Parser {
         while self.current_token().kind != TokenKind::EOF {
             match self.parse_external_declaration() {
                 Ok(decl) => {
-                    eprintln!("parse_translation_unit: parsed decl={:?}", decl);
                     if first_decl == NodeOffset::NULL {
                         first_decl = decl;
                         last_decl = decl;
                     } else {
-                        eprintln!("parse_translation_unit: linking {:?}.next_sibling = {:?}", last_decl, decl);
                         if let Some(last) = self.arena.get_mut(last_decl) {
                             last.next_sibling = decl;
                         }
@@ -506,30 +503,22 @@ impl Parser {
     }
 
     fn parse_external_declaration(&mut self) -> Result<NodeOffset, ParseError> {
-        eprintln!("parse_external_declaration: starting, current={:?}", self.current_token());
-
         if self.current_token().kind == TokenKind::Keyword && self.current_token().text == "__extension__" {
             return self.parse_extension_wrapper();
         }
 
         let specifiers = self.parse_declaration_specifiers()?;
-        eprintln!("parse_external_declaration: after specifiers, current={:?}", self.current_token());
         let mut first_child = specifiers;
         let mut last_child = specifiers;
 
-        eprintln!("parse_external_declaration: checking is_declarator_start");
         if self.is_declarator_start() {
-            eprintln!("parse_external_declaration: calling parse_declarator");
             let declarator = self.parse_declarator()?;
-            eprintln!("parse_external_declaration: after declarator, current={:?}", self.current_token());
             self.link_siblings(&mut first_child, &mut last_child, declarator);
 
             if let Some(attr_result) = self.parse_attribute_after_declarator() {
                 let attr = attr_result?;
                 self.link_siblings(&mut first_child, &mut last_child, attr);
             }
-        } else {
-            eprintln!("parse_external_declaration: NOT a declarator start, skipping");
         }
 
         while self.current_token().kind == TokenKind::Punctuator
@@ -545,24 +534,18 @@ impl Parser {
             }
         }
 
-        eprintln!("parse_external_declaration: checking ; or {{, current={:?}", self.current_token());
         if self.skip_punctuator(";") {
-            eprintln!("  -> consumed ;, returning decl");
             return Ok(self.alloc_node(20, 0, NodeOffset::NULL, first_child, NodeOffset::NULL));
         }
 
-        eprintln!("  -> checking for {{, current={:?}", self.current_token());
         let is_lbrace = self.current_token().kind == TokenKind::Punctuator && self.current_token().text == "{";
-        eprintln!("  -> is_lbrace={}", is_lbrace);
         if is_lbrace {
             self.advance();
-            eprintln!("parse_external_declaration: found {{, parsing compound");
             let compound = self.parse_compound_statement(None)?;
             self.link_siblings(&mut first_child, &mut last_child, compound);
             return Ok(self.alloc_node(23, 0, NodeOffset::NULL, first_child, NodeOffset::NULL));
         }
 
-        eprintln!("  -> no ; or {{, returning decl");
         Ok(self.alloc_node(20, 0, NodeOffset::NULL, first_child, NodeOffset::NULL))
     }
 
@@ -829,7 +812,6 @@ impl Parser {
     }
 
     pub fn parse_declarator(&mut self) -> Result<NodeOffset, ParseError> {
-        eprintln!("  parse_declarator: starting, current={:?}", self.current_token());
         let mut pointer_node = NodeOffset::NULL;
         let mut last_pointer = NodeOffset::NULL;
 
@@ -873,7 +855,12 @@ impl Parser {
         loop {
             if self.skip_punctuator("[") {
                 let size = if self.current_token().text != "]" {
-                    self.parse_constant_expression()?.0
+                    let size_expr = self.parse_constant_expression()?;
+                    self.arena
+                        .get(size_expr)
+                        .filter(|node| node.kind == 61)
+                        .map(|node| node.data)
+                        .unwrap_or(0)
                 } else {
                     0
                 };
@@ -909,31 +896,24 @@ impl Parser {
         let mut first_param = NodeOffset::NULL;
         let mut last_param = NodeOffset::NULL;
 
-        eprintln!("parse_parameter_list: starting, current_token={:?}", self.current_token());
         if self.current_token().text == ")" {
-            eprintln!("parse_parameter_list: immediately returning (empty)");
             return Ok(first_param);
         }
 
         loop {
             if self.current_token().text == ")" {
-                eprintln!("parse_parameter_list: found ), breaking");
                 break;
             }
             if self.current_token().text == "{" {
-                eprintln!("parse_parameter_list: found {{, breaking without consuming");
                 break;
             }
-            eprintln!("parse_parameter_list: parsing param, current={:?}", self.current_token());
             let param = self.parse_parameter_declaration()?;
             self.link_siblings(&mut first_param, &mut last_param, param);
 
             if self.current_token().text == ")" {
-                eprintln!("parse_parameter_list: found ) after param, NOT consuming");
                 break;
             }
             if !self.skip_punctuator(",") {
-                eprintln!("parse_parameter_list: no comma, breaking");
                 break;
             }
             if self.current_token().text == "..." {
@@ -941,7 +921,6 @@ impl Parser {
                 break;
             }
         }
-        eprintln!("parse_parameter_list: done, current={:?}", self.current_token());
 
         Ok(first_param)
     }
@@ -993,7 +972,6 @@ impl Parser {
         let result = token.kind == TokenKind::Identifier
             || (token.kind == TokenKind::Punctuator && token.text == "(")
             || (token.kind == TokenKind::Punctuator && token.text == "*");
-        eprintln!("  is_declarator_start: token={:?} result={}", token, result);
         result
     }
 
@@ -1002,10 +980,8 @@ impl Parser {
         let mut last_item = NodeOffset::NULL;
         let mut safety = 0;
 
-        eprintln!("parse_compound_statement: starting, current={:?}", self.current_token());
         while !self.skip_punctuator("}") {
             safety += 1;
-            eprintln!("  parse_compound_statement: loop, current={:?}", self.current_token());
             if self.is_at_end() || safety > 10000 {
                 break;
             }
@@ -1031,8 +1007,6 @@ impl Parser {
                 self.advance();
             }
         }
-        eprintln!("  parse_compound_statement: done skipping }}, current={:?}", self.current_token());
-
         Ok(self.alloc_node(40, 0, NodeOffset::NULL, first_item, NodeOffset::NULL))
     }
 
