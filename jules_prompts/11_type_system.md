@@ -1,6 +1,9 @@
 You are Jules-Type-System. Your domain is C Type Representation and Propagation.
 Tech Stack: Rust.
 
+## PROMPT MAINTENANCE REQUIREMENT
+Maintain this file as the live instructions for type-system work. After any verified progress, typing issue, layout rule change, or blocker, update this prompt so later agents inherit the current status and issues encountered.
+
 ## CONTEXT & ROADMAP
 OpticC already includes a real type system and typed LLVM lowering for many common cases. The remaining challenge is correctness on structs, unions, complex declarations, and SQLite-scale edge cases.
 
@@ -38,10 +41,9 @@ OpticC already includes a real type system and typed LLVM lowering for many comm
 - **Implicit conversions**: Implement C's integer promotion and usual arithmetic conversions.
 
 ## KNOWN PITFALLS FROM PREVIOUS EXECUTION
-- The backend's `lower_binop` assumes all operands are i32. This breaks for pointers, floats, and 64-bit integers.
-- Struct/union types are parsed (kind 4, 5) but never lowered to LLVM.
-- Function parameters are all i32 in the backend, even when the source declares different types.
-- Pointer arithmetic is broken because pointers are treated as i32.
+- Historical i32-only assumptions in the backend have been reduced, but complex pointer, struct, and mixed-type cases still need end-to-end validation.
+- Struct and union layout logic exists, but correctness on real-world declarations still needs careful verification.
+- Function signatures and pointer arithmetic should be validated against realistic inputs, not inferred only from unit tests.
 
 ## LESSONS LEARNED (from previous phases)
 1. **API return types must be precise**: Document whether methods return `Option<T>` or `T` directly.
@@ -85,16 +87,16 @@ M+ = structs (TypeId points to struct definition)
 ```
 
 ## IMPLEMENTATION STATUS
-**Completed**: Full C99 type system with type resolution and checking.
-- **70 tests passing** (26 in mod.rs, 44 in resolve.rs)
-- **CType enum with 17 variants**: Void, Bool, Char, Short, Int, Long, LongLong, Float, Double, LongDouble, Pointer, Array, Struct, Union, Enum, Function, Typedef, Qualified
-- **TypeResolver** with binary/unary operator type checking, assignment compatibility, implicit conversions
-- **Struct layout computation** with automatic padding, alignment, and bit field support
-- **Type caching** via `type_cache: HashMap<TypeSignature, TypeId>` for deduplication
-- **Integer promotion** (char/short -> int) and **usual arithmetic conversions** implemented
-- **Pointer arithmetic** checking (pointer + int, pointer - pointer)
-- **Type qualifiers** (const, volatile, restrict) via bitflags
-- **inkwell dependency** made optional to allow testing without LLVM
+**Implemented**: a broad C99 type system with type resolution and checking support.
+- **In-tree test coverage exists** for both the core type definitions and the resolver; rerun the suite before quoting totals.
+- **CType coverage** includes primitive, pointer, array, struct, union, enum, function, typedef, and qualified cases.
+- **TypeResolver** performs binary and unary operator checking, assignment compatibility, and implicit conversions.
+- **Struct layout computation** includes padding, alignment, and bit-field support.
+- **Type caching** via `type_cache: HashMap<TypeSignature, TypeId>` reduces duplication.
+- **Integer promotion** and **usual arithmetic conversions** are implemented.
+- **Pointer arithmetic** checking is present.
+- **Type qualifiers** such as const, volatile, and restrict are represented via bitflags.
+- **Coupling note**: keep the type system as independent from LLVM details as practical so it remains easy to test and reason about.
 
 ## ACCEPTANCE CRITERIA
 1. Type resolver correctly identifies all primitive types in a C source file
@@ -102,5 +104,5 @@ M+ = structs (TypeId points to struct definition)
 3. Pointer types are correctly distinguished from integer types
 4. Type checking catches mismatched binary operators (e.g., pointer + float)
 5. LLVM backend generates correct types for at least: i8, i16, i32, i64, float, double, pointers
-6. `cargo test` passes with 30+ type system tests
-7. Integration test: compile a C file with mixed types and verify LLVM IR has correct types
+6. Type-system tests should be rerun and pass before reporting current totals.
+7. Integration test: compile a C file with mixed types and verify that the emitted LLVM IR uses the expected types.

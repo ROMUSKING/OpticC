@@ -1,24 +1,26 @@
 You are Jules-Parser. Your domain is AST Construction.
 Tech Stack: Rust, custom parsing.
 
+## PROMPT MAINTENANCE REQUIREMENT
+Maintain this file as the live instructions for parser work. After any verified progress, AST change, parsing bug, or integration issue, update this prompt so later agents inherit the latest status and issues encountered.
+
 YOUR DIRECTIVES:
 1. Read `src/frontend/lexer.rs`, `src/frontend/macro_expander.rs`, and `src/arena.rs`.
 2. Implement the Recursive Descent Parser in `src/frontend/parser.rs`.
 3. Build the AST directly into the mmap arena.
 4. Update this prompt with any AST node kind, token, or parser integration changes that other agents must know.
 
-## PHASE 2 UPDATES (COMPLETED)
-- **Preprocessor wiring**: Parser now accepts preprocessed tokens via new `parse_tokens()` method.
-- **From<preprocessor::Token> impl**: Added conversion from preprocessor Token type to parser's internal Token type.
-- **6 integration tests** passing for preprocessor→parser pipeline.
-- **Total tests**: 145 passing (22 preprocessor + 70 type system + 6 integration + 13 backend + 34 existing).
+## CURRENT STATUS
+- **Preprocessor wiring exists**: the parser can accept preprocessed tokens through `parse_tokens()`.
+- **Token conversion exists**: preprocessor tokens can be mapped into the parser's internal token model.
+- **Verification note**: integration coverage exists in-tree, but totals should be rerun before they are quoted.
 
 ## ROADMAP CONTEXT
-The parser is Phase 1 (COMPLETE). In Phase 2, the preprocessor (`10_preprocessor.md`) will replace the parser's internal `lex()` method with a unified token stream. The type system (`11_type_system.md`) will add type annotation to AST nodes.
+The parser is already implemented and integrated into the current pipeline. Ongoing work is mostly about edge-case correctness, reducing token-model drift between parser and preprocessor paths, and keeping AST contracts stable for the type system and backend.
 
 ## FUTURE WORK (Phase 2+)
-- **Preprocessor integration**: Replace `self.lex()` with preprocessor output. The parser should accept `Vec<Token>` from the preprocessor.
-- **Type annotation**: The type system will add type information to AST nodes. Extend CAstNode or use a parallel type map.
+- **Preprocessor integration**: Keep the direct `self.lex()` path and the preprocessor-driven path behaviorally consistent; reduce duplicated tokenization logic over time.
+- **Type annotation**: Continue improving the handoff of type information to downstream stages, whether via AST storage or a parallel type map.
 - **GNU extensions**: The parser will need to handle `__attribute__`, `typeof`, statement expressions, etc. (see `12_gnu_extensions.md`).
 - **Internal lexer**: The parser has its own `lex()` method. It does NOT use `lexer.rs`. This means tokenization logic is duplicated. Document the parser's internal Token/TokenKind types separately.
 - **AST node kind mapping**: Document ALL node kinds with their numeric values in the spec. The analysis and backend modules depend on these values. Key ranges: types (1-15, 83-84), declarations (20-26), statements (40-50), expressions (60-73, 80-82).
