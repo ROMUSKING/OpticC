@@ -754,6 +754,13 @@ impl Preprocessor {
                     "pragma" => {
                         if in_if_stack.iter().all(|&active| active) {
                             let (text, end_idx) = self.parse_pragma_text(&pp_tokens, after_name);
+                            // Handle #pragma once
+                            if text.trim() == "once" {
+                                if let Some(guard) = self.active_include_guards.last_mut() {
+                                    guard.define_name = "__PRAGMA_ONCE__".to_string();
+                                }
+                                self.include_guards.insert(self.current_file.clone(), true);
+                            }
                             self.pragmas.push(text);
                             i = end_idx;
                         } else {
@@ -968,11 +975,11 @@ impl Preprocessor {
         let name = tokens[j].text.clone();
         j += 1;
 
-        if j < tokens.len() && tokens[j].kind == PpTokenKind::Whitespace {
-            j += 1;
-        }
+        // C standard: function-like macros require NO whitespace between name and '('
+        // If there's whitespace, it's an object-like macro
+        let is_function_like = j < tokens.len() && tokens[j].text == "(";
 
-        if j < tokens.len() && tokens[j].text == "(" {
+        if is_function_like {
             let (params, is_variadic, end_params) = self.parse_macro_params(tokens, j, file)?;
             j = end_params;
             while j < tokens.len() && tokens[j].kind == PpTokenKind::Whitespace {
@@ -1097,6 +1104,9 @@ impl Preprocessor {
                         tokens[i].column,
                         tokens[i].file.clone(),
                     ));
+                } else if text == "__VA_ARGS__" {
+                    // __VA_ARGS__ is replaced during macro invocation with variadic args
+                    result.push(tokens[i].clone());
                 } else if let Some(def) = self.macros.get(text) {
                     match def {
                         MacroDefinition::ObjectLike { replacement } => {
@@ -1885,6 +1895,18 @@ impl Preprocessor {
             }
 
             if replacement[i].kind == TokenKind::Identifier {
+                // Handle __VA_ARGS__ for variadic macros
+                if replacement[i].text == "__VA_ARGS__" && is_variadic && !args.is_empty() {
+                    // __VA_ARGS__ is replaced with all arguments beyond the named params
+                    let va_start = params.len();
+                    if va_start < args.len() {
+                        for arg in args.iter().skip(va_start) {
+                            result.extend(arg.clone());
+                        }
+                    }
+                    i += 1;
+                    continue;
+                }
                 if let Some(param_idx) = params.iter().position(|p| p == &replacement[i].text) {
                     if param_idx < args.len() {
                         result.extend(args[param_idx].clone());
