@@ -221,12 +221,6 @@ impl Preprocessor {
             },
         );
         self.macros.insert(
-            "__STDC_HOSTED__".to_string(),
-            MacroDefinition::ObjectLike {
-                replacement: vec![Token::new(TokenKind::IntLiteral, "1".to_string(), 0, 0, String::new())],
-            },
-        );
-        self.macros.insert(
             "__GNUC__".to_string(),
             MacroDefinition::ObjectLike {
                 replacement: vec![Token::new(TokenKind::IntLiteral, "4".to_string(), 0, 0, String::new())],
@@ -235,37 +229,7 @@ impl Preprocessor {
         self.macros.insert(
             "__GNUC_MINOR__".to_string(),
             MacroDefinition::ObjectLike {
-                replacement: vec![Token::new(TokenKind::IntLiteral, "9".to_string(), 0, 0, String::new())],
-            },
-        );
-        self.macros.insert(
-            "__GNUC_PATCHLEVEL__".to_string(),
-            MacroDefinition::ObjectLike {
-                replacement: vec![Token::new(TokenKind::IntLiteral, "0".to_string(), 0, 0, String::new())],
-            },
-        );
-        self.macros.insert(
-            "__SIZEOF_INT__".to_string(),
-            MacroDefinition::ObjectLike {
-                replacement: vec![Token::new(TokenKind::IntLiteral, "4".to_string(), 0, 0, String::new())],
-            },
-        );
-        self.macros.insert(
-            "__SIZEOF_POINTER__".to_string(),
-            MacroDefinition::ObjectLike {
-                replacement: vec![Token::new(TokenKind::IntLiteral, "8".to_string(), 0, 0, String::new())],
-            },
-        );
-        self.macros.insert(
-            "__SIZEOF_LONG__".to_string(),
-            MacroDefinition::ObjectLike {
-                replacement: vec![Token::new(TokenKind::IntLiteral, "8".to_string(), 0, 0, String::new())],
-            },
-        );
-        self.macros.insert(
-            "__SIZEOF_LONG_LONG__".to_string(),
-            MacroDefinition::ObjectLike {
-                replacement: vec![Token::new(TokenKind::IntLiteral, "8".to_string(), 0, 0, String::new())],
+                replacement: vec![Token::new(TokenKind::IntLiteral, "2".to_string(), 0, 0, String::new())],
             },
         );
     }

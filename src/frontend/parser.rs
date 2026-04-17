@@ -320,9 +320,6 @@ impl Parser {
                 | "__attribute__"
                 | "__extension__"
                 | "__label__"
-                | "asm"
-                | "__asm__"
-                | "__asm"
         ) || text.starts_with("__builtin_")
     }
 
@@ -1078,7 +1075,6 @@ impl Parser {
                 "switch" => return self.parse_switch_statement(),
                 "goto" => return self.parse_goto_statement(),
                 "do" => return self.parse_do_statement(),
-                "asm" | "__asm__" | "__asm" => return self.parse_asm_stmt(),
                 _ => {}
             }
         }

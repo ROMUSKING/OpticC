@@ -1,7 +1,6 @@
 api_version: "1.0"
 squad: "inline_asm"
 domain: "Inline Assembly Parsing and LLVM Lowering"
-status: "IMPLEMENTED"
 
 semantic_description: >
   Inline assembly support for parsing and lowering GCC-style asm blocks to LLVM IR.
@@ -12,14 +11,14 @@ semantic_description: >
 
 memory_layout: |
   Inline Asm Node (AST):
-    kind = 207 (AST_ASM_STMT)
+    kind = 210 (AST_INLINE_ASM)
     data = flags (volatile: bit 0, goto: bit 1)
-    first_child = template string offset
+    first_child = template string node
     next_sibling chain = operand nodes
 
   Operand Node:
-    kind = 208 (ASM_OPERAND_OUTPUT) / 209 (ASM_OPERAND_INPUT) / 210 (ASM_CLOBBER) / 211 (ASM_GOTO_LABEL)
-    data = constraint/clobber/label string offset
+    kind = 211 (ASM_OUTPUT) / 212 (ASM_INPUT) / 213 (ASM_CLOBBER)
+    data = constraint string offset
     first_child = expression node (for output/input)
 
   LLVM Inline Asm:
@@ -37,17 +36,17 @@ llm_usage_examples:
   - name: "Parse basic asm"
     description: "asm volatile(\"nop\");"
     code: |
-      // AST: AST_ASM_STMT { template: "nop", volatile: true }
+      // AST: AST_INLINE_ASM { template: "nop", volatile: true }
       // LLVM: call void asm sideeffect "nop"()
 
   - name: "Parse extended asm"
     description: "asm volatile(\"addl %1, %0\" : \"+r\"(x) : \"r\"(y));"
     code: |
-      // AST: AST_ASM_STMT {
+      // AST: AST_INLINE_ASM {
       //   template: "addl %1, %0",
       //   volatile: true,
-      //   outputs: [ASM_OPERAND_OUTPUT { constraint: "r", expr: x }],
-      //   inputs: [ASM_OPERAND_INPUT { constraint: "r", expr: y }],
+      //   outputs: [ASM_OUTPUT { constraint: "+r", expr: x }],
+      //   inputs: [ASM_INPUT { constraint: "r", expr: y }],
       // }
       // LLVM: call void asm sideeffect "addl $1, $0", "=r,r"(i32 %x, i32 %y)
 
@@ -74,22 +73,6 @@ api_reference:
     AsmLowering:
       description: "LLVM inline asm generation"
       methods:
-        - "lower_asm_stmt(&mut self, arena: &Arena, node: &CAstNode) -> Result<Option<BasicValueEnum>, BackendError>"
-        - "build_constraints_string(outputs, inputs, clobbers) -> String"
-
-node_kinds:
-  AST_ASM_STMT: 207
-  ASM_OPERAND_OUTPUT: 208
-  ASM_OPERAND_INPUT: 209
-  ASM_CLOBBER: 210
-  ASM_GOTO_LABEL: 211
-
-implementation_notes:
-  - "Parser recognizes asm, __asm__, __asm keywords"
-  - "Volatile keyword accepted after asm keyword"
-  - "Colon-separated operand sections: outputs, inputs, clobbers, goto labels"
-  - "Read-write operands detected via '+' constraint prefix"
-  - "Output operands strip '=' prefix for LLVM constraint string"
-  - "LLVM lowering uses context.create_inline_asm() with ATT dialect"
-  - "Memory clobber automatically sets side_effects flag"
-  - "23 tests covering all major use cases"
+        - "lower_asm(&mut self, arena: &Arena, node: &CAstNode) -> Result<(), BackendError>"
+        - "build_constraints(&self, outputs: &[AsmOperand], inputs: &[AsmOperand], clobbers: &[String]) -> String"
+        - "build_function_type(&self, outputs: &[AsmOperand], inputs: &[AsmOperand]) -> FunctionType"
