@@ -1056,10 +1056,24 @@ impl Parser {
                         && (self.current_token().text == "." || self.current_token().text == "[")
                     {
                         let init_expr = self.parse_designated_init()?;
-                        init = self.alloc_node(73, 19, NodeOffset::NULL, declarator, init_expr);
+                        // Store init_expr as declarator.next_sibling so link_siblings
+                        // cannot overwrite it (link_siblings sets kind=73.next_sibling).
+                        if declarator != NodeOffset::NULL {
+                            if let Some(d) = self.arena.get_mut(declarator) {
+                                d.next_sibling = init_expr;
+                            }
+                        }
+                        init = self.alloc_node(73, 19, NodeOffset::NULL, declarator, NodeOffset::NULL);
                     } else {
                         let init_expr = self.parse_initializer()?;
-                        init = self.alloc_node(73, 19, NodeOffset::NULL, declarator, init_expr);
+                        // Store init_expr as declarator.next_sibling so link_siblings
+                        // cannot overwrite it (link_siblings sets kind=73.next_sibling).
+                        if declarator != NodeOffset::NULL {
+                            if let Some(d) = self.arena.get_mut(declarator) {
+                                d.next_sibling = init_expr;
+                            }
+                        }
+                        init = self.alloc_node(73, 19, NodeOffset::NULL, declarator, NodeOffset::NULL);
                     }
                 }
 
@@ -1166,8 +1180,17 @@ impl Parser {
             None
         };
 
-        let else_node = self.alloc_node(0, 0, NodeOffset::NULL, then_stmt, else_stmt.unwrap_or(NodeOffset::NULL));
-        Ok(self.alloc_node(41, 0, NodeOffset::NULL, condition, else_node))
+        // Layout (immune to link_siblings overwriting kind=41.next_sibling):
+        //   kind=41.first_child = cond_wrap(kind=0)
+        //     cond_wrap.first_child = condition_expr   (expr.next_sibling not touched)
+        //     cond_wrap.next_sibling = body_wrap(kind=0)
+        //       body_wrap.first_child = then_stmt
+        //       body_wrap.next_sibling = else_stmt
+        let body_wrap = self.alloc_node(
+            0, 0, NodeOffset::NULL, then_stmt, else_stmt.unwrap_or(NodeOffset::NULL)
+        );
+        let cond_wrap = self.alloc_node(0, 0, NodeOffset::NULL, condition, body_wrap);
+        Ok(self.alloc_node(41, 0, NodeOffset::NULL, cond_wrap, NodeOffset::NULL))
     }
 
     fn parse_while_statement(&mut self) -> Result<NodeOffset, ParseError> {
@@ -1177,13 +1200,12 @@ impl Parser {
         self.expect(")")?;
         let body = self.parse_statement()?;
 
-        Ok(self.alloc_node(
-            42,
-            0,
-            NodeOffset::NULL,
-            condition,
-            body,
-        ))
+        // Layout (immune to link_siblings overwriting kind=42.next_sibling):
+        //   kind=42.first_child = cond_wrap(kind=0)
+        //     cond_wrap.first_child = condition_expr   (expr.next_sibling not touched)
+        //     cond_wrap.next_sibling = body
+        let cond_wrap = self.alloc_node(0, 0, NodeOffset::NULL, condition, body);
+        Ok(self.alloc_node(42, 0, NodeOffset::NULL, cond_wrap, NodeOffset::NULL))
     }
 
     fn parse_for_statement(&mut self) -> Result<NodeOffset, ParseError> {
@@ -1218,9 +1240,18 @@ impl Parser {
 
         let body = self.parse_statement()?;
 
-        let init_node = self.alloc_node(0, 0, NodeOffset::NULL, init, condition);
-        let increment_node = self.alloc_node(0, 0, NodeOffset::NULL, increment, body);
-        Ok(self.alloc_node(43, 0, NodeOffset::NULL, init_node, increment_node))
+        // Layout (immune to link_siblings overwriting kind=43.next_sibling):
+        //   kind=43.first_child = init_wrap(kind=0)
+        //     init_wrap.first_child = init
+        //     init_wrap.next_sibling = cond_wrap(kind=0)
+        //       cond_wrap.first_child = condition_expr
+        //       cond_wrap.next_sibling = incr_wrap(kind=0)
+        //         incr_wrap.first_child = increment
+        //         incr_wrap.next_sibling = body
+        let incr_wrap = self.alloc_node(0, 0, NodeOffset::NULL, increment, body);
+        let cond_wrap = self.alloc_node(0, 0, NodeOffset::NULL, condition, incr_wrap);
+        let init_wrap = self.alloc_node(0, 0, NodeOffset::NULL, init, cond_wrap);
+        Ok(self.alloc_node(43, 0, NodeOffset::NULL, init_wrap, NodeOffset::NULL))
     }
 
     fn parse_do_statement(&mut self) -> Result<NodeOffset, ParseError> {
@@ -1388,9 +1419,14 @@ impl Parser {
             "|" => (3, 15),
             "^" => (4, 16),
             "&" => (5, 14),
-            "==" | "!=" => (6, 6),
-            "<" | ">" | "<=" | ">=" => (7, 8),
-            "<<" | ">>" => (8, 17),
+            "==" => (6, 6),
+            "!=" => (6, 7),
+            "<" => (7, 8),
+            ">" => (7, 9),
+            "<=" => (7, 10),
+            ">=" => (7, 11),
+            "<<" => (8, 17),
+            ">>" => (8, 18),
             "+" => (9, 1),
             "-" => (9, 2),
             "*" => (10, 3),

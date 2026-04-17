@@ -371,62 +371,93 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
             self.node_kind_to_llvm_type(spec_kind)
         };
 
-        let name = self.find_ident_name(arena, node);
-        let var_name = name.as_deref().unwrap_or("var");
-
-        let var_ptr = self
-            .builder
-            .build_alloca(alloca_type, var_name)
-            .map_err(|_| BackendError::InvalidNode)?;
-
-        if (spec_kind == 4 || spec_kind == 5) && name.is_some() {
-            if let Some(sn) = spec_node {
-                let field_names = if sn.data != 0 {
-                    arena
-                        .get_string(NodeOffset(sn.data))
-                        .and_then(|tag| self.struct_tag_fields.get(tag).cloned())
-                        .unwrap_or_else(|| Self::collect_struct_field_names(arena, sn))
-                } else {
-                    Self::collect_struct_field_names(arena, sn)
-                };
-                self.struct_fields.insert(var_name.to_string(), field_names);
-            }
-        }
-
-        if let Some(n) = name {
-            self.variables.insert(
-                n,
-                VariableBinding {
-                    ptr: var_ptr,
-                    pointee_type: alloca_type,
-                },
-            );
-        }
-
+        // Walk the first_child chain: type specifiers come first, then init-declarators
+        // (kind=73 or kind=60). Process ALL init-declarators.
         let mut child_offset = node.first_child;
         while child_offset != NodeOffset::NULL {
             if let Some(child) = arena.get(child_offset) {
-                if child.kind == 73 {
-                    let rhs_offset = child.next_sibling;
-                    if rhs_offset != NodeOffset::NULL {
-                        if let Some(val) = self.lower_expr(arena, rhs_offset)? {
-                            if Self::types_compatible(alloca_type, val) {
-                                let _ = self
-                                    .builder
-                                    .build_store(var_ptr, val)
-                                    .map_err(|_| BackendError::InvalidNode);
+                match child.kind {
+                    // Kind=73: init-declarator with optional initializer
+                    73 => {
+                        // first_child = kind=60(name) or pointer_decl
+                        // declarator.next_sibling = init_expr (stored there to survive link_siblings)
+                        let declarator_node = arena.get(child.first_child);
+                        let var_name_opt: Option<String> = declarator_node.and_then(|n| {
+                            if n.kind == 60 {
+                                arena.get_string(NodeOffset(n.data))
+                                    .filter(|s| !s.is_empty())
+                                    .map(|s| s.to_string())
+                            } else {
+                                // For pointer declarators (kind=7/8/9), find the ident deeper
+                                self.find_ident_name_in(arena, n)
+                            }
+                        });
+                        if let Some(var_name) = var_name_opt {
+                            let var_ptr = self
+                                .builder
+                                .build_alloca(alloca_type, &var_name)
+                                .map_err(|_| BackendError::InvalidNode)?;
+                            if spec_kind == 4 || spec_kind == 5 {
+                                if let Some(sn) = spec_node {
+                                    let field_names = if sn.data != 0 {
+                                        arena
+                                            .get_string(NodeOffset(sn.data))
+                                            .and_then(|tag| self.struct_tag_fields.get(tag).cloned())
+                                            .unwrap_or_else(|| Self::collect_struct_field_names(arena, sn))
+                                    } else {
+                                        Self::collect_struct_field_names(arena, sn)
+                                    };
+                                    self.struct_fields.insert(var_name.clone(), field_names);
+                                }
+                            }
+                            self.variables.insert(
+                                var_name.clone(),
+                                VariableBinding {
+                                    ptr: var_ptr,
+                                    pointee_type: alloca_type,
+                                },
+                            );
+                            // Process initializer: stored as declarator.next_sibling
+                            let init_offset = declarator_node
+                                .map(|d| d.next_sibling)
+                                .unwrap_or(NodeOffset::NULL);
+                            if init_offset != NodeOffset::NULL {
+                                if let Some(val) = self.lower_expr(arena, init_offset)? {
+                                    if Self::types_compatible(alloca_type, val) {
+                                        let _ = self
+                                            .builder
+                                            .build_store(var_ptr, val)
+                                            .map_err(|_| BackendError::InvalidNode);
+                                    }
+                                }
                             }
                         }
                     }
-                    break;
-                }
-                if matches!(child.kind, 64..=72 | 80..=82 | 61..=62) {
-                    if let Some(val) = self.lower_expr(arena, child_offset)? {
-                        if Self::types_compatible(alloca_type, val) {
-                            let _ = self
+                    // Kind=60: plain declarator (no initializer) after a type spec
+                    60 => {
+                        if let Some(var_name) = arena.get_string(NodeOffset(child.data))
+                            .filter(|s| !s.is_empty())
+                            .map(|s| s.to_string())
+                        {
+                            let var_ptr = self
                                 .builder
-                                .build_store(var_ptr, val)
-                                .map_err(|_| BackendError::InvalidNode);
+                                .build_alloca(alloca_type, &var_name)
+                                .map_err(|_| BackendError::InvalidNode)?;
+                            self.variables.insert(
+                                var_name,
+                                VariableBinding {
+                                    ptr: var_ptr,
+                                    pointee_type: alloca_type,
+                                },
+                            );
+                        }
+                    }
+                    // Type specifiers: skip
+                    1..=15 | 83 | 84 | 101..=105 => {}
+                    // Expression initializer (rare, when chained directly)
+                    _ => {
+                        if matches!(child.kind, 64..=72 | 80..=82 | 61..=62) {
+                            // Bare expression initializer — skip here (handled via kind=73)
                         }
                     }
                 }
@@ -693,16 +724,16 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
     }
 
     fn lower_if_stmt(&mut self, arena: &Arena, node: &CAstNode) -> Result<(), BackendError> {
-        let cond_offset = node.first_child;
-        let then_offset = if let Some(c) = arena.get(cond_offset) {
-            c.next_sibling
+        // kind=41: first_child=cond_wrap(kind=0)
+        //   cond_wrap.first_child=condition_expr, cond_wrap.next_sibling=body_wrap(kind=0)
+        //     body_wrap.first_child=then_stmt, body_wrap.next_sibling=else_stmt
+        let cond_wrap_offset = node.first_child;
+        let cond_offset = arena.get(cond_wrap_offset).map(|w| w.first_child).unwrap_or(NodeOffset::NULL);
+        let body_wrap_offset = arena.get(cond_wrap_offset).map(|w| w.next_sibling).unwrap_or(NodeOffset::NULL);
+        let (then_offset, else_offset) = if let Some(bw) = arena.get(body_wrap_offset) {
+            (bw.first_child, bw.next_sibling)
         } else {
-            NodeOffset::NULL
-        };
-        let else_offset = if let Some(c) = arena.get(then_offset) {
-            c.next_sibling
-        } else {
-            NodeOffset::NULL
+            (NodeOffset::NULL, NodeOffset::NULL)
         };
 
         let function = self
@@ -730,7 +761,9 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
             .map_err(|_| BackendError::InvalidNode)?;
 
         self.builder.position_at_end(then_bb);
-        self.lower_stmt(arena, then_offset)?;
+        if then_offset != NodeOffset::NULL {
+            self.lower_stmt(arena, then_offset)?;
+        }
         if self
             .builder
             .get_insert_block()
@@ -762,12 +795,11 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
     }
 
     fn lower_while_stmt(&mut self, arena: &Arena, node: &CAstNode) -> Result<(), BackendError> {
-        let cond_offset = node.first_child;
-        let body_offset = if let Some(c) = arena.get(cond_offset) {
-            c.next_sibling
-        } else {
-            NodeOffset::NULL
-        };
+        // kind=42: first_child=cond_wrap(kind=0)
+        //   cond_wrap.first_child=condition_expr, cond_wrap.next_sibling=body
+        let cond_wrap_offset = node.first_child;
+        let cond_offset = arena.get(cond_wrap_offset).map(|w| w.first_child).unwrap_or(NodeOffset::NULL);
+        let body_offset = arena.get(cond_wrap_offset).map(|w| w.next_sibling).unwrap_or(NodeOffset::NULL);
 
         let function = self
             .builder
@@ -820,7 +852,22 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
             .and_then(|bb| bb.get_parent())
             .ok_or(BackendError::InvalidNode)?;
 
-        let init_offset = node.first_child;
+        // kind=43: first_child=init_wrap(kind=0)
+        //   init_wrap.first_child=init, init_wrap.next_sibling=cond_wrap(kind=0)
+        //     cond_wrap.first_child=condition_expr, cond_wrap.next_sibling=incr_wrap(kind=0)
+        //       incr_wrap.first_child=increment, incr_wrap.next_sibling=body
+        let init_wrap_offset = node.first_child;
+        let init_offset = arena.get(init_wrap_offset).map(|n| n.first_child).unwrap_or(NodeOffset::NULL);
+        let cond_wrap_offset = arena.get(init_wrap_offset).map(|n| n.next_sibling).unwrap_or(NodeOffset::NULL);
+        let cond_offset = arena.get(cond_wrap_offset).map(|n| n.first_child).unwrap_or(NodeOffset::NULL);
+        let incr_wrap_offset = arena.get(cond_wrap_offset).map(|n| n.next_sibling).unwrap_or(NodeOffset::NULL);
+        let (incr_offset, body_offset) = if let Some(iw) = arena.get(incr_wrap_offset) {
+            (iw.first_child, iw.next_sibling)
+        } else {
+            (NodeOffset::NULL, NodeOffset::NULL)
+        };
+
+        // Init
         if init_offset != NodeOffset::NULL {
             self.lower_stmt(arena, init_offset)?;
         }
@@ -834,11 +881,6 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
             .map_err(|_| BackendError::InvalidNode)?;
 
         self.builder.position_at_end(cond_bb);
-        let cond_offset = if let Some(c) = arena.get(init_offset) {
-            c.next_sibling
-        } else {
-            NodeOffset::NULL
-        };
         if cond_offset != NodeOffset::NULL {
             if let Some(cond_val) = self.lower_expr(arena, cond_offset)? {
                 let cond_int = if cond_val.is_int_value() {
@@ -861,24 +903,9 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
         }
 
         self.builder.position_at_end(body_bb);
-        let body_offset = if let Some(c) = arena.get(cond_offset) {
-            c.next_sibling
-        } else {
-            NodeOffset::NULL
-        };
         if body_offset != NodeOffset::NULL {
             self.lower_stmt(arena, body_offset)?;
         }
-
-        let incr_offset = if body_offset != NodeOffset::NULL {
-            if let Some(c) = arena.get(body_offset) {
-                c.next_sibling
-            } else {
-                NodeOffset::NULL
-            }
-        } else {
-            NodeOffset::NULL
-        };
         if incr_offset != NodeOffset::NULL {
             let _ = self.lower_expr(arena, incr_offset)?;
         }
@@ -899,38 +926,27 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
     }
 
     fn lower_return_stmt(&mut self, arena: &Arena, node: &CAstNode) -> Result<(), BackendError> {
-        eprintln!("lower_return_stmt: first_child={:?}", node.first_child);
         if node.first_child != NodeOffset::NULL {
             if let Some(val) = self.lower_expr(arena, node.first_child)? {
-                eprintln!(
-                    "lower_return_stmt: val is_int={} is_float={}",
-                    val.is_int_value(),
-                    val.is_float_value()
-                );
                 if val.is_int_value() {
                     let int_val = val.into_int_value();
-                    self.builder.build_return(Some(&int_val)).map_err(|e| {
-                        eprintln!("build_return error: {:?}", e);
-                        BackendError::InvalidNode
-                    })?;
+                    self.builder
+                        .build_return(Some(&int_val))
+                        .map_err(|_| BackendError::InvalidNode)?;
                 } else if val.is_float_value() {
                     let float_val = val.into_float_value();
-                    self.builder.build_return(Some(&float_val)).map_err(|e| {
-                        eprintln!("build_return error: {:?}", e);
-                        BackendError::InvalidNode
-                    })?;
+                    self.builder
+                        .build_return(Some(&float_val))
+                        .map_err(|_| BackendError::InvalidNode)?;
                 } else {
-                    eprintln!("lower_return_stmt: val not int/float, returning Ok");
                     return Ok(());
                 }
             } else {
-                eprintln!("lower_return_stmt: val is None, returning 0");
                 self.builder
                     .build_return(Some(&self.context.i32_type().const_int(0, false)))
                     .map_err(|_| BackendError::InvalidNode)?;
             }
         } else {
-            eprintln!("lower_return_stmt: no first_child, returning void");
             self.builder
                 .build_return(None)
                 .map_err(|_| BackendError::InvalidNode)?;
@@ -1076,18 +1092,12 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
         let lhs_offset = node.first_child;
         let rhs_offset = node.next_sibling;
 
-        eprintln!(
-            "lower_binop: node.data={} lhs_offset={:?} rhs_offset={:?}",
-            node.data, lhs_offset, rhs_offset
-        );
         let lhs_val = self
             .lower_expr(arena, lhs_offset)?
             .ok_or(BackendError::InvalidNode)?;
         let rhs_val = self
             .lower_expr(arena, rhs_offset)?
             .ok_or(BackendError::InvalidNode)?;
-
-        eprintln!("lower_binop: lhs_val={} rhs_val={}", lhs_val, rhs_val);
 
         let use_float = lhs_val.is_float_value() || rhs_val.is_float_value();
 
@@ -1862,6 +1872,20 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
             } else {
                 break;
             }
+        }
+        None
+    }
+
+    /// Find the identifier name starting from an already-obtained node (not from a parent).
+    fn find_ident_name_in(&self, arena: &Arena, node: &CAstNode) -> Option<String> {
+        if node.kind == 60 {
+            return arena
+                .get_string(NodeOffset(node.data))
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string());
+        }
+        if matches!(node.kind, 7..=9) {
+            return self.find_ident_name(arena, node);
         }
         None
     }
