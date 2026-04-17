@@ -56,7 +56,7 @@ OpticC is organized into 4 milestone phases. Each phase has a Definition of Done
 - ✅ Static Analysis (pointer provenance, taint tracking, UAF detection)
 - ✅ VFS Projection (FUSE, shadow comment injection)
 
-### Phase 2: SQLite Compilation (Core Modules COMPLETE, Integration In Progress)
+### Phase 2: SQLite Compilation (COMPLETE — PR #19 merged)
 **Goal**: Compile SQLite Amalgamation (255K LOC) to a working shared library.
 
 | # | Prompt | Agent | Dependency | Status |
@@ -70,6 +70,17 @@ OpticC is organized into 4 milestone phases. Each phase has a Definition of Done
 | - | Parser wiring | Jules-Parser | 10 | ✅ COMPLETE (6 integration tests) |
 | - | Backend types | Jules-Backend | 11 | ✅ COMPLETE (13 tests, typed codegen) |
 | - | Integration test | Jules-Integration | 10-15 | ✅ COMPLETE (20 tests) |
+
+### Phase 3: Preprocessor Enhancement (IN PROGRESS — PR #20)
+**Goal**: Enhance preprocessor to handle complex SQLite macros and compile sqlite3.c (255K LOC).
+
+| # | Enhancement | Status | PR |
+|---|-------------|--------|-----|
+| 1 | Function-like macro detection fix (C standard compliance) | ✅ | #20 |
+| 2 | `__VA_ARGS__` support for variadic macros | ✅ | #20 |
+| 3 | `#pragma once` support | ✅ | #20 |
+| 4 | Complex attribute-style macros (SQLITE_API, etc.) | 📋 | |
+| 5 | Full sqlite3.c compilation test | 📋 | |
 
 ### Toolchain Installation (Cloud Agent Environment)
 ```bash
