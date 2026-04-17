@@ -513,7 +513,7 @@ fn compile_file_to_object(
     file.write_all(ir.as_bytes())
         .map_err(|e| BuildError::CompileError(source.display().to_string(), e.to_string()))?;
 
-    let llc = find_tool(&["llc"])?;
+    let llc = find_tool(&["llc", "llc-18", "llc-17", "llc-16"])?;
     let llc_output = Command::new(&llc)
         .arg("-filetype=obj")
         .arg("-o")

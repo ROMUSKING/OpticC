@@ -12,11 +12,17 @@ pub struct LlvmBackend<'ctx, 'types> {
     context: &'ctx Context,
     module: Module<'ctx>,
     builder: Builder<'ctx>,
-    variables: HashMap<String, PointerValue<'ctx>>,
+    variables: HashMap<String, VariableBinding<'ctx>>,
     functions: HashMap<String, FunctionValue<'ctx>>,
     vectorization_hints: VectorizationHints,
     types: Option<&'types TypeSystem>,
     type_cache: HashMap<u32, BasicTypeEnum<'ctx>>,
+}
+
+#[derive(Clone, Copy)]
+struct VariableBinding<'ctx> {
+    ptr: PointerValue<'ctx>,
+    pointee_type: BasicTypeEnum<'ctx>,
 }
 
 #[derive(Default)]
@@ -77,7 +83,7 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                 Some(CType::Float) => self.context.f32_type().as_basic_type_enum(),
                 Some(CType::Double) => self.context.f64_type().as_basic_type_enum(),
                 Some(CType::LongDouble) => self.context.f64_type().as_basic_type_enum(),
-                Some(CType::Pointer { .. }) => self.context.i8_type().ptr_type(AddressSpace::default()).as_basic_type_enum(),
+                Some(CType::Pointer { .. }) => self.context.ptr_type(AddressSpace::default()).as_basic_type_enum(),
                 Some(CType::Array { element, size }) => {
                     let elem_type = self.to_llvm_type(element.0);
                     let len = size.unwrap_or(0);
@@ -187,7 +193,13 @@ pub fn compile(&mut self, arena: &Arena, root: NodeOffset) -> Result<(), Backend
         let var_ptr = self.builder.build_alloca(alloca_type, var_name)
             .map_err(|_| BackendError::InvalidNode)?;
         if let Some(n) = name {
-            self.variables.insert(n, var_ptr);
+            self.variables.insert(
+                n,
+                VariableBinding {
+                    ptr: var_ptr,
+                    pointee_type: alloca_type,
+                },
+            );
         }
 
         let mut child_offset = node.first_child;
@@ -316,7 +328,13 @@ pub fn compile(&mut self, arena: &Arena, root: NodeOffset) -> Result<(), Backend
                 .ok_or(BackendError::InvalidNode)?;
             self.builder.build_store(param_ptr, param_val)
                 .map_err(|_| BackendError::InvalidNode)?;
-            self.variables.insert(pname.clone(), param_ptr);
+            self.variables.insert(
+                pname.clone(),
+                VariableBinding {
+                    ptr: param_ptr,
+                    pointee_type: param_llvm_type,
+                },
+            );
         }
 
         if body_offset != NodeOffset::NULL {
@@ -601,7 +619,7 @@ pub fn compile(&mut self, arena: &Arena, root: NodeOffset) -> Result<(), Backend
         let name_offset = NodeOffset(node.data);
         if let Some(name) = arena.get_string(name_offset) {
             if let Some(ptr) = self.variables.get(name) {
-                let val = self.builder.build_load(*ptr, name)
+                let val = self.builder.build_load(ptr.pointee_type, ptr.ptr, name)
                     .map_err(|_| BackendError::InvalidNode)?;
                 return Ok(Some(val));
             }
@@ -802,7 +820,12 @@ pub fn compile(&mut self, arena: &Arena, root: NodeOffset) -> Result<(), Backend
             }
             5 => {
                 if operand.is_pointer_value() {
-                    self.builder.build_load(operand.into_pointer_value(), "deref")
+                    let pointee_type = self.to_llvm_type(self.default_type());
+                    self.builder.build_load(
+                        pointee_type,
+                        operand.into_pointer_value(),
+                        "deref",
+                    )
                         .map_err(|_| BackendError::InvalidNode)?.into()
                 } else {
                     operand
@@ -923,7 +946,7 @@ pub fn compile(&mut self, arena: &Arena, root: NodeOffset) -> Result<(), Backend
             let name_offset = NodeOffset(lhs_node.data);
             if let Some(name) = arena.get_string(name_offset) {
                 if let Some(ptr) = self.variables.get(name) {
-                    self.builder.build_store(*ptr, rhs_val)
+                    self.builder.build_store(ptr.ptr, rhs_val)
                         .map_err(|_| BackendError::InvalidNode)?;
                 }
             }
@@ -955,7 +978,7 @@ pub fn compile(&mut self, arena: &Arena, root: NodeOffset) -> Result<(), Backend
     }
 
     fn lower_label_addr(&mut self, _arena: &Arena, node: &CAstNode) -> Result<Option<BasicValueEnum<'ctx>>, BackendError> {
-        let ptr = self.context.i8_type().ptr_type(AddressSpace::default()).const_null();
+        let ptr = self.context.ptr_type(AddressSpace::default()).const_null();
         Ok(Some(ptr.into()))
     }
 
