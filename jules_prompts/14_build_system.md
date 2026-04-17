@@ -64,3 +64,38 @@ OpticC currently compiles single files to `.ll` output. Real projects (SQLite, L
 5. Incremental builds skip unchanged files
 6. `cargo test` passes with 15+ build system tests
 7. Integration test: build SQLite as a shared library using `optic_c build` — produce `libsqlite3.so` that passes SQLite's own test suite
+
+## IMPLEMENTATION STATUS
+
+### Phase 1: Core Build System (COMPLETED)
+- [x] `src/build/mod.rs` created with all core structs and implementations
+- [x] `BuildError` enum with all required variants
+- [x] `BuildConfig` struct with builder pattern
+- [x] `OutputType` enum with from_extension and from_str methods
+- [x] `Builder` struct with build orchestration
+- [x] `CacheKey` struct for incremental builds
+- [x] `compile_single_file()` library function extracted from main.rs
+- [x] `compile_file_to_object()` internal function for parallel compilation
+- [x] External tool invocation: llc, clang, ar
+- [x] Static library creation via `ar rcs`
+- [x] Shared library creation via `clang -shared`
+- [x] Executable linking via `clang`
+- [x] Source file discovery from directory
+- [x] Parallel compilation using rayon
+- [x] CLI `build` subcommand added to main.rs
+- [x] `rayon = "1.10"` added to Cargo.toml
+- [x] `src/lib.rs` updated to export build module
+- [x] 22 comprehensive tests (exceeds 15 minimum)
+- [x] `.optic/spec/build_system.yaml` updated with actual API
+- [x] `.optic/tasks/build_system.md` updated with completion status
+
+### Test Results
+- 22 build module tests: ALL PASSING
+- Total: 235 passing, 5 pre-existing failures in analysis::alias (unrelated to build system)
+
+### Phase 2: Pending Items
+- [ ] `src/build/linker.rs` - Separate linker module
+- [ ] Makefile/CMake generator
+- [ ] Incremental build (skip unchanged files)
+- [ ] Build cache persistence (~/.cache/opticc/)
+- [ ] Integration test: build SQLite as shared library

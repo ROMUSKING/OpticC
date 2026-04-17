@@ -1,4 +1,5 @@
 pub mod arena;
+pub mod build;
 pub mod db;
 pub mod frontend;
 pub mod backend;
