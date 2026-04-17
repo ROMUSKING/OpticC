@@ -318,6 +318,31 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
         }
     }
 
+    /// Extract (llvm_type, param_name) from a kind=24 parameter declaration node.
+    /// Layout after parser fix: first_child chain = type_spec -> kind=60(name)
+    fn extract_param_type_name(&self, arena: &Arena, param: &CAstNode) -> (BasicTypeEnum<'ctx>, String) {
+        let type_kind = arena.get(param.first_child).map(|n| n.kind).unwrap_or(2);
+        let llvm_type = self.node_kind_to_llvm_type(type_kind);
+        let mut name = "p".to_string();
+        let mut off = param.first_child;
+        while off != NodeOffset::NULL {
+            if let Some(n) = arena.get(off) {
+                if n.kind == 60 {
+                    if let Some(s) = arena.get_string(NodeOffset(n.data)) {
+                        if !s.is_empty() {
+                            name = s.to_string();
+                            break;
+                        }
+                    }
+                }
+                off = n.next_sibling;
+            } else {
+                break;
+            }
+        }
+        (llvm_type, name)
+    }
+
     fn lower_var_decl(&mut self, arena: &Arena, node: &CAstNode) -> Result<(), BackendError> {
         let spec_node = arena.get(node.first_child);
         let spec_kind = spec_node.map(|n| n.kind).unwrap_or(2);
@@ -491,64 +516,53 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
         let mut func_name = "func".to_string();
         let mut param_types: Vec<BasicMetadataTypeEnum> = Vec::new();
         let mut param_names: Vec<String> = Vec::new();
+        let mut param_llvm_types_list: Vec<BasicTypeEnum<'ctx>> = Vec::new();
         let mut body_offset = NodeOffset::NULL;
-        let mut return_type_id: u32 = 7;
+        let mut return_llvm_type: Option<BasicTypeEnum<'ctx>> = None;
+        let mut is_void_ret = false;
 
+        // Walk first_child chain: specifiers -> kind=9(func_decl) -> kind=40(body)
         let mut child_offset = node.first_child;
+        let mut seen_func_declarator = false;
         while child_offset != NodeOffset::NULL {
             if let Some(child) = arena.get(child_offset) {
+                // After func declarator, any non-spec/non-decl child is the body
+                if seen_func_declarator
+                    && body_offset == NodeOffset::NULL
+                    && !matches!(child.kind, 1..=9 | 83 | 101..=105)
+                {
+                    body_offset = child_offset;
+                }
                 match child.kind {
-                    2..=9 => {
-                        if child.kind == 9 {
-                            if let Some(ident) = arena.get(child.first_child) {
-                                if ident.kind == 60 {
-                                    if let Some(name) = arena.get_string(NodeOffset(ident.data)) {
-                                        func_name = name.to_string();
-                                    }
-                                }
-                                let mut sibling = ident.next_sibling;
-                                while sibling != NodeOffset::NULL {
-                                    if let Some(sib) = arena.get(sibling) {
-                                        if sib.kind == 24 {
-                                            let param_type_id = self.default_type();
-                                            let bt = self.to_llvm_type(param_type_id);
-                                            param_types.push(bt.into());
-                                            let mut decl = sib.next_sibling;
-                                            let mut pname = None;
-                                            while decl != NodeOffset::NULL {
-                                                if let Some(d) = arena.get(decl) {
-                                                    if d.kind == 60 {
-                                                        pname =
-                                                            arena.get_string(NodeOffset(d.data));
-                                                        break;
-                                                    }
-                                                    decl = d.next_sibling;
-                                                } else {
-                                                    break;
-                                                }
-                                            }
-                                            param_names.push(pname.unwrap_or("p").to_string());
-                                        }
-                                        sibling = sib.next_sibling;
-                                    } else {
-                                        break;
-                                    }
-                                }
-                            }
+                    1..=6 | 83 => {
+                        is_void_ret = child.kind == 1;
+                        if !is_void_ret {
+                            return_llvm_type = Some(self.node_kind_to_llvm_type(child.kind));
                         }
                     }
-                    2..=6 | 83 => {
-                        if matches!(child.kind, 2..=6 | 83) {
-                            return_type_id = match child.kind {
-                                1 => 0,
-                                2 => 2,
-                                3 => 5,
-                                4 => 9,
-                                5 => 13,
-                                6 => 14,
-                                83 => 7,
-                                _ => 7,
-                            };
+                    9 => {
+                        seen_func_declarator = true;
+                        // first_child = kind=60(name) -> kind=24(param1) -> ...
+                        if let Some(ident) = arena.get(child.first_child) {
+                            if ident.kind == 60 {
+                                if let Some(name) = arena.get_string(NodeOffset(ident.data)) {
+                                    func_name = name.to_string();
+                                }
+                            }
+                            let mut param_off = ident.next_sibling;
+                            while param_off != NodeOffset::NULL {
+                                if let Some(param) = arena.get(param_off) {
+                                    if param.kind == 24 {
+                                        let (ptype, pname) = self.extract_param_type_name(arena, param);
+                                        param_types.push(ptype.into());
+                                        param_llvm_types_list.push(ptype);
+                                        param_names.push(pname);
+                                    }
+                                    param_off = param.next_sibling;
+                                } else {
+                                    break;
+                                }
+                            }
                         }
                     }
                     40 => {
@@ -562,12 +576,12 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
             }
         }
 
-        let is_void_ret = self.is_void_type_id(return_type_id);
+        let ret_llvm = return_llvm_type
+            .unwrap_or_else(|| self.context.i32_type().as_basic_type_enum());
         let fn_type = if is_void_ret {
             self.context.void_type().fn_type(&param_types, false)
         } else {
-            let ret_bt = self.to_llvm_type(return_type_id);
-            ret_bt.fn_type(&param_types, false)
+            ret_llvm.fn_type(&param_types, false)
         };
         let function = self.module.add_function(&func_name, fn_type, None);
         self.functions.insert(func_name.clone(), function);
@@ -577,12 +591,10 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
 
         self.variables.clear();
 
-        for (i, pname) in param_names.iter().enumerate() {
-            let param_type_id = self.default_type();
-            let param_llvm_type = self.to_llvm_type(param_type_id);
+        for (i, (pname, ptype)) in param_names.iter().zip(param_llvm_types_list.iter()).enumerate() {
             let param_ptr = self
                 .builder
-                .build_alloca(param_llvm_type, pname)
+                .build_alloca(*ptype, pname)
                 .map_err(|_| BackendError::InvalidNode)?;
             let param_val = function
                 .get_nth_param(i as u32)
@@ -594,14 +606,22 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                 pname.clone(),
                 VariableBinding {
                     ptr: param_ptr,
-                    pointee_type: param_llvm_type,
+                    pointee_type: *ptype,
                 },
             );
         }
 
+        // Execute body statements
         if body_offset != NodeOffset::NULL {
-            if let Some(body) = arena.get(body_offset) {
-                self.lower_compound(arena, &body)?;
+            let mut stmt_off = body_offset;
+            while stmt_off != NodeOffset::NULL {
+                if let Some(stmt) = arena.get(stmt_off) {
+                    let next = stmt.next_sibling;
+                    self.lower_stmt(arena, stmt_off)?;
+                    stmt_off = next;
+                } else {
+                    break;
+                }
             }
         }
 
@@ -613,8 +633,7 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                         .build_return(None)
                         .map_err(|_| BackendError::InvalidNode)?;
                 } else {
-                    let ret_bt = self.to_llvm_type(return_type_id);
-                    let int_type = ret_bt.into_int_type();
+                    let int_type = ret_llvm.into_int_type();
                     self.builder
                         .build_return(Some(&int_type.const_int(0, false)))
                         .map_err(|_| BackendError::InvalidNode)?;
@@ -626,6 +645,7 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
     }
 
     fn lower_compound(&mut self, arena: &Arena, node: &CAstNode) -> Result<(), BackendError> {
+
         eprintln!("lower_compound: first_child={:?}", node.first_child);
         let mut child_offset = node.first_child;
         let mut count = 0;
@@ -952,6 +972,8 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
             65 => self.lower_unop(arena, &node),
             66 => self.lower_cond_expr(arena, &node),
             67 => self.lower_call_expr(arena, &node),
+            68 => self.lower_array_index(arena, &node),
+            69 => self.lower_member_access(arena, &node),
             70 => self.lower_cast_expr(arena, &node),
             71 => self.lower_sizeof_expr(&node),
             72 => self.lower_comma_expr(arena, &node),
@@ -1408,6 +1430,102 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
         Ok(None)
     }
 
+    fn lower_member_access(
+        &mut self,
+        arena: &Arena,
+        node: &CAstNode,
+    ) -> Result<Option<BasicValueEnum<'ctx>>, BackendError> {
+        let base_offset = node.first_child;
+        let field_node_offset = node.next_sibling;
+
+        let base_name_str: Option<String> = arena.get(base_offset).and_then(|n| {
+            if n.kind == 60 {
+                arena.get_string(NodeOffset(n.data)).map(|s| s.to_string())
+            } else {
+                None
+            }
+        });
+
+        let field_name_str: Option<String> = arena.get(field_node_offset).and_then(|n| {
+            if n.kind == 60 {
+                arena.get_string(NodeOffset(n.data)).map(|s| s.to_string())
+            } else {
+                None
+            }
+        });
+
+        let (base_name, field_name) = match (base_name_str, field_name_str) {
+            (Some(b), Some(f)) => (b, f),
+            _ => return Ok(None),
+        };
+
+        let binding = match self.variables.get(&base_name).copied() {
+            Some(b) => b,
+            None => return Ok(None),
+        };
+
+        let (struct_ptr, struct_type) = (binding.ptr, binding.pointee_type);
+
+        let field_idx = self
+            .struct_fields
+            .get(&base_name)
+            .and_then(|fields| fields.iter().position(|f| f == &field_name))
+            .unwrap_or(0) as u32;
+
+        match struct_type {
+            BasicTypeEnum::StructType(st) => {
+                let field_ptr = self
+                    .builder
+                    .build_struct_gep(st, struct_ptr, field_idx, "gep")
+                    .map_err(|_| BackendError::InvalidNode)?;
+                let field_llvm_type = st
+                    .get_field_type_at_index(field_idx)
+                    .unwrap_or_else(|| self.context.i32_type().as_basic_type_enum());
+                let val = self
+                    .builder
+                    .build_load(field_llvm_type, field_ptr, &field_name)
+                    .map_err(|_| BackendError::InvalidNode)?;
+                Ok(Some(val))
+            }
+            _ => Ok(None),
+        }
+    }
+
+    fn lower_array_index(
+        &mut self,
+        arena: &Arena,
+        node: &CAstNode,
+    ) -> Result<Option<BasicValueEnum<'ctx>>, BackendError> {
+        let base_offset = node.first_child;
+        let index_offset = node.next_sibling;
+
+        let base_val = match self.lower_expr(arena, base_offset)? {
+            Some(v) => v,
+            None => return Ok(None),
+        };
+        let index_val = match self.lower_expr(arena, index_offset)? {
+            Some(v) => v,
+            None => return Ok(None),
+        };
+
+        if let (BasicValueEnum::PointerValue(ptr), BasicValueEnum::IntValue(idx)) =
+            (base_val, index_val)
+        {
+            let elem_type = self.context.i32_type().as_basic_type_enum();
+            let elem_ptr = unsafe {
+                self.builder
+                    .build_gep(elem_type, ptr, &[idx], "gep")
+                    .map_err(|_| BackendError::InvalidNode)?
+            };
+            let val = self
+                .builder
+                .build_load(elem_type, elem_ptr, "idx")
+                .map_err(|_| BackendError::InvalidNode)?;
+            return Ok(Some(val));
+        }
+        Ok(None)
+    }
+
     fn lower_cast_expr(
         &mut self,
         arena: &Arena,
@@ -1726,9 +1844,16 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                 if child.kind == 60 {
                     return arena
                         .get_string(NodeOffset(child.data))
+                        .filter(|s| !s.is_empty())
                         .map(|s| s.to_string());
                 }
                 if matches!(child.kind, 7..=9) {
+                    if let Some(name) = self.find_ident_name(arena, &child) {
+                        return Some(name);
+                    }
+                }
+                // kind=73 is an init-declarator: first_child is the declarator
+                if child.kind == 73 {
                     if let Some(name) = self.find_ident_name(arena, &child) {
                         return Some(name);
                     }

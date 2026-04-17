@@ -76,7 +76,13 @@ impl Parser {
     }
 
     pub fn parse_tokens(&mut self, tokens: Vec<preprocessor::Token>) -> Result<NodeOffset, ParseError> {
-        self.tokens = tokens.into_iter().map(Token::from).collect();
+        self.tokens = tokens.into_iter()
+            .filter(|t| !matches!(
+                t.kind,
+                preprocessor::TokenKind::Whitespace | preprocessor::TokenKind::Comment
+            ))
+            .map(Token::from)
+            .collect();
         self.tokens.push(Token {
             kind: TokenKind::EOF,
             text: String::new(),
@@ -881,7 +887,15 @@ impl Parser {
                 } else {
                     let params = self.parse_parameter_list()?;
                     self.expect(")")?;
-                    declarator = self.alloc_node(9, 0, NodeOffset::NULL, declarator, params);
+                    // Chain params as declarator(ident).next_sibling so that
+                    // link_siblings in parse_external_declaration cannot overwrite them
+                    // via kind=9.next_sibling.
+                    if params != NodeOffset::NULL && declarator != NodeOffset::NULL {
+                        if let Some(d) = self.arena.get_mut(declarator) {
+                            d.next_sibling = params;
+                        }
+                    }
+                    declarator = self.alloc_node(9, 0, NodeOffset::NULL, declarator, NodeOffset::NULL);
                 }
             } else {
                 break;
@@ -933,25 +947,35 @@ impl Parser {
     }
 
     fn parse_parameter_declaration(&mut self) -> Result<NodeOffset, ParseError> {
-        eprintln!("parse_parameter_declaration: starting, current={:?}", self.current_token());
         if self.is_type_specifier() {
             let specifiers = self.parse_declaration_specifiers()?;
-            eprintln!("parse_parameter_declaration: after specifiers, current={:?}", self.current_token());
             let declarator = if self.is_declarator_start() {
-                eprintln!("parse_parameter_declaration: calling parse_declarator, current={:?}", self.current_token());
-                let d = self.parse_declarator()?;
-                eprintln!("parse_parameter_declaration: after parse_declarator, current={:?}", self.current_token());
-                d
+                self.parse_declarator()?
             } else {
                 NodeOffset::NULL
             };
+
+            // Chain declarator as last_spec.next_sibling so that link_siblings in
+            // parse_parameter_list cannot overwrite it via kind=24.next_sibling.
+            if declarator != NodeOffset::NULL && specifiers != NodeOffset::NULL {
+                let mut last_spec = specifiers;
+                loop {
+                    if let Some(n) = self.arena.get(last_spec) {
+                        if n.next_sibling == NodeOffset::NULL { break; }
+                        last_spec = n.next_sibling;
+                    } else { break; }
+                }
+                if let Some(n) = self.arena.get_mut(last_spec) {
+                    n.next_sibling = declarator;
+                }
+            }
 
             Ok(self.alloc_node(
                 24,
                 0,
                 NodeOffset::NULL,
                 specifiers,
-                declarator,
+                NodeOffset::NULL,
             ))
         } else {
             Ok(self.alloc_node(
