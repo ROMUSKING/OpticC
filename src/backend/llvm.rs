@@ -3,7 +3,7 @@ use crate::types::{CType, TypeId, TypeSystem};
 use inkwell::builder::Builder;
 use inkwell::context::Context;
 use inkwell::module::Module;
-use inkwell::types::{BasicMetadataTypeEnum, BasicType, BasicTypeEnum};
+use inkwell::types::{BasicMetadataTypeEnum, BasicType, BasicTypeEnum, StructType};
 use inkwell::values::{BasicValue, BasicValueEnum, FunctionValue, PointerValue};
 use inkwell::AddressSpace;
 use std::collections::HashMap;
@@ -17,6 +17,12 @@ pub struct LlvmBackend<'ctx, 'types> {
     vectorization_hints: VectorizationHints,
     types: Option<&'types TypeSystem>,
     type_cache: HashMap<u32, BasicTypeEnum<'ctx>>,
+    /// For each struct variable, stores ordered field names so GEP can resolve them.
+    struct_fields: HashMap<String, Vec<String>>,
+    /// Registered struct/union types keyed by tag name.
+    struct_tag_types: HashMap<String, StructType<'ctx>>,
+    /// Registered struct/union field names keyed by tag name.
+    struct_tag_fields: HashMap<String, Vec<String>>,
 }
 
 #[derive(Clone, Copy)]
@@ -44,6 +50,9 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
             vectorization_hints: VectorizationHints::default(),
             types: None,
             type_cache: HashMap::new(),
+            struct_fields: HashMap::new(),
+            struct_tag_types: HashMap::new(),
+            struct_tag_fields: HashMap::new(),
         }
     }
 
@@ -63,6 +72,9 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
             vectorization_hints: VectorizationHints::default(),
             types: Some(types),
             type_cache: HashMap::new(),
+            struct_fields: HashMap::new(),
+            struct_tag_types: HashMap::new(),
+            struct_tag_fields: HashMap::new(),
         }
     }
 
@@ -157,6 +169,18 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
         offset: NodeOffset,
     ) -> Result<(), BackendError> {
         eprintln!("lower_translation_unit: starting at offset={:?}", offset);
+
+        // First pass: register all struct/union type definitions
+        let mut scan_offset = offset;
+        while scan_offset != NodeOffset::NULL {
+            if let Some(node) = arena.get(scan_offset) {
+                self.register_struct_types_in_node(arena, node);
+                scan_offset = node.next_sibling;
+            } else {
+                break;
+            }
+        }
+
         let mut child_offset = offset;
         while child_offset != NodeOffset::NULL {
             if let Some(node) = arena.get(child_offset) {
@@ -240,15 +264,110 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
         Ok(())
     }
 
+    fn register_struct_types_in_node(&mut self, arena: &Arena, node: &CAstNode) {
+        let mut child_off = node.first_child;
+        while child_off != NodeOffset::NULL {
+            if let Some(child) = arena.get(child_off) {
+                if (child.kind == 4 || child.kind == 5)
+                    && child.data != 0
+                    && child.first_child != NodeOffset::NULL
+                {
+                    if let Some(tag_name) = arena.get_string(NodeOffset(child.data)) {
+                        let tag_name = tag_name.to_string();
+                        if !self.struct_tag_types.contains_key(&tag_name) {
+                            let field_names = Self::collect_struct_field_names(arena, child);
+                            let mut field_types: Vec<BasicTypeEnum<'ctx>> = Vec::new();
+                            let mut member_off = child.first_child;
+                            while member_off != NodeOffset::NULL {
+                                if let Some(m) = arena.get(member_off) {
+                                    let mk = arena.get(m.first_child).map(|n| n.kind).unwrap_or(2);
+                                    field_types.push(self.node_kind_to_llvm_type(mk));
+                                    member_off = m.next_sibling;
+                                } else {
+                                    break;
+                                }
+                            }
+                            if !field_types.is_empty() {
+                                let st = self.context.struct_type(&field_types, false);
+                                self.struct_tag_types.insert(tag_name.clone(), st);
+                                self.struct_tag_fields.insert(tag_name, field_names);
+                            }
+                        }
+                    }
+                }
+                self.register_struct_types_in_node(arena, child);
+                child_off = child.next_sibling;
+            } else {
+                break;
+            }
+        }
+    }
+
+    fn node_kind_to_llvm_type(&self, kind: u16) -> BasicTypeEnum<'ctx> {
+        match kind {
+            1 => self.context.i8_type().as_basic_type_enum(),
+            2 => self.context.i32_type().as_basic_type_enum(),
+            3 => self.context.i8_type().as_basic_type_enum(),
+            6 => self.context.i32_type().as_basic_type_enum(),
+            10 => self.context.i16_type().as_basic_type_enum(),
+            11 => self.context.i64_type().as_basic_type_enum(),
+            12 | 13 => self.context.i32_type().as_basic_type_enum(),
+            83 => self.context.f32_type().as_basic_type_enum(),
+            84 => self.context.f64_type().as_basic_type_enum(),
+            _ => self.context.i32_type().as_basic_type_enum(),
+        }
+    }
+
     fn lower_var_decl(&mut self, arena: &Arena, node: &CAstNode) -> Result<(), BackendError> {
+        let spec_node = arena.get(node.first_child);
+        let spec_kind = spec_node.map(|n| n.kind).unwrap_or(2);
+
+        let alloca_type = if spec_kind == 4 || spec_kind == 5 {
+            if let Some(sn) = spec_node {
+                let tag_type = if sn.data != 0 {
+                    arena
+                        .get_string(NodeOffset(sn.data))
+                        .and_then(|tag| self.struct_tag_types.get(tag).copied())
+                        .map(|st| st.as_basic_type_enum())
+                } else {
+                    None
+                };
+                tag_type.unwrap_or_else(|| {
+                    if sn.first_child != NodeOffset::NULL {
+                        self.build_struct_llvm_type(arena, sn)
+                    } else {
+                        self.context.i8_type().as_basic_type_enum()
+                    }
+                })
+            } else {
+                self.context.i8_type().as_basic_type_enum()
+            }
+        } else {
+            self.node_kind_to_llvm_type(spec_kind)
+        };
+
         let name = self.find_ident_name(arena, node);
         let var_name = name.as_deref().unwrap_or("var");
-        let type_id = self.default_type();
-        let alloca_type = self.to_llvm_type(type_id);
+
         let var_ptr = self
             .builder
             .build_alloca(alloca_type, var_name)
             .map_err(|_| BackendError::InvalidNode)?;
+
+        if (spec_kind == 4 || spec_kind == 5) && name.is_some() {
+            if let Some(sn) = spec_node {
+                let field_names = if sn.data != 0 {
+                    arena
+                        .get_string(NodeOffset(sn.data))
+                        .and_then(|tag| self.struct_tag_fields.get(tag).cloned())
+                        .unwrap_or_else(|| Self::collect_struct_field_names(arena, sn))
+                } else {
+                    Self::collect_struct_field_names(arena, sn)
+                };
+                self.struct_fields.insert(var_name.to_string(), field_names);
+            }
+        }
+
         if let Some(n) = name {
             self.variables.insert(
                 n,
@@ -262,12 +381,28 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
         let mut child_offset = node.first_child;
         while child_offset != NodeOffset::NULL {
             if let Some(child) = arena.get(child_offset) {
-                if matches!(child.kind, 64..=73 | 80..=82 | 60..=62) {
+                if child.kind == 73 {
+                    let rhs_offset = child.next_sibling;
+                    if rhs_offset != NodeOffset::NULL {
+                        if let Some(val) = self.lower_expr(arena, rhs_offset)? {
+                            if Self::types_compatible(alloca_type, val) {
+                                let _ = self
+                                    .builder
+                                    .build_store(var_ptr, val)
+                                    .map_err(|_| BackendError::InvalidNode);
+                            }
+                        }
+                    }
+                    break;
+                }
+                if matches!(child.kind, 64..=72 | 80..=82 | 61..=62) {
                     if let Some(val) = self.lower_expr(arena, child_offset)? {
-                        let _ = self
-                            .builder
-                            .build_store(var_ptr, val)
-                            .map_err(|_| BackendError::InvalidNode);
+                        if Self::types_compatible(alloca_type, val) {
+                            let _ = self
+                                .builder
+                                .build_store(var_ptr, val)
+                                .map_err(|_| BackendError::InvalidNode);
+                        }
                     }
                 }
                 child_offset = child.next_sibling;
@@ -276,6 +411,69 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
             }
         }
         Ok(())
+    }
+
+    fn types_compatible(alloca_type: BasicTypeEnum, val: BasicValueEnum) -> bool {
+        match (alloca_type, val) {
+            (BasicTypeEnum::IntType(_), BasicValueEnum::IntValue(_)) => true,
+            (BasicTypeEnum::FloatType(_), BasicValueEnum::FloatValue(_)) => true,
+            (BasicTypeEnum::PointerType(_), BasicValueEnum::PointerValue(_)) => true,
+            _ => false,
+        }
+    }
+
+    fn build_struct_llvm_type(&self, arena: &Arena, node: &CAstNode) -> BasicTypeEnum<'ctx> {
+        let mut field_types: Vec<BasicTypeEnum<'ctx>> = Vec::new();
+        let mut member_off = node.first_child;
+        while member_off != NodeOffset::NULL {
+            if let Some(member) = arena.get(member_off) {
+                let member_kind = arena.get(member.first_child).map(|n| n.kind).unwrap_or(2);
+                let ft = self.node_kind_to_llvm_type(member_kind);
+                field_types.push(ft);
+                member_off = member.next_sibling;
+            } else {
+                break;
+            }
+        }
+        if field_types.is_empty() {
+            self.context.i8_type().as_basic_type_enum()
+        } else {
+            self.context
+                .struct_type(&field_types, false)
+                .as_basic_type_enum()
+        }
+    }
+
+    fn collect_struct_field_names(arena: &Arena, node: &CAstNode) -> Vec<String> {
+        let mut names: Vec<String> = Vec::new();
+        let mut member_off = node.first_child;
+        while member_off != NodeOffset::NULL {
+            if let Some(member) = arena.get(member_off) {
+                let mut child_off = member.first_child;
+                let mut found = false;
+                while child_off != NodeOffset::NULL {
+                    if let Some(child) = arena.get(child_off) {
+                        if child.kind == 60 {
+                            if let Some(name) = arena.get_string(NodeOffset(child.data)) {
+                                names.push(name.to_string());
+                                found = true;
+                                break;
+                            }
+                        }
+                        child_off = child.next_sibling;
+                    } else {
+                        break;
+                    }
+                }
+                if !found {
+                    names.push(format!("_field{}", names.len()));
+                }
+                member_off = member.next_sibling;
+            } else {
+                break;
+            }
+        }
+        names
     }
 
     fn lower_func_decl(&mut self, arena: &Arena, node: &CAstNode) -> Result<(), BackendError> {
@@ -1267,18 +1465,29 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
         let lhs_offset = node.first_child;
         let rhs_offset = node.next_sibling;
 
-        let rhs_val = self
-            .lower_expr(arena, rhs_offset)?
-            .ok_or(BackendError::InvalidNode)?;
+        let rhs_val = match self.lower_expr(arena, rhs_offset)? {
+            Some(v) => v,
+            None => return Ok(None),
+        };
 
-        let lhs_node = arena.get(lhs_offset).ok_or(BackendError::InvalidNode)?;
+        let lhs_node = match arena.get(lhs_offset) {
+            Some(n) => n,
+            None => return Ok(Some(rhs_val)),
+        };
         if lhs_node.kind == 60 {
             let name_offset = NodeOffset(lhs_node.data);
             if let Some(name) = arena.get_string(name_offset) {
                 if let Some(ptr) = self.variables.get(name) {
-                    self.builder
-                        .build_store(ptr.ptr, rhs_val)
-                        .map_err(|_| BackendError::InvalidNode)?;
+                    let store_ok = match ptr.pointee_type {
+                        BasicTypeEnum::IntType(_) if rhs_val.is_int_value() => {
+                            self.builder.build_store(ptr.ptr, rhs_val).is_ok()
+                        }
+                        BasicTypeEnum::FloatType(_) if rhs_val.is_float_value() => {
+                            self.builder.build_store(ptr.ptr, rhs_val).is_ok()
+                        }
+                        _ => false,
+                    };
+                    let _ = store_ok;
                 }
             }
         }

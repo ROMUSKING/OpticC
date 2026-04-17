@@ -665,29 +665,53 @@ impl Parser {
     }
 
     fn parse_struct_specifier(&mut self) -> Result<NodeOffset, ParseError> {
-        self.expect("{")?;
+        let tag_data = if self.current_token().kind == TokenKind::Identifier {
+            let name = self.current_token().text.clone();
+            self.advance();
+            self.arena.store_string(&name).unwrap_or(NodeOffset::NULL).0
+        } else {
+            0
+        };
+
+        if !self.skip_punctuator("{") {
+            return Ok(self.alloc_node(4, tag_data, NodeOffset::NULL, NodeOffset::NULL, NodeOffset::NULL));
+        }
+
         let mut first_member = NodeOffset::NULL;
         let mut last_member = NodeOffset::NULL;
 
         while !self.skip_punctuator("}") {
+            if self.is_at_end() { break; }
             let member_decl = self.parse_struct_declaration()?;
             self.link_siblings(&mut first_member, &mut last_member, member_decl);
         }
 
-        Ok(self.alloc_node(4, 0, NodeOffset::NULL, first_member, NodeOffset::NULL))
+        Ok(self.alloc_node(4, tag_data, NodeOffset::NULL, first_member, NodeOffset::NULL))
     }
 
     fn parse_union_specifier(&mut self) -> Result<NodeOffset, ParseError> {
-        self.expect("{")?;
+        let tag_data = if self.current_token().kind == TokenKind::Identifier {
+            let name = self.current_token().text.clone();
+            self.advance();
+            self.arena.store_string(&name).unwrap_or(NodeOffset::NULL).0
+        } else {
+            0
+        };
+
+        if !self.skip_punctuator("{") {
+            return Ok(self.alloc_node(5, tag_data, NodeOffset::NULL, NodeOffset::NULL, NodeOffset::NULL));
+        }
+
         let mut first_member = NodeOffset::NULL;
         let mut last_member = NodeOffset::NULL;
 
         while !self.skip_punctuator("}") {
+            if self.is_at_end() { break; }
             let member_decl = self.parse_struct_declaration()?;
             self.link_siblings(&mut first_member, &mut last_member, member_decl);
         }
 
-        Ok(self.alloc_node(5, 0, NodeOffset::NULL, first_member, NodeOffset::NULL))
+        Ok(self.alloc_node(5, tag_data, NodeOffset::NULL, first_member, NodeOffset::NULL))
     }
 
     fn parse_struct_declaration(&mut self) -> Result<NodeOffset, ParseError> {
@@ -696,9 +720,8 @@ impl Parser {
         let mut last_declarator = NodeOffset::NULL;
 
         while !self.skip_punctuator(";") {
-            if self.current_token().kind == TokenKind::Punctuator
-                && self.current_token().text == ","
-            {
+            if self.is_at_end() { break; }
+            if self.current_token().kind == TokenKind::Punctuator && self.current_token().text == "," {
                 self.advance();
                 continue;
             }
@@ -706,18 +729,30 @@ impl Parser {
             self.link_siblings(&mut first_declarator, &mut last_declarator, declarator);
         }
 
-        Ok(self.alloc_node(
-            25,
-            0,
-            NodeOffset::NULL,
-            specifiers,
-            first_declarator,
-        ))
+        if first_declarator != NodeOffset::NULL {
+            let mut last_spec = specifiers;
+            loop {
+                if let Some(n) = self.arena.get(last_spec) {
+                    if n.next_sibling == NodeOffset::NULL { break; }
+                    last_spec = n.next_sibling;
+                } else { break; }
+            }
+            if let Some(n) = self.arena.get_mut(last_spec) {
+                n.next_sibling = first_declarator;
+            }
+        }
+
+        Ok(self.alloc_node(25, 0, NodeOffset::NULL, specifiers, NodeOffset::NULL))
     }
 
     fn parse_enum_specifier(&mut self) -> Result<NodeOffset, ParseError> {
         let mut first_const = NodeOffset::NULL;
         let mut last_const = NodeOffset::NULL;
+
+        // Optionally consume an enum tag name
+        if self.current_token().kind == TokenKind::Identifier {
+            self.advance();
+        }
 
         if self.skip_punctuator("{") {
             while !self.skip_punctuator("}") {
@@ -1016,7 +1051,20 @@ impl Parser {
             }
         }
 
-        Ok(self.alloc_node(21, 0, NodeOffset::NULL, specifiers, first_init))
+        if first_init != NodeOffset::NULL {
+            let mut last_spec = specifiers;
+            loop {
+                if let Some(n) = self.arena.get(last_spec) {
+                    if n.next_sibling == NodeOffset::NULL { break; }
+                    last_spec = n.next_sibling;
+                } else { break; }
+            }
+            if let Some(n) = self.arena.get_mut(last_spec) {
+                n.next_sibling = first_init;
+            }
+        }
+
+        Ok(self.alloc_node(21, 0, NodeOffset::NULL, specifiers, NodeOffset::NULL))
     }
 
     pub fn parse_initializer(&mut self) -> Result<NodeOffset, ParseError> {
@@ -1432,19 +1480,26 @@ impl Parser {
             } else if self.skip_punctuator("(") {
                 let args = self.parse_argument_expression_list()?;
                 self.expect(")")?;
-                expr = self.alloc_node(67, 0, NodeOffset::NULL, expr, args);
+                if args != NodeOffset::NULL {
+                    if let Some(callee) = self.arena.get_mut(expr) {
+                        callee.next_sibling = args;
+                    }
+                }
+                expr = self.alloc_node(67, 0, NodeOffset::NULL, expr, NodeOffset::NULL);
             } else if self.skip_punctuator(".") {
                 if self.current_token().kind == TokenKind::Identifier {
                     let member = self.current_token().text.clone();
                     self.advance();
-                    let member_node = self.alloc_node(60, 0, NodeOffset::NULL, NodeOffset::NULL, NodeOffset::NULL);
+                    let member_offset = self.arena.store_string(&member).unwrap_or(NodeOffset::NULL);
+                    let member_node = self.alloc_node(60, member_offset.0, NodeOffset::NULL, NodeOffset::NULL, NodeOffset::NULL);
                     expr = self.alloc_node(69, 0, NodeOffset::NULL, expr, member_node);
                 }
             } else if self.skip_punctuator("->") {
                 if self.current_token().kind == TokenKind::Identifier {
                     let member = self.current_token().text.clone();
                     self.advance();
-                    let member_node = self.alloc_node(60, 0, NodeOffset::NULL, NodeOffset::NULL, NodeOffset::NULL);
+                    let member_offset = self.arena.store_string(&member).unwrap_or(NodeOffset::NULL);
+                    let member_node = self.alloc_node(60, member_offset.0, NodeOffset::NULL, NodeOffset::NULL, NodeOffset::NULL);
                     expr = self.alloc_node(69, 1, NodeOffset::NULL, expr, member_node);
                 }
             } else if self.skip_punctuator("++") {
@@ -1468,7 +1523,7 @@ impl Parser {
                 let arg = self.parse_assignment_expression()?;
                 self.link_siblings(&mut first_arg, &mut last_arg, arg);
 
-                if self.skip_punctuator(")") {
+                if self.current_token().text == ")" {
                     break;
                 }
                 if !self.skip_punctuator(",") {
