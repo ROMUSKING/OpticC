@@ -1,83 +1,84 @@
-api_version: "1.0"
-squad: "preprocessor"
-domain: "C Preprocessor"
+name: preprocessor
+description: C Preprocessor module for Project OCF
+module: src/frontend/preprocessor.rs
 
-semantic_description: >
-  The C Preprocessor is the critical missing piece for compiling real-world C code.
-  It handles #include resolution with deduplication, macro expansion (object-like
-  and function-like), conditional compilation (#ifdef/#ifndef/#if/#elif/#else/#endif),
-  pragma directives, and predefined macros. The preprocessor outputs a unified token
-  stream that feeds directly into the parser, replacing the parser's internal lex() method.
+types:
+  Token:
+    fields:
+      kind: TokenKind
+      text: String
+      line: u32
+      column: u32
+      file: String
 
-memory_layout: |
-  Preprocessor Output:
-    - Vec<Token> — unified token stream (replaces parser's internal tokens)
-    - Vec<String> — pragma list (passed to backend for attribute handling)
+  TokenKind:
+    variants:
+      - Identifier
+      - Keyword
+      - IntLiteral
+      - FloatLiteral
+      - CharLiteral
+      - StringLiteral
+      - Punctuator
+      - Preprocessor
+      - Whitespace
+      - Comment
+      - EndOfFile
 
-  Include Cache (redb):
-    - file_hashes: [u8; 32] -> String (SHA-256 hash to file path)
-    - include_guards: String -> bool (guard macro name to guarded status)
+  MacroDefinition:
+    variants:
+      ObjectLike:
+        replacement: Vec<Token>
+      FunctionLike:
+        params: Vec<String>
+        is_variadic: bool
+        replacement: Vec<Token>
 
-  Macro Table:
-    - definitions: HashMap<String, MacroDefinition>
-    - active_macros: Vec<String> (recursion guard)
-    - predefined: HashMap<String, String> (__LINE__, __FILE__, etc.)
+  PreprocessorError:
+    variants:
+      - FileNotFound(String)
+      - IncludeError(String, String)
+      - MacroError(String)
+      - ConditionalError(String)
+      - DbError(String)
+      - IoError(std::io::Error)
 
-side_effects:
-  - "Preprocessor::process() reads source files and resolves #include directives"
-  - "Each included file is hashed (SHA-256) and checked against redb for deduplication"
-  - "Macro definitions from #define are stored in the macro table"
-  - "Conditional compilation evaluates #if expressions and includes/excludes code"
-  - "Output is a Vec<Token> that replaces the parser's internal lex() method"
+api:
+  Preprocessor:
+    new: "fn new(db: OpticDb) -> Self"
+    add_include_path: "fn add_include_path(&mut self, path: &str)"
+    define_macro: "fn define_macro(&mut self, name: &str, value: &str)"
+    process: "fn process(&mut self, file: &str) -> Result<Vec<Token>, PreprocessorError>"
+    process_source: "fn process_source(&mut self, source: &str, file_name: &str) -> Result<Vec<Token>, PreprocessorError>"
+    get_pragmas: "fn get_pragmas(&self) -> &[String]"
+    get_warnings: "fn get_warnings(&self) -> &[String]"
+    get_errors: "fn get_errors(&self) -> &[String]"
 
-llm_usage_examples:
-  - name: "Preprocess a source file"
-    description: "Run the preprocessor on a C source file and get the token stream"
-    code: |
-      use optic_c::frontend::preprocessor::Preprocessor;
-      use optic_c::db::OpticDb;
+directives:
+  - "#include <file> - system include with search paths"
+  - '#include "file" - local include relative to current file'
+  - "#define MACRO value - object-like macro"
+  - "#define MACRO(args) body - function-like macro with ## and #"
+  - "#undef MACRO - remove macro definition"
+  - "#ifdef MACRO - conditional if macro is defined"
+  - "#ifndef MACRO - conditional if macro is not defined"
+  - "#if expr - conditional with integer constant expression"
+  - "#elif expr - else-if conditional"
+  - "#else - else branch"
+  - "#endif - end conditional"
+  - "#pragma text - store pragma for backend"
+  - "#error msg - emit error diagnostic"
+  - "#warning msg - emit warning diagnostic"
+  - "#line - line directive"
 
-      let db = OpticDb::new("/tmp/optic_db")?;
-      let mut pp = Preprocessor::new(&db);
-      pp.add_include_path("/usr/include");
-      pp.add_include_path("./include");
+predefined_macros:
+  __STDC__: "1"
+  __STDC_VERSION__: "201112L"
+  __GNUC__: "4"
+  __GNUC_MINOR__: "2"
+  __LINE__: "expands to current line number"
+  __FILE__: "expands to current file name (stringified)"
 
-      let tokens = pp.process("main.c")?;
-      // tokens is Vec<Token> ready for the parser
-
-  - name: "Define a macro programmatically"
-    description: "Pre-define macros before processing"
-    code: |
-      use optic_c::frontend::preprocessor::Preprocessor;
-
-      let mut pp = Preprocessor::new(&db);
-      pp.define_macro("DEBUG", "1");
-      pp.define_macro("VERSION", "\"1.0.0\"");
-
-      let tokens = pp.process("main.c")?;
-
-api_reference:
-  types:
-    Preprocessor:
-      description: "C preprocessor with include resolution and macro expansion"
-      fields:
-        - "db: &OpticDb (for include deduplication)"
-        - "include_paths: Vec<PathBuf>"
-        - "macro_table: HashMap<String, MacroDefinition>"
-        - "predefined_macros: HashMap<String, String>"
-        - "pragma_list: Vec<String>"
-      methods:
-        - "new(db: &OpticDb) -> Self"
-        - "add_include_path(&mut self, path: &str)"
-        - "define_macro(&mut self, name: &str, value: &str)"
-        - "process(&mut self, file: &str) -> Result<Vec<Token>, PreprocessorError>"
-        - "get_pragmas(&self) -> &[String]"
-
-    PreprocessorError:
-      description: "Error type for preprocessor operations"
-      variants:
-        - "FileNotFound(String)"
-        - "IncludeError(String, String)"
-        - "MacroError(String)"
-        - "ConditionalError(String)"
-        - "DbError(redb::Error)"
+dependencies:
+  - crate: sha2 (SHA-256 hashing)
+  - module: src/db.rs (OpticDb for include deduplication)

@@ -28,8 +28,8 @@ memory_layout: |
     - flags_hash: [u8; 32] (SHA-256 of compiler flags)
 
 side_effects:
-  - "Build::compile() creates .o files for each source file"
-  - "Build::link() invokes clang to link .o files into executables/libraries"
+  - "Build::build() creates .o files for each source file"
+  - "Build::build() invokes clang to link .o files into executables/libraries"
   - "Dependency tracking parses #include directives during preprocessing"
   - "Build cache stores compiled objects in ~/.cache/opticc/"
   - "Parallel compilation uses rayon for concurrent file processing"
@@ -38,47 +38,97 @@ llm_usage_examples:
   - name: "Build a shared library"
     description: "Compile all .c files and link into libfoo.so"
     code: |
-      use optic_c::build::Build;
+      use optic_c::build::{BuildConfig, Builder, OutputType};
 
-      let mut build = Build::new();
-      build.set_source_dir("./src");
-      build.set_output("./build/libfoo.so");
-      build.set_jobs(8);
-      build.build()?;
+      let config = BuildConfig::new()
+          .with_source_files(vec!["src/a.c".into(), "src/b.c".into()])
+          .with_output("build/libfoo.so".into())
+          .with_output_type(OutputType::SharedLib)
+          .with_jobs(8);
+
+      let mut builder = Builder::new(config);
+      builder.build()?;
 
   - name: "Build an executable with libraries"
     description: "Compile and link with external libraries"
     code: |
-      use optic_c::build::Build;
+      use optic_c::build::{BuildConfig, Builder, OutputType};
 
-      let mut build = Build::new();
-      build.set_source_dir("./src");
-      build.set_output("./build/myapp");
-      build.add_link_lib("m");
-      build.add_link_lib("dl");
-      build.add_link_lib("pthread");
-      build.build()?;
+      let config = BuildConfig::new()
+          .with_source_files(vec!["src/main.c".into(), "src/utils.c".into()])
+          .with_output("build/myapp".into())
+          .with_output_type(OutputType::Executable)
+          .with_link_libs(vec!["m".to_string(), "dl".to_string(), "pthread".to_string()])
+          .with_jobs(4);
+
+      let mut builder = Builder::new(config);
+      builder.build()?;
+
+  - name: "Build a static library"
+    description: "Compile all .c files in a directory into a static library"
+    code: |
+      use optic_c::build::{BuildConfig, Builder, OutputType};
+
+      let source_files = BuildConfig::discover_source_files(&"src".into());
+      let config = BuildConfig::new()
+          .with_source_files(source_files)
+          .with_output("build/libmylib.a".into())
+          .with_output_type(OutputType::StaticLib);
+
+      let mut builder = Builder::new(config);
+      builder.build()?;
 
 api_reference:
   types:
-    Build:
-      description: "Multi-file build orchestrator"
+    BuildConfig:
+      description: "Configuration for a build operation"
       fields:
-        - "source_dir: PathBuf"
+        - "source_files: Vec<PathBuf>"
         - "output: PathBuf"
-        - "jobs: usize"
-        - "link_libs: Vec<String>"
         - "include_paths: Vec<PathBuf>"
         - "defines: HashMap<String, String>"
+        - "link_libs: Vec<String>"
+        - "jobs: usize"
+        - "optimization: u32"
+        - "output_type: OutputType"
       methods:
         - "new() -> Self"
-        - "set_source_dir(&mut self, path: &str)"
-        - "set_output(&mut self, path: &str)"
-        - "set_jobs(&mut self, n: usize)"
-        - "add_link_lib(&mut self, name: &str)"
-        - "add_include_path(&mut self, path: &str)"
-        - "define(&mut self, name: &str, value: &str)"
+        - "with_source_files(self, files: Vec<PathBuf>) -> Self"
+        - "with_output(self, output: PathBuf) -> Self"
+        - "with_output_type(self, output_type: OutputType) -> Self"
+        - "with_jobs(self, jobs: usize) -> Self"
+        - "with_optimization(self, opt: u32) -> Self"
+        - "with_include_paths(self, paths: Vec<PathBuf>) -> Self"
+        - "with_defines(self, defines: HashMap<String, String>) -> Self"
+        - "with_link_libs(self, libs: Vec<String>) -> Self"
+        - "discover_source_files(dir: &Path) -> Vec<PathBuf>"
+        - "validate(&self) -> Result<(), BuildError>"
+        - "compiler_flags(&self) -> Vec<String>"
+
+    OutputType:
+      description: "Type of output to produce"
+      variants:
+        - "Object (.o)"
+        - "StaticLib (.a)"
+        - "SharedLib (.so)"
+        - "Executable (no extension)"
+      methods:
+        - "from_extension(path: &Path) -> Self"
+        - "from_str(s: &str) -> Option<Self>"
+
+    Builder:
+      description: "Multi-file build orchestrator"
+      fields:
+        - "config: BuildConfig"
+        - "object_files: Vec<PathBuf>"
+        - "temp_dir: PathBuf"
+      methods:
+        - "new(config: BuildConfig) -> Self"
         - "build(&mut self) -> Result<(), BuildError>"
+        - "compile_file(&self, source: &Path) -> Result<PathBuf, BuildError>"
+        - "run_external(&self, cmd: &str, args: &[&str]) -> Result<(), BuildError>"
+        - "object_files(&self) -> &[PathBuf]"
+        - "temp_dir(&self) -> &Path"
 
     BuildError:
       description: "Error type for build operations"
@@ -87,3 +137,30 @@ api_reference:
         - "LinkError(String)"
         - "IoError(std::io::Error)"
         - "NoSourceFiles"
+        - "ExternalToolError { tool: String, message: String }"
+
+    CacheKey:
+      description: "Cache key for incremental builds"
+      fields:
+        - "source_hash: [u8; 32]"
+        - "flags_hash: [u8; 32]"
+      methods:
+        - "new(source: &str, flags: &[String]) -> Self"
+
+  free_functions:
+    compile_single_file:
+      description: "Compile a single file to LLVM IR"
+      signature: "fn compile_single_file(input: &Path, output: &Path, opt_level: u32, include_paths: &[PathBuf], defines: &HashMap<String, String>) -> Result<(), Box<dyn std::error::Error>>"
+
+cli_reference:
+  command: "build"
+  description: "Build a project from multiple source files"
+  arguments:
+    - "--src-dir <DIR>: Directory to scan for .c files"
+    - "-o, --output <FILE>: Output file path"
+    - "-j, --jobs <N>: Number of parallel compilation jobs (default: 1)"
+    - "-I, --include-paths <PATH>: Include search paths"
+    - "-D, --defines <NAME=VALUE>: Preprocessor defines"
+    - "--link-libs <LIBS>: Libraries to link against"
+    - "-t, --output-type <TYPE>: Output type (auto, object, static, shared, executable)"
+    - "--source-files <FILES>: Explicit source files to compile"

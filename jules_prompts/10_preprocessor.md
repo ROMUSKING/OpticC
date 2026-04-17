@@ -53,7 +53,7 @@ OpticC currently has a working parser and LLVM backend but CANNOT compile real C
 
 ## IMPLEMENTATION STATUS
 **Completed**: ~2200 lines of Rust code implementing the full C99 preprocessor.
-- **22 tests passing** covering #include, #define, #ifdef, #if/#elif, #pragma, macro expansion, predefined macros
+- **21 tests passing** covering #include, #define, #ifdef, #if/#elif, #pragma, macro expansion, predefined macros
 - **Unified Token type** created in `preprocessor::Token` with `TokenKind` enum mapping to parser's expectations
 - **TokenKind mapping** to parser implemented via `From<preprocessor::Token> for parser::Token`
 - **redb integration** working for include deduplication (SHA-256 hashing of included file content)
@@ -62,6 +62,15 @@ OpticC currently has a working parser and LLVM backend but CANNOT compile real C
 - **Search paths**: `-I` include path support with current directory and system path defaults
 - **Token-based macro expansion**: Macros expand to token streams, not text, for correct `##` and `#` handling
 - **Predefined macros**: `__LINE__`, `__FILE__`, `__DATE__`, `__TIME__`, `__STDC__`, `__STDC_VERSION__` all implemented
+
+## KNOWN LIMITATIONS (SQLite Testing)
+- **Complex macro patterns**: sqlite3.c uses advanced macro patterns that the current preprocessor doesn't handle:
+  - `SQLITE_API` / `SQLITE_EXTERN` — attribute-style macros with empty definitions
+  - Variadic macros with complex argument patterns
+  - Macros that expand to partial syntax (e.g., `#define BEGIN {` without matching `}`)
+  - Nested macro definitions with conditional compilation
+- **Toolchain verified**: gcc 11.4, clang 14, LLVM 14 all installed and working. clang compiles sqlite3.c (255K LOC) successfully.
+- **Next step**: Enhance preprocessor to handle attribute-style macros and complex variadic patterns for SQLite compilation.
 
 ## ACCEPTANCE CRITERIA
 1. Preprocessor can handle a file with 100+ `#include` directives without duplicates

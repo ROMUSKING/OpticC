@@ -150,7 +150,7 @@ impl<'a> TypeResolver<'a> {
     }
 
     fn resolve_node(&mut self, arena: &Arena, offset: NodeOffset) -> Option<TypeId> {
-        let node = arena.get(offset);
+        let node = arena.get(offset)?;
 
         let result = match node.kind {
             1..=15 => self.resolve_expression(arena, node),
@@ -172,22 +172,25 @@ impl<'a> TypeResolver<'a> {
 
     fn resolve_children(&mut self, arena: &Arena, node: &CAstNode) -> Option<TypeId> {
         let mut result = None;
-        let mut child = node.left_child;
+        let mut child = node.first_child;
         while child.0 != 0 {
             result = self.resolve_node(arena, child);
-            let child_node = arena.get(child);
-            child = child_node.next_sibling;
+            if let Some(child_node) = arena.get(child) {
+                child = child_node.next_sibling;
+            } else {
+                break;
+            }
         }
         result
     }
 
     fn resolve_expression(&mut self, arena: &Arena, node: &CAstNode) -> Option<TypeId> {
-        let child = node.left_child;
+        let child = node.first_child;
         if child.0 == 0 {
             return Some(self.infer_literal_type(node));
         }
 
-        let child_node = arena.get(child);
+        let child_node = arena.get(child)?;
         let child_type = self.resolve_node(arena, child);
 
         match node.kind {
@@ -225,30 +228,34 @@ impl<'a> TypeResolver<'a> {
             6 => {
                 let sibling = child_node.next_sibling;
                 if sibling.0 != 0 {
-                    let rhs_node = arena.get(sibling);
-                    let rhs_child = rhs_node.left_child;
-                    if rhs_child.0 != 0 {
-                        let func_type = self.resolve_node(arena, rhs_child);
-                        if let Some(CType::Function {
-                            return_type,
-                            params,
-                            ..
-                        }) = func_type.and_then(|t| self.types.get_type(t).cloned())
-                        {
-                            let mut arg_count = 0;
-                            let mut arg = rhs_child;
-                            while arg.0 != 0 {
-                                let arg_node = arena.get(arg);
-                                self.resolve_node(arena, arg);
-                                arg_count += 1;
-                                arg = arg_node.next_sibling;
+                    if let Some(rhs_node) = arena.get(sibling) {
+                        let rhs_child = rhs_node.first_child;
+                        if rhs_child.0 != 0 {
+                            let func_type = self.resolve_node(arena, rhs_child);
+                            if let Some(CType::Function {
+                                return_type,
+                                params,
+                                ..
+                            }) = func_type.and_then(|t| self.types.get_type(t).cloned())
+                            {
+                                let mut arg_count = 0;
+                                let mut arg = rhs_child;
+                                while arg.0 != 0 {
+                                    if let Some(arg_node) = arena.get(arg) {
+                                        self.resolve_node(arena, arg);
+                                        arg_count += 1;
+                                        arg = arg_node.next_sibling;
+                                    } else {
+                                        break;
+                                    }
+                                }
+                                if arg_count > params.len() {
+                                    self.errors.push(TypeError::TooManyArguments);
+                                } else if arg_count < params.len() {
+                                    self.errors.push(TypeError::TooFewArguments);
+                                }
+                                return Some(return_type);
                             }
-                            if arg_count > params.len() {
-                                self.errors.push(TypeError::TooManyArguments);
-                            } else if arg_count < params.len() {
-                                self.errors.push(TypeError::TooFewArguments);
-                            }
-                            return Some(return_type);
                         }
                     }
                 }
@@ -287,7 +294,7 @@ impl<'a> TypeResolver<'a> {
     }
 
     fn resolve_type_specifier(&mut self, _arena: &Arena, node: &CAstNode) -> Option<TypeId> {
-        match node.data_offset {
+        match node.data {
             0 => Some(TypeId::INT),
             1 => Some(TypeId::VOID),
             2 => Some(TypeId::CHAR),
@@ -298,7 +305,7 @@ impl<'a> TypeResolver<'a> {
             7 => Some(TypeId::BOOL),
             8 => Some(TypeId::LONGLONG),
             _ => {
-                let name = format!("type_{}", node.data_offset);
+                let name = format!("type_{}", node.data);
                 if let Some(&tid) = self.typedefs.get(&name) {
                     Some(tid)
                 } else if let Some(&tid) = self.struct_defs.get(&name) {
@@ -312,12 +319,12 @@ impl<'a> TypeResolver<'a> {
     }
 
     fn resolve_typedef_decl(&mut self, arena: &Arena, node: &CAstNode) -> Option<TypeId> {
-        let child = node.left_child;
+        let child = node.first_child;
         if child.0 != 0 {
-            let type_node = arena.get(child);
+            let type_node = arena.get(child)?;
             let underlying = self.resolve_node(arena, child);
             if let Some(underlying_id) = underlying {
-                let name = format!("typedef_{}", type_node.data_offset);
+                let name = format!("typedef_{}", type_node.data);
                 let typedef_id = self.types.add_type(CType::Typedef {
                     name: name.clone(),
                     underlying: underlying_id,
@@ -330,8 +337,8 @@ impl<'a> TypeResolver<'a> {
     }
 
     fn resolve_struct_decl(&mut self, arena: &Arena, node: &CAstNode) -> Option<TypeId> {
-        let name = if node.data_offset != 0 {
-            Some(format!("struct_{}", node.data_offset))
+        let name = if node.data != 0 {
+            Some(format!("struct_{}", node.data))
         } else {
             None
         };
@@ -348,25 +355,28 @@ impl<'a> TypeResolver<'a> {
         }
 
         let mut members = Vec::new();
-        let mut child = node.left_child;
+        let mut child = node.first_child;
         while child.0 != 0 {
-            let member_node = arena.get(child);
-            let member_type = self.resolve_node(arena, child);
-            if let Some(ty) = member_type {
-                let mname = format!("member_{}", member_node.data_offset);
-                members.push(StructMember {
-                    name: mname,
-                    type_id: ty,
-                    offset: 0,
-                    bit_offset: None,
-                    bit_width: None,
-                });
+            if let Some(member_node) = arena.get(child) {
+                let member_type = self.resolve_node(arena, child);
+                if let Some(ty) = member_type {
+                    let mname = format!("member_{}", member_node.data);
+                    members.push(StructMember {
+                        name: mname,
+                        type_id: ty,
+                        offset: 0,
+                        bit_offset: None,
+                        bit_width: None,
+                    });
+                }
+                child = member_node.next_sibling;
+            } else {
+                break;
             }
-            child = member_node.next_sibling;
         }
 
         if let Some(CType::Struct {
-            members: ref mut ms,
+            members: ms,
             ..
         }) = self.types.types.get_mut(struct_id.0 as usize)
         {
@@ -378,8 +388,8 @@ impl<'a> TypeResolver<'a> {
     }
 
     fn resolve_union_decl(&mut self, arena: &Arena, node: &CAstNode) -> Option<TypeId> {
-        let name = if node.data_offset != 0 {
-            Some(format!("union_{}", node.data_offset))
+        let name = if node.data != 0 {
+            Some(format!("union_{}", node.data))
         } else {
             None
         };
@@ -396,25 +406,28 @@ impl<'a> TypeResolver<'a> {
         }
 
         let mut members = Vec::new();
-        let mut child = node.left_child;
+        let mut child = node.first_child;
         while child.0 != 0 {
-            let member_node = arena.get(child);
-            let member_type = self.resolve_node(arena, child);
-            if let Some(ty) = member_type {
-                let mname = format!("member_{}", member_node.data_offset);
-                members.push(StructMember {
-                    name: mname,
-                    type_id: ty,
-                    offset: 0,
-                    bit_offset: None,
-                    bit_width: None,
-                });
+            if let Some(member_node) = arena.get(child) {
+                let member_type = self.resolve_node(arena, child);
+                if let Some(ty) = member_type {
+                    let mname = format!("member_{}", member_node.data);
+                    members.push(StructMember {
+                        name: mname,
+                        type_id: ty,
+                        offset: 0,
+                        bit_offset: None,
+                        bit_width: None,
+                    });
+                }
+                child = member_node.next_sibling;
+            } else {
+                break;
             }
-            child = member_node.next_sibling;
         }
 
         if let Some(CType::Union {
-            members: ref mut ms,
+            members: ms,
             ..
         }) = self.types.types.get_mut(union_id.0 as usize)
         {
@@ -426,8 +439,8 @@ impl<'a> TypeResolver<'a> {
     }
 
     fn resolve_enum_decl(&mut self, _arena: &Arena, node: &CAstNode) -> Option<TypeId> {
-        let name = if node.data_offset != 0 {
-            Some(format!("enum_{}", node.data_offset))
+        let name = if node.data != 0 {
+            Some(format!("enum_{}", node.data))
         } else {
             None
         };
@@ -445,26 +458,30 @@ impl<'a> TypeResolver<'a> {
     }
 
     fn resolve_function_decl(&mut self, arena: &Arena, node: &CAstNode) -> Option<TypeId> {
-        let child = node.left_child;
+        let child = node.first_child;
         if child.0 == 0 {
             return None;
         }
 
         let return_type = self.resolve_node(arena, child);
         let mut params = Vec::new();
-        let mut sibling = arena.get(child).next_sibling;
+        let child_node = arena.get(child)?;
+        let mut sibling = child_node.next_sibling;
 
         while sibling.0 != 0 {
-            let param_node = arena.get(sibling);
-            let param_type = self.resolve_node(arena, sibling);
-            if let Some(ty) = param_type {
-                let pname = format!("param_{}", param_node.data_offset);
-                params.push(ParamType {
-                    name: Some(pname),
-                    type_id: ty,
-                });
+            if let Some(param_node) = arena.get(sibling) {
+                let param_type = self.resolve_node(arena, sibling);
+                if let Some(ty) = param_type {
+                    let pname = format!("param_{}", param_node.data);
+                    params.push(ParamType {
+                        name: Some(pname),
+                        type_id: ty,
+                    });
+                }
+                sibling = param_node.next_sibling;
+            } else {
+                break;
             }
-            sibling = param_node.next_sibling;
         }
 
         let func_type = self.types.add_type(CType::Function {

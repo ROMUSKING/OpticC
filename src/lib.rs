@@ -1,1 +1,10 @@
-pub mod db; pub mod arena; pub mod analysis; pub mod frontend; pub mod types;
+pub mod arena;
+pub mod build;
+pub mod db;
+pub mod frontend;
+pub mod backend;
+pub mod analysis;
+pub mod types;
+pub mod benchmark;
+pub mod integration;
+// pub mod vfs;
