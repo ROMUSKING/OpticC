@@ -13,7 +13,7 @@ semantic_description: >
 memory_layout: |
   Type Arena (separate from AST arena):
     - TypeId (u32) — opaque handle into the type arena
-    - Types stored as enum variants in a bump-allocated region
+    - Types stored as CType enum variants in a Vec
     - TypeId 0 = void, 1 = _Bool, 2 = char, ..., 15 = long double
     - TypeId 16+ = compound types (pointers, arrays, structs, functions)
 
@@ -21,13 +21,19 @@ memory_layout: |
     enum CType {
         Void,
         Bool,
-        Int { signed: bool, size: IntSize },  // char, short, int, long, long long
-        Float { size: FloatSize },            // float, double, long double
+        Char { signed: bool },
+        Short { signed: bool },
+        Int { signed: bool },
+        Long { signed: bool },
+        LongLong { signed: bool },
+        Float,
+        Double,
+        LongDouble,
         Pointer { base: TypeId },
         Array { element: TypeId, size: Option<u64> },
-        Struct { name: Option<String>, members: Vec<StructMember> },
-        Union { name: Option<String>, members: Vec<StructMember> },
-        Enum { name: Option<String>, variants: Vec<EnumVariant> },
+        Struct { name: Option<String>, members: Vec<StructMember>, size: u64, align: u64 },
+        Union { name: Option<String>, members: Vec<StructMember>, size: u64, align: u64 },
+        Enum { name: Option<String>, underlying: TypeId },
         Function { return_type: TypeId, params: Vec<ParamType>, variadic: bool },
         Typedef { name: String, underlying: TypeId },
         Qualified { qualifiers: TypeQualifiers, base: TypeId },
@@ -50,44 +56,78 @@ llm_usage_examples:
   - name: "Resolve types in an AST"
     description: "Run type resolution on a parsed AST"
     code: |
-      use optic_c::types::{TypeResolver, TypeSystem};
+      use optic::types::{TypeResolver, TypeSystem};
 
       let mut types = TypeSystem::new();
       let mut resolver = TypeResolver::new(&mut types);
 
       // Resolve types in the AST
-      resolver.resolve(ast_root)?;
+      resolver.resolve(&arena, ast_root)?;
 
       // Get the type of a node
       let node_type = resolver.get_node_type(node_offset);
 
-  - name: "Get LLVM type from TypeId"
-    description: "Convert a TypeId to an LLVM type for code generation"
+  - name: "Type checking binary operations"
+    description: "Check types for binary operators"
     code: |
-      use optic_c::types::{TypeSystem, TypeId};
-      use inkwell::context::Context;
+      use optic::types::{TypeResolver, TypeSystem, TypeId};
 
-      let types = TypeSystem::new();
-      let context = Context::create();
+      let mut types = TypeSystem::new();
+      let mut resolver = TypeResolver::new(&mut types);
 
-      let type_id = resolver.get_node_type(node_offset).unwrap();
-      let llvm_type = types.to_llvm_type(&context, type_id);
-      // llvm_type is BasicTypeEnum for code generation
+      // Check addition of int + int
+      let result = resolver.check_binary_op(1, TypeId::INT, TypeId::INT);
+      assert_eq!(result.unwrap(), TypeId::INT);
+
+      // Check pointer + int (pointer arithmetic)
+      let int_ptr = types.add_type(CType::Pointer { base: TypeId::INT });
+      let result = resolver.check_binary_op(1, int_ptr, TypeId::INT);
+      assert_eq!(result.unwrap(), int_ptr);
 
 api_reference:
   types:
+    TypeId:
+      description: "Opaque handle into the type arena"
+      constants:
+        - "VOID: TypeId = TypeId(0)"
+        - "BOOL: TypeId = TypeId(1)"
+        - "CHAR: TypeId = TypeId(2)"
+        - "SCHAR: TypeId = TypeId(3)"
+        - "UCHAR: TypeId = TypeId(4)"
+        - "SHORT: TypeId = TypeId(5)"
+        - "USHORT: TypeId = TypeId(6)"
+        - "INT: TypeId = TypeId(7)"
+        - "UINT: TypeId = TypeId(8)"
+        - "LONG: TypeId = TypeId(9)"
+        - "ULONG: TypeId = TypeId(10)"
+        - "LONGLONG: TypeId = TypeId(11)"
+        - "ULONGLONG: TypeId = TypeId(12)"
+        - "FLOAT: TypeId = TypeId(13)"
+        - "DOUBLE: TypeId = TypeId(14)"
+        - "LONGDOUBLE: TypeId = TypeId(15)"
+
     TypeSystem:
       description: "Type arena and type operations"
       fields:
-        - "types: Vec<CType> (bump-allocated)"
+        - "types: Vec<CType>"
         - "type_cache: HashMap<TypeSignature, TypeId>"
       methods:
         - "new() -> Self"
-        - "get_type(&self, id: TypeId) -> &CType"
+        - "get_type(&self, id: TypeId) -> Option<&CType>"
         - "add_type(&mut self, ty: CType) -> TypeId"
-        - "to_llvm_type(&self, context: &Context, id: TypeId) -> BasicTypeEnum"
         - "size_of(&self, id: TypeId) -> u64"
         - "align_of(&self, id: TypeId) -> u64"
+        - "is_integer(&self, id: TypeId) -> bool"
+        - "is_floating(&self, id: TypeId) -> bool"
+        - "is_pointer(&self, id: TypeId) -> bool"
+        - "is_arithmetic(&self, id: TypeId) -> bool"
+        - "is_scalar(&self, id: TypeId) -> bool"
+        - "resolve_typedef(&self, id: TypeId) -> TypeId"
+        - "strip_qualifiers(&self, id: TypeId) -> TypeId"
+        - "compute_struct_layout(&mut self, id: TypeId)"
+        - "integer_rank(&self, id: TypeId) -> u32"
+        - "is_signed(&self, id: TypeId) -> bool"
+        - "pointer_base(&self, id: TypeId) -> Option<TypeId>"
 
     TypeResolver:
       description: "Walks AST and resolves types"
@@ -95,11 +135,25 @@ api_reference:
         - "types: &mut TypeSystem"
         - "node_types: HashMap<NodeOffset, TypeId>"
         - "typedefs: HashMap<String, TypeId>"
+        - "struct_defs: HashMap<String, TypeId>"
+        - "errors: Vec<TypeError>"
       methods:
         - "new(types: &mut TypeSystem) -> Self"
-        - "resolve(&mut self, root: NodeOffset) -> Result<(), TypeError>"
+        - "resolve(&mut self, arena: &Arena, root: NodeOffset) -> Result<(), ()>"
         - "get_node_type(&self, offset: NodeOffset) -> Option<TypeId>"
         - "check_binary_op(&self, op: u32, lhs: TypeId, rhs: TypeId) -> Result<TypeId, TypeError>"
+        - "check_unary_op(&mut self, op: u32, operand: TypeId) -> Result<TypeId, TypeError>"
+        - "check_assignment(&self, lhs: TypeId, rhs: TypeId) -> Result<TypeId, TypeError>"
+        - "implicit_conversion(&self, from: TypeId, to: TypeId) -> Result<TypeId, TypeError>"
+        - "integer_promotion(&self, id: TypeId) -> TypeId"
+        - "usual_arithmetic_conversions(&self, lhs: TypeId, rhs: TypeId) -> Result<TypeId, TypeError>"
+        - "errors(&self) -> &[TypeError]"
+        - "register_typedef(&mut self, name: String, type_id: TypeId)"
+        - "register_struct(&mut self, name: String, members: Vec<StructMember>) -> TypeId"
+        - "register_union(&mut self, name: String, members: Vec<StructMember>) -> TypeId"
+        - "register_enum(&mut self, name: String, underlying: TypeId) -> TypeId"
+        - "lookup_typedef(&self, name: &str) -> Option<TypeId>"
+        - "lookup_struct(&self, name: &str) -> Option<TypeId>"
 
     TypeError:
       description: "Error type for type operations"
@@ -109,3 +163,34 @@ api_reference:
         - "InvalidOperator(u32, TypeId, TypeId)"
         - "StructIncomplete(String)"
         - "CircularTypedef(String)"
+        - "IncompatibleAssignment(TypeId, TypeId)"
+        - "TooManyArguments"
+        - "TooFewArguments"
+
+    TypeQualifiers:
+      description: "Bitflags for type qualifiers"
+      flags:
+        - "CONST = 0x01"
+        - "VOLATILE = 0x02"
+        - "RESTRICT = 0x04"
+
+test_coverage:
+  total_tests: 70
+  mod_tests: 26
+  resolve_tests: 44
+  categories:
+    - "Primitive type creation and properties"
+    - "Pointer type creation and dereference"
+    - "Array type creation"
+    - "Struct definition with member offset computation"
+    - "Union definition with overlapping offsets"
+    - "Typedef chain resolution"
+    - "Type qualifiers"
+    - "Integer promotion"
+    - "Usual arithmetic conversions"
+    - "Binary operator type checking"
+    - "Unary operator type checking"
+    - "Assignment compatibility"
+    - "Function type creation"
+    - "Struct padding/alignment"
+    - "Bit field layout"

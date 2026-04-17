@@ -24,6 +24,8 @@ memory_layout: |
     - variables: HashMap<String, PointerValue<'ctx>> (local variable symbol table)
     - functions: HashMap<String, FunctionValue<'ctx>> (function symbol table)
     - vectorization_hints: VectorizationHints
+    - types: Option<&'a TypeSystem> (type system for typed code generation, Phase 2)
+    - type_cache: HashMap<TypeId, BasicTypeEnum<'ctx>> (cached LLVM types, Phase 2)
 
   VectorizationHints:
     - loop_vectorize: bool
@@ -176,9 +178,11 @@ api_reference:
         - "vectorization_hints: VectorizationHints"
       methods:
         - "new(context: &'ctx Context, module_name: &str) -> Self"
+        - "with_types(context: &'ctx Context, module_name: &str, types: &'a TypeSystem) -> Self"
         - "compile(&mut self, arena: &Arena, root: NodeOffset) -> Result<(), BackendError>"
         - "module(&self) -> &Module<'ctx>"
         - "set_vectorization_hints(&mut self, hints: VectorizationHints)"
+        - "to_llvm_type(&mut self, type_id: TypeId) -> BasicTypeEnum<'ctx>"
         - "dump_ir(&self) -> String"
         - "verify(&self) -> Result<(), BackendError>"
         - "optimize(&self, opt_level: u32) -> Result<(), BackendError>"
@@ -214,11 +218,19 @@ api_reference:
     - "lower_expr: Dispatch to expression-specific lowerers"
 
   known_limitations:
-    - "All types are lowered as i32 (no proper type inference)"
-    - "External function declarations use variadic i32 signature"
+    - "External function declarations use variadic i32 signature (needs type info)"
     - "Ternary expressions do not use phi nodes (evaluates both branches)"
     - "break/continue are no-ops (no loop exit tracking)"
     - "switch statements are no-ops"
     - "optimize() is a no-op due to inkwell 0.9 API changes"
-    - "No support for floating point operations beyond const generation"
-    - "No support for struct/union types in LLVM IR"
+    - "No support for struct/union types in LLVM IR (struct field access via GEP pending)"
+    - "No LLVM attributes from __attribute__ annotations"
+
+  phase2_updates:
+    - "Added with_types(context, module_name, &TypeSystem) constructor for typed code generation"
+    - "Added to_llvm_type(TypeId) -> BasicTypeEnum<'ctx> for CType -> LLVM type conversion"
+    - "Added type_cache: HashMap<TypeId, BasicTypeEnum<'ctx>> for LLVM type deduplication"
+    - "Supports i8, i16, i32, i64, f32, f64, and pointer types"
+    - "Falls back to i32 when no type system provided (backward compatible)"
+    - "Float operations use fadd/fsub/fmul/fdiv/fcmp instead of integer instructions"
+    - "13 new tests for typed code generation"

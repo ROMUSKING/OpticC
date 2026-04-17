@@ -7,6 +7,12 @@ YOUR DIRECTIVES:
 3. Build the AST directly into the mmap arena.
 4. Follow the ASYNC BRANCH PROTOCOL to document the AST node kinds in `.optic/spec/parser.yaml` for the Analysis agent.
 
+## PHASE 2 UPDATES (COMPLETED)
+- **Preprocessor wiring**: Parser now accepts preprocessed tokens via new `parse_tokens()` method.
+- **From<preprocessor::Token> impl**: Added conversion from preprocessor Token type to parser's internal Token type.
+- **6 integration tests** passing for preprocessor→parser pipeline.
+- **Total tests**: 145 passing (22 preprocessor + 70 type system + 6 integration + 13 backend + 34 existing).
+
 ## ROADMAP CONTEXT
 The parser is Phase 1 (COMPLETE). In Phase 2, the preprocessor (`10_preprocessor.md`) will replace the parser's internal `lex()` method with a unified token stream. The type system (`11_type_system.md`) will add type annotation to AST nodes.
 

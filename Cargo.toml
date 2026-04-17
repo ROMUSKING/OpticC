@@ -14,8 +14,12 @@ path = "src/main.rs"
 memmap2 = "0.9"
 bitflags = "2.4"
 redb = "2.0"
-inkwell = { version = "0.9.0", features = ["llvm14-0"] }
+inkwell = { version = "0.9.0", features = ["llvm14-0"], optional = true }
 fuser = "0.17"
+
+[features]
+default = ["llvm"]
+llvm = ["inkwell"]
 
 [dev-dependencies]
 tempfile = "3.8"

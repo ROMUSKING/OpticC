@@ -1,4 +1,5 @@
 use crate::arena::{Arena, CAstNode, NodeFlags, NodeOffset, SourceLocation};
+use crate::frontend::preprocessor;
 
 pub struct Parser {
     pub arena: Arena,
@@ -11,6 +12,7 @@ pub enum TokenKind {
     Keyword,
     Identifier,
     IntConstant,
+    FloatConstant,
     CharConstant,
     StringLiteral,
     Punctuator,
@@ -23,6 +25,32 @@ pub struct Token {
     pub text: String,
     pub line: u32,
     pub column: u32,
+    pub file: String,
+}
+
+impl From<preprocessor::Token> for Token {
+    fn from(pp_token: preprocessor::Token) -> Self {
+        let kind = match pp_token.kind {
+            preprocessor::TokenKind::Identifier => TokenKind::Identifier,
+            preprocessor::TokenKind::Keyword => TokenKind::Keyword,
+            preprocessor::TokenKind::IntLiteral => TokenKind::IntConstant,
+            preprocessor::TokenKind::FloatLiteral => TokenKind::FloatConstant,
+            preprocessor::TokenKind::CharLiteral => TokenKind::CharConstant,
+            preprocessor::TokenKind::StringLiteral => TokenKind::StringLiteral,
+            preprocessor::TokenKind::Punctuator => TokenKind::Punctuator,
+            preprocessor::TokenKind::Preprocessor => TokenKind::Punctuator,
+            preprocessor::TokenKind::Whitespace => TokenKind::Punctuator,
+            preprocessor::TokenKind::Comment => TokenKind::Punctuator,
+            preprocessor::TokenKind::EndOfFile => TokenKind::EOF,
+        };
+        Token {
+            kind,
+            text: pp_token.text,
+            line: pp_token.line,
+            column: pp_token.column,
+            file: pp_token.file,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -43,6 +71,19 @@ impl Parser {
 
     pub fn parse(&mut self, source: &str) -> Result<NodeOffset, ParseError> {
         self.tokens = self.lex(source);
+        self.current = 0;
+        self.parse_translation_unit()
+    }
+
+    pub fn parse_tokens(&mut self, tokens: Vec<preprocessor::Token>) -> Result<NodeOffset, ParseError> {
+        self.tokens = tokens.into_iter().map(Token::from).collect();
+        self.tokens.push(Token {
+            kind: TokenKind::EOF,
+            text: String::new(),
+            line: 0,
+            column: 0,
+            file: String::new(),
+        });
         self.current = 0;
         self.parse_translation_unit()
     }
@@ -104,6 +145,7 @@ impl Parser {
                         text,
                         line,
                         column: start_column,
+                        file: String::new(),
                     });
                 }
                 '0'..='9' => {
@@ -123,6 +165,7 @@ impl Parser {
                         text,
                         line,
                         column: start_column,
+                        file: String::new(),
                     });
                 }
                 '\'' => {
@@ -154,6 +197,7 @@ impl Parser {
                         text: ch,
                         line,
                         column: start_column,
+                        file: String::new(),
                     });
                 }
                 '"' => {
@@ -186,6 +230,7 @@ impl Parser {
                         text,
                         line,
                         column: start_column,
+                        file: String::new(),
                     });
                 }
                 _ => {
@@ -213,6 +258,7 @@ impl Parser {
                         text,
                         line,
                         column: start_column,
+                        file: String::new(),
                     });
                 }
             }
@@ -223,6 +269,7 @@ impl Parser {
             text: String::new(),
             line,
             column,
+            file: String::new(),
         });
 
         tokens
@@ -1478,6 +1525,128 @@ mod tests {
         let mut parser = Parser::new(arena);
 
         let source = "int x = 5 + 3 * 2;";
+        let result = parser.parse(source);
+        assert!(result.is_ok());
+    }
+}
+
+#[cfg(test)]
+mod integration_tests {
+    use super::*;
+    use crate::db::OpticDb;
+    use crate::frontend::preprocessor::Preprocessor;
+    use tempfile::{TempDir, NamedTempFile};
+    use std::fs;
+
+    fn create_test_env() -> (TempDir, String) {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test.redb");
+        (temp_dir, db_path.to_str().unwrap().to_string())
+    }
+
+    #[test]
+    fn test_parse_simple_c_file_through_preprocessor() {
+        let (temp_dir, db_path) = create_test_env();
+        let c_file = temp_dir.path().join("simple.c");
+        fs::write(&c_file, "int main() { return 0; }").unwrap();
+
+        let db = OpticDb::new(&db_path).unwrap();
+        let mut pp = Preprocessor::new(db);
+        let tokens = pp.process(c_file.to_str().unwrap()).unwrap();
+
+        let arena_file = temp_dir.path().join("arena.bin");
+        let arena = Arena::new(arena_file.to_str().unwrap(), 1024).unwrap();
+        let mut parser = Parser::new(arena);
+        let result = parser.parse_tokens(tokens);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_parse_file_with_define_macros() {
+        let (temp_dir, db_path) = create_test_env();
+        let c_file = temp_dir.path().join("macro.c");
+        fs::write(&c_file, "#define MAX 100\nint x = MAX;").unwrap();
+
+        let db = OpticDb::new(&db_path).unwrap();
+        let mut pp = Preprocessor::new(db);
+        let tokens = pp.process(c_file.to_str().unwrap()).unwrap();
+
+        let arena_file = temp_dir.path().join("arena.bin");
+        let arena = Arena::new(arena_file.to_str().unwrap(), 1024).unwrap();
+        let mut parser = Parser::new(arena);
+        let result = parser.parse_tokens(tokens);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_parse_file_with_ifdef_conditionals() {
+        let (temp_dir, db_path) = create_test_env();
+        let c_file = temp_dir.path().join("conditional.c");
+        fs::write(&c_file, "#define DEBUG\n#ifdef DEBUG\nint debug_val = 1;\n#endif").unwrap();
+
+        let db = OpticDb::new(&db_path).unwrap();
+        let mut pp = Preprocessor::new(db);
+        let tokens = pp.process(c_file.to_str().unwrap()).unwrap();
+
+        let arena_file = temp_dir.path().join("arena.bin");
+        let arena = Arena::new(arena_file.to_str().unwrap(), 1024).unwrap();
+        let mut parser = Parser::new(arena);
+        let result = parser.parse_tokens(tokens);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_parse_file_with_include() {
+        let (temp_dir, db_path) = create_test_env();
+        let header = temp_dir.path().join("header.h");
+        fs::write(&header, "int global_var;").unwrap();
+
+        let c_file = temp_dir.path().join("with_include.c");
+        fs::write(&c_file, "#include \"header.h\"\nint main() { return global_var; }").unwrap();
+
+        let db = OpticDb::new(&db_path).unwrap();
+        let mut pp = Preprocessor::new(db);
+        pp.add_include_path(temp_dir.path().to_str().unwrap());
+        let tokens = pp.process(c_file.to_str().unwrap()).unwrap();
+
+        let arena_file = temp_dir.path().join("arena.bin");
+        let arena = Arena::new(arena_file.to_str().unwrap(), 1024).unwrap();
+        let mut parser = Parser::new(arena);
+        let result = parser.parse_tokens(tokens);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_parse_file_with_nested_includes() {
+        let (temp_dir, db_path) = create_test_env();
+        let inner = temp_dir.path().join("inner.h");
+        fs::write(&inner, "int inner_val = 42;").unwrap();
+
+        let outer = temp_dir.path().join("outer.h");
+        fs::write(&outer, "#include \"inner.h\"\nint outer_val = 1;").unwrap();
+
+        let c_file = temp_dir.path().join("nested.c");
+        fs::write(&c_file, "#include \"outer.h\"\nint main() { return inner_val + outer_val; }").unwrap();
+
+        let db = OpticDb::new(&db_path).unwrap();
+        let mut pp = Preprocessor::new(db);
+        pp.add_include_path(temp_dir.path().to_str().unwrap());
+        let tokens = pp.process(c_file.to_str().unwrap()).unwrap();
+
+        let arena_file = temp_dir.path().join("arena.bin");
+        let arena = Arena::new(arena_file.to_str().unwrap(), 1024).unwrap();
+        let mut parser = Parser::new(arena);
+        let result = parser.parse_tokens(tokens);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_parse_backwards_compatible_parse_method() {
+        let temp_file = NamedTempFile::new().unwrap();
+        let arena = Arena::new(temp_file.path(), 1024).unwrap();
+        let mut parser = Parser::new(arena);
+
+        let source = "void foo() { int x = 1; }";
         let result = parser.parse(source);
         assert!(result.is_ok());
     }

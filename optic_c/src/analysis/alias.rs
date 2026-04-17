@@ -149,13 +149,16 @@ impl<'a> AliasAnalyzer<'a> {
     }
 
     pub fn is_noalias(&self, ptr_a: NodeOffset, ptr_b: NodeOffset) -> bool {
-        let mut provenance_a = HashSet::new();
-        let mut provenance_b = HashSet::new();
+        let mut visited_a = HashSet::new();
+        let mut visited_b = HashSet::new();
 
-        let pa = self.trace_provenance(ptr_a, &mut provenance_a);
-        let pb = self.trace_provenance(ptr_b, &mut provenance_b);
+        let pa = self.trace_provenance(ptr_a, &mut visited_a);
+        let pb = self.trace_provenance(ptr_b, &mut visited_b);
 
-        provenance_a.is_disjoint(&provenance_b) && pa.is_noalias && pb.is_noalias
+        let set_a: HashSet<u32> = pa.provenance.iter().copied().collect();
+        let set_b: HashSet<u32> = pb.provenance.iter().copied().collect();
+
+        set_a.is_disjoint(&set_b) && pa.is_noalias && pb.is_noalias
     }
 
     pub fn get_affine_grade(&self, ptr: NodeOffset) -> AffineGrade {
@@ -535,7 +538,8 @@ mod tests {
         let node_b = arena.alloc(make_node(AST_VAR_DECL, 0, NodeOffset(0), NodeOffset(0))).unwrap();
 
         let analyzer = AliasAnalyzer::new(&arena);
-        assert!(!analyzer.is_noalias(node_a, node_b));
+        // Two disjoint VAR_DECL nodes have no shared provenance, so they ARE noalias
+        assert!(analyzer.is_noalias(node_a, node_b));
 
         drop(arena);
         let _ = fs::remove_file(path);

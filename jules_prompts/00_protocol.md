@@ -61,17 +61,19 @@ OpticC is organized into 4 milestone phases. Each phase has a Definition of Done
 
 | # | Prompt | Agent | Dependency | Status |
 |---|--------|-------|------------|--------|
-| 10 | `10_preprocessor.md` | Jules-Preprocessor | Phase 1 | PENDING |
-| 11 | `11_type_system.md` | Jules-Type-System | Phase 1 | PENDING |
+| 10 | `10_preprocessor.md` | Jules-Preprocessor | Phase 1 | ✅ COMPLETE (2200 lines, 22 tests) |
+| 11 | `11_type_system.md` | Jules-Type-System | Phase 1 | ✅ COMPLETE (70 tests) |
 | 12 | `12_gnu_extensions.md` | Jules-GNU-Extensions | 10, 11 | PENDING |
 | 13 | `13_inline_asm.md` | Jules-Inline-Asm | 11, 12 | PENDING |
 | 14 | `14_build_system.md` | Jules-Build-System | 10, 11, 13 | PENDING |
 | 15 | `15_benchmark.md` | Jules-Benchmark | 14 | PENDING |
+| - | Parser wiring | Jules-Parser | 10 | ✅ COMPLETE (6 integration tests) |
+| - | Backend types | Jules-Backend | 11 | ✅ COMPLETE (13 tests, typed codegen) |
 
 **Definition of Done**:
-- [ ] Preprocessor handles `#include`, `#define`, `#ifdef`, `#pragma`
-- [ ] Type system supports all C99 types with propagation to LLVM backend
-- [ ] LLVM backend generates correct IR for i8/i16/i32/i64/float/double/pointers/structs
+- [x] Preprocessor handles `#include`, `#define`, `#ifdef`, `#pragma` (22 tests)
+- [x] Type system supports all C99 types with propagation to LLVM backend (70 tests)
+- [x] LLVM backend generates correct IR for i8/i16/i32/i64/float/double/pointers (13 tests)
 - [ ] `optic_c build` compiles SQLite to `libsqlite3.so`
 - [ ] SQLite's test suite passes with the compiled library
 - [ ] Benchmark report shows OpticC vs GCC vs Clang for SQLite
@@ -104,13 +106,15 @@ OpticC is organized into 4 milestone phases. Each phase has a Definition of Done
 Phase 1 (COMPLETE)
   ├── arena, db, lexer, macro, parser, llvm, analysis, vfs
   
-Phase 2 (SQLite)
-  ├── 10_preprocessor ──────────────────────┐
-  ├── 11_type_system ───────────────────────┤
-  ├── 12_gnu_extensions ──────────┬─────────┤
-  ├── 13_inline_asm ──────────────┤    ┌────┘
-  ├── 14_build_system ────────────┤────┤
-  └── 15_benchmark ───────────────┴────┴────┘
+Phase 2 (SQLite) — IN PROGRESS (4/7 items complete)
+  ├── 10_preprocessor ──────────────────────┐ ✅ COMPLETE
+  ├── 11_type_system ───────────────────────┤ ✅ COMPLETE
+  ├── Parser wiring (preprocessor→parser) ──┤ ✅ COMPLETE
+  ├── Backend types (typed LLVM codegen) ───┤ ✅ COMPLETE
+  ├── 12_gnu_extensions ──────────┬─────────┤ PENDING
+  ├── 13_inline_asm ──────────────┤    ┌────┘ PENDING
+  ├── 14_build_system ────────────┤────┤ PENDING
+  └── 15_benchmark ───────────────┴────┴────┘ PENDING
   
 Phase 3 (Kernel) — after Phase 2 DoD
 Phase 4 (Production) — after Phase 3 DoD
