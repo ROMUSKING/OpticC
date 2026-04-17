@@ -5,8 +5,8 @@ Tech Stack: Rust, inkwell.
 The Linux kernel contains thousands of `asm volatile` blocks for architecture-specific operations. Without inline assembly support, OpticC cannot compile kernel code. This phase follows GNU Extensions and is required for the Linux kernel milestone.
 
 ## YOUR DIRECTIVES
-1. Read `.optic/spec/parser.yaml`, `.optic/spec/gnu_extensions.yaml`, and `.optic/spec/backend_llvm.yaml`.
-2. Implement inline assembly support in `src/frontend/inline_asm.rs` and `src/backend/asm_lowering.rs`.
+1. Read `src/frontend/parser.rs`, `src/frontend/gnu_extensions.rs`, `src/frontend/inline_asm.rs`, and `src/backend/llvm.rs`.
+2. Implement or refine inline assembly support in `src/frontend/inline_asm.rs` and wire lowering through the existing LLVM backend in `src/backend/llvm.rs`.
 3. The implementation MUST handle:
    - Basic asm: `asm volatile("instruction");` — no operands
    - Extended asm: `asm volatile(template : outputs : inputs : clobbers);`
@@ -18,7 +18,7 @@ The Linux kernel contains thousands of `asm volatile` blocks for architecture-sp
    - Constraint letters: `r`, `m`, `i`, `n`, `g`, `X`
 4. Update the parser to recognize `asm` and `__asm__` keywords with their operand syntax.
 5. Update the LLVM backend to lower inline asm using `inkwell::values::InlineAsm`.
-6. Follow the ASYNC BRANCH PROTOCOL to document the Inline Assembly API in `.optic/spec/inline_asm.yaml`.
+6. Update this prompt with any confirmed inline-assembly parsing or lowering behavior.
 
 ## CRITICAL DESIGN DECISIONS
 - **Template parsing**: Asm templates are opaque strings. Don't try to parse the assembly instructions — pass them through to LLVM.

@@ -24,19 +24,17 @@ Full GNU C, inline asm, Kbuild, 30M+ LOC
 Optimization, DWARF, LTO, cross-compilation
 
 ## IMMEDIATE TASKS (for new sessions)
-1. Read `00_protocol.md` to understand the roadmap and dependency graph.
-2. Read ALL `.optic/spec/*.yaml` files to understand current API contracts.
-3. Read ALL `.optic/tasks/*.md` files to understand completion status.
-4. Identify which Phase 2 prompts are pending and execute them in dependency order.
-5. Independent tasks (10_preprocessor, 11_type_system) can run in parallel.
-6. Dependent tasks (12, 13, 14, 15) must wait for their dependencies.
+1. Read `00_protocol.md` for the current workflow rules.
+2. Inspect `README.md`, `QA_VERIFICATION.md`, `Cargo.toml`, and the relevant `src/` modules.
+3. Use the files in `jules_prompts/` as the shared agent memory for status, lessons learned, and blockers.
+4. Prioritize stabilization work: failing tests, stale assumptions, SQLite-scale edge cases, and integration gaps.
+5. Prefer independent fixes where possible, but verify dependencies before touching shared compiler stages.
 
 ## LESSONS LEARNED (Post-Execution Addendum)
-- **Spec file schema**: The initial spec files were created as empty placeholders. This caused downstream agents (Parser, Lexer/Macro, Backend) to skip documenting their APIs. Ensure ALL spec files have a clear template with required fields (semantic_description, memory_layout, side_effects, llm_usage_examples) that agents MUST fill in.
-- **Dependency versions matter**: pin exact versions in Cargo.toml. redb 4.0 and inkwell 0.9 had breaking API changes that caused build failures. Consider adding version compatibility notes to the spec files.
-- **lib.rs module visibility**: The VFS module was commented out in lib.rs. When creating the initial module structure, ensure all modules are properly exported.
-- **Edition**: Use `edition = "2021"` instead of `2024` for maximum compatibility. The `2024` edition may not be available in all Rust toolchains.
-- **git branch naming**: Use descriptive branch names per squad (e.g., `squad/memory_infra`) rather than session-based names for easier PR management.
-- **Three tokenizers**: lexer.rs, macro_expander.rs, and parser.rs had DIFFERENT Token types. The preprocessor (phase 2) should unify these.
-- **i32-only backend**: The LLVM backend treats all values as i32. The type system (phase 2) must fix this before SQLite compilation.
-- **Preprocessor is #1 priority**: Without #include resolution, no real C project can be compiled.
+- **Prompt files are the live coordination layer**: this repo snapshot does not ship the old `.optic` spec/task directories, so status should be kept current in `jules_prompts/` instead.
+- **Dependency versions matter**: `redb` 4.0 and `inkwell` 0.9 both have sharp edges; keep compatibility notes close to the affected prompt.
+- **lib.rs module visibility**: the VFS module remains commented out in the library export list, so treat it as optional until re-enabled and verified.
+- **Edition**: keep `edition = "2021"` for compatibility with the current toolchain.
+- **Three tokenizers still exist**: lexer, macro expander, and parser token handling remain a coordination risk.
+- **Typed backend exists now**: focus on correctness gaps such as structs, attributes, and complex real-world inputs rather than the old i32-only baseline.
+- **Preprocessor remains a major priority**: SQLite-scale macros are still the most likely blocker for large-source compilation.

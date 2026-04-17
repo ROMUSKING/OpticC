@@ -4,7 +4,7 @@ Tech Stack: Rust, redb.
 YOUR DIRECTIVES:
 1. Implement the embedded KV-store using `redb` in `src/db.rs` for header deduplication.
 2. Provide a clean API for inserting and querying file hashes and macro definitions.
-3. Follow the ASYNC BRANCH PROTOCOL to update `.optic/spec/db_infra.yaml` with your DB API.
+3. Update this prompt with any confirmed DB API changes, caveats, or verification notes.
 
 ## LESSONS LEARNED (Post-Execution Addendum)
 - **redb 4.0 API changes**: Import `use redb::ReadableDatabase;` trait. Add `From` impls for `redb::TransactionError`, `redb::TableError`, `redb::StorageError`, and `redb::CommitError`.

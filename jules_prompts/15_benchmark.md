@@ -5,12 +5,8 @@ Tech Stack: Rust, bash, GCC, Clang, hyperfine, LLVM.
 OpticC needs to prove it can compete with established compilers. This phase creates a comprehensive benchmark suite that compares OpticC against GCC and Clang across multiple dimensions: compile time, output quality, and correctness.
 
 ## YOUR DIRECTIVES
-1. Read ALL existing `.optic/spec/*.yaml` files to understand the full OpticC pipeline.
-2. Create a benchmark suite in `benchmarks/` with the following components:
-   - `benchmarks/runner.rs` — benchmark runner
-   - `benchmarks/suites/` — benchmark test suites
-   - `benchmarks/results/` — result storage
-   - `benchmarks/report.md` — generated report template
+1. Read `README.md`, `src/main.rs`, `src/build/mod.rs`, and `src/benchmark/mod.rs` to understand the current pipeline.
+2. Extend the benchmark suite in `src/benchmark/mod.rs` and use generated output directories for results and reports.
 3. The benchmark suite MUST compare OpticC against GCC and Clang on:
    - **Compile time**: Time to compile each test file
    - **Output size**: Size of generated binary (for executables/libraries)
@@ -30,7 +26,7 @@ OpticC needs to prove it can compete with established compilers. This phase crea
    optic_c benchmark report --input results/ --output report.md
    ```
 6. Generate comparison reports in Markdown and JSON formats.
-7. Follow the ASYNC BRANCH PROTOCOL to document the Benchmark API in `.optic/spec/benchmark.yaml`.
+7. Update this prompt with any benchmark API changes, report format updates, or fresh measurement notes.
 
 ## CRITICAL DESIGN DECISIONS
 - **Compiler invocation**: Each compiler is invoked with equivalent optimization levels:
@@ -112,7 +108,7 @@ OpticC needs to prove it can compete with established compilers. This phase crea
 - [x] CLI subcommand — `optic_c benchmark --suite all --compilers all --output results/ --runs 5`
 - [x] Dependencies — serde, serde_json added to Cargo.toml
 - [x] 31 tests passing (exceeds 15 minimum)
-- [x] `.optic/spec/benchmark.yaml` updated with actual API
+- [x] Benchmark prompt notes updated with actual API
 - [x] `src/main.rs` updated with benchmark CLI subcommand
 - [x] `src/lib.rs` updated to export benchmark module
 

@@ -5,8 +5,8 @@ Tech Stack: Rust, LLVM, CMake/Make (for benchmarking).
 OpticC currently compiles single files to `.ll` output. Real projects (SQLite, Linux kernel) require multi-file compilation, linking, and build system integration. This phase bridges the gap from single-file compilation to full project builds.
 
 ## YOUR DIRECTIVES
-1. Read `.optic/spec/preprocessor.yaml`, `.optic/spec/backend_llvm.yaml`, and `.optic/spec/type_system.yaml`.
-2. Implement multi-file compilation in `src/build/mod.rs` and `src/build/linker.rs`.
+1. Read `src/frontend/preprocessor.rs`, `src/backend/llvm.rs`, `src/types/`, and the existing build module.
+2. Implement or refine multi-file compilation in `src/build/mod.rs`, using the system toolchain for object generation and linking where needed.
 3. The build system MUST support:
    - **Multi-file compilation**: Compile multiple `.c` files to `.ll` or `.o` files
    - **Object file generation**: Use LLVM's MCJIT or `llc` to generate `.o` files from `.ll`
@@ -25,7 +25,7 @@ OpticC currently compiles single files to `.ll` output. Real projects (SQLite, L
    ```
    optic_c generate-makefile --src-dir ./src --output Makefile
    ```
-6. Follow the ASYNC BRANCH PROTOCOL to document the Build System API in `.optic/spec/build_system.yaml`.
+6. Update this prompt with any confirmed build-system behavior, CLI changes, or integration blockers.
 
 ## CRITICAL DESIGN DECISIONS
 - **LLVM toolchain**: Use `llc` (LLVM static compiler) and `clang` (for linking) as external tools. Don't reimplement linking.
@@ -86,8 +86,8 @@ OpticC currently compiles single files to `.ll` output. Real projects (SQLite, L
 - [x] `rayon = "1.10"` added to Cargo.toml
 - [x] `src/lib.rs` updated to export build module
 - [x] 22 comprehensive tests (exceeds 15 minimum)
-- [x] `.optic/spec/build_system.yaml` updated with actual API
-- [x] `.optic/tasks/build_system.md` updated with completion status
+- [x] Build-system prompt notes updated with actual API and status
+- [x] The repository now exposes the build module through the library and CLI
 
 ### Test Results
 - 22 build module tests: ALL PASSING

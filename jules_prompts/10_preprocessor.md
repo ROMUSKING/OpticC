@@ -5,7 +5,7 @@ Tech Stack: Rust, redb, SHA-256.
 OpticC currently has a working parser and LLVM backend but CANNOT compile real C code because it lacks a preprocessor. SQLite compilation requires full preprocessor support. This phase is the #1 priority for reaching the SQLite milestone.
 
 ## YOUR DIRECTIVES
-1. Read `.optic/spec/memory_infra.yaml`, `.optic/spec/db_infra.yaml`, `.optic/spec/lexer_macro.yaml`, and `.optic/spec/parser.yaml` to understand existing APIs.
+1. Read `src/arena.rs`, `src/db.rs`, `src/frontend/lexer.rs`, `src/frontend/macro_expander.rs`, and `src/frontend/parser.rs` to understand existing APIs.
 2. Implement the C Preprocessor in `src/frontend/preprocessor.rs`.
 3. The preprocessor MUST handle:
    - `#include <file>` and `#include "file"` — with search paths and deduplication via redb
@@ -20,7 +20,7 @@ OpticC currently has a working parser and LLVM backend but CANNOT compile real C
    - `__LINE__`, `__FILE__`, `__DATE__`, `__TIME__`, `__STDC__`, `__STDC_VERSION__` — predefined macros
 4. Integrate with the redb KV-store for `#include` deduplication (hash each included file, skip duplicates).
 5. The preprocessor should output a token stream that feeds into the parser (replace the parser's internal lex() method).
-6. Follow the ASYNC BRANCH PROTOCOL to document the Preprocessor API in `.optic/spec/preprocessor.yaml`.
+6. Update this prompt with any confirmed preprocessor API changes, limitations, or SQLite blockers.
 
 ## CRITICAL DESIGN DECISIONS
 - **Two-phase approach**: First pass resolves `#include` and builds a translation unit. Second pass expands macros and evaluates conditionals.
@@ -63,7 +63,7 @@ OpticC currently has a working parser and LLVM backend but CANNOT compile real C
 - **Token-based macro expansion**: Macros expand to token streams, not text, for correct `##` and `#` handling
 - **Predefined macros**: `__LINE__`, `__FILE__`, `__DATE__`, `__TIME__`, `__STDC__`, `__STDC_VERSION__` all implemented
 
-### Phase 3 Enhancements (PR #20)
+### Recent Enhancements
 - **Function-like macro fix**: C standard requires NO whitespace between name and `(`. Fixed incorrect detection.
 - **`__VA_ARGS__` support**: Variadic macros now properly replace `__VA_ARGS__` with variadic arguments.
 - **`#pragma once` support**: Header guard detection now recognizes `#pragma once` directive.

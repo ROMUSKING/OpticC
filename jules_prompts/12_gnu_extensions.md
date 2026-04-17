@@ -5,7 +5,7 @@ Tech Stack: Rust.
 The Linux kernel uses C89 + GNU C extensions, NOT standard C99. Without GNU extension support, OpticC cannot parse kernel source. This phase is required for the Linux kernel milestone.
 
 ## YOUR DIRECTIVES
-1. Read `.optic/spec/parser.yaml`, `.optic/spec/type_system.yaml`, and `.optic/spec/preprocessor.yaml`.
+1. Read `src/frontend/parser.rs`, `src/types/`, and `src/frontend/preprocessor.rs`.
 2. Implement GNU C extensions in `src/frontend/gnu_extensions.rs` and extend the parser.
 3. The following extensions MUST be supported:
    - `__attribute__((...))` — function, variable, and type attributes
@@ -36,7 +36,7 @@ The Linux kernel uses C89 + GNU C extensions, NOT standard C99. Without GNU exte
    - Statement expressions → LLVM basic blocks with phi nodes
    - `typeof` → type resolution
    - Builtins → LLVM intrinsics or inline expansion
-6. Follow the ASYNC BRANCH PROTOCOL to document the GNU Extensions API in `.optic/spec/gnu_extensions.yaml`.
+6. Update this prompt with any confirmed GNU-extension coverage, caveats, or missing lowering support.
 
 ## CRITICAL DESIGN DECISIONS
 - **Attribute parsing**: Attributes appear in multiple positions (before/after declarator). Parse them flexibly.

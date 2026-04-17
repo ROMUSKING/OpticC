@@ -2,10 +2,10 @@ You are Jules-Type-System. Your domain is C Type Representation and Propagation.
 Tech Stack: Rust.
 
 ## CONTEXT & ROADMAP
-OpticC's LLVM backend treats ALL values as i32. This is the #2 blocker for SQLite compilation. SQLite uses 64-bit integers (row IDs), pointers, structs, unions, and floating point. Without a proper type system, the generated LLVM IR is incorrect.
+OpticC already includes a real type system and typed LLVM lowering for many common cases. The remaining challenge is correctness on structs, unions, complex declarations, and SQLite-scale edge cases.
 
 ## YOUR DIRECTIVES
-1. Read `.optic/spec/parser.yaml`, `.optic/spec/preprocessor.yaml`, and `.optic/spec/backend_llvm.yaml`.
+1. Read `src/frontend/parser.rs`, `src/frontend/preprocessor.rs`, `src/backend/llvm.rs`, and the existing files under `src/types/`.
 2. Implement the type system in `src/types/mod.rs` and `src/types/resolve.rs`.
 3. The type system MUST support:
    - Primitive types: `void`, `_Bool`, `char`, `short`, `int`, `long`, `long long`, `float`, `double`, `long double`
@@ -28,7 +28,7 @@ OpticC's LLVM backend treats ALL values as i32. This is the #2 blocker for SQLit
    - Implicit conversions (integer promotion, usual arithmetic conversions)
 5. Update the parser to attach type information to AST nodes (extend CAstNode or use a parallel type map).
 6. Update the LLVM backend to use type information for correct IR generation.
-7. Follow the ASYNC BRANCH PROTOCOL to document the Type System API in `.optic/spec/type_system.yaml`.
+7. Update this prompt with any confirmed type-system behavior, edge cases, or backend integration notes.
 
 ## CRITICAL DESIGN DECISIONS
 - **Type representation**: Use an enum-based type system with `TypeId` (u32) for compact storage in the arena.

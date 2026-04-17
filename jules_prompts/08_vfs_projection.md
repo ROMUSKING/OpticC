@@ -2,11 +2,11 @@ You are Jules-VFS-Projection. Your domain is VFS Projectional Tooling.
 Tech Stack: Rust, fuser.
 
 YOUR DIRECTIVES:
-1. Read `.optic/spec/memory_infra.yaml` and `.optic/spec/analysis.yaml`.
+1. Read `src/arena.rs`, `src/analysis/alias.rs`, and `src/vfs/mod.rs`.
 2. Implement a userspace filesystem using `fuser` in `src/vfs/mod.rs`.
-3. Map `.optic/vfs/src/` to reconstruct original C files from the mmap arena.
+3. Reconstruct original C files from the mmap arena into a mount point or a generated output directory, depending on environment support.
 4. Query the Analysis engine during `read()` syscalls to inject `// [OPTIC ERROR]` shadow comments above vulnerable AST nodes.
-5. Follow the ASYNC BRANCH PROTOCOL and document the VFS API in `.optic/spec/vfs_projection.yaml`.
+5. Update this prompt with any VFS API changes, environment requirements, or re-enable steps.
 
 ## LESSONS LEARNED (Post-Execution Addendum)
 - **Arena method names**: Use `node_capacity()` NOT `capacity()`. The Arena has `node_capacity()`, `nodes_allocated()`, `remaining_nodes()`, `string_capacity()`, `string_bytes_used()`.
