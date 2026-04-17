@@ -63,6 +63,12 @@ OpticC currently has a working parser and LLVM backend but CANNOT compile real C
 - **Token-based macro expansion**: Macros expand to token streams, not text, for correct `##` and `#` handling
 - **Predefined macros**: `__LINE__`, `__FILE__`, `__DATE__`, `__TIME__`, `__STDC__`, `__STDC_VERSION__` all implemented
 
+### Phase 3 Enhancements (PR #20)
+- **Function-like macro fix**: C standard requires NO whitespace between name and `(`. Fixed incorrect detection.
+- **`__VA_ARGS__` support**: Variadic macros now properly replace `__VA_ARGS__` with variadic arguments.
+- **`#pragma once` support**: Header guard detection now recognizes `#pragma once` directive.
+- **Parameter placeholder handling**: Improved macro expansion with proper parameter substitution.
+
 ## KNOWN LIMITATIONS (SQLite Testing)
 - **Complex macro patterns**: sqlite3.c uses advanced macro patterns that the current preprocessor doesn't handle:
   - `SQLITE_API` / `SQLITE_EXTERN` — attribute-style macros with empty definitions
