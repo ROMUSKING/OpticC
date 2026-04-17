@@ -1,216 +1,52 @@
 api_version: "1.0"
-squad: "memory_infra"
-domain: "Arena Allocator"
-
-semantic_description: >
-  The Arena is a zero-serialization memory-mapped allocator designed for
-  storing C AST nodes during compilation. It uses memmap2 to create a
-  contiguous memory-mapped file that holds both node data and an embedded
-  string/payload pool. Nodes are allocated sequentially via bump allocation
-  with O(1) amortized cost. All node references use NodeOffset (u32 newtype)
-  instead of raw pointers, enabling safe cross-process persistence and
-  eliminating pointer invalidation on remap. The arena is partitioned into
-  a node region (indices 1..N) and a string/payload region (indices N+1..M).
-  Index 0 is reserved as the null sentinel.
-
-memory_layout: |
-  +------------------+------------------------------------------+
-  | Region           | Contents                                 |
-  +------------------+------------------------------------------+
-  | Slot 0           | Reserved (null sentinel)                 |
-  | Slots 1..N       | CAstNode structures (node_capacity)      |
-  | Slot N+1         | Reserved (string region start marker)    |
-  | Slots N+2..M     | String/payload pool (string_capacity)    |
-  +------------------+------------------------------------------+
-
-  CAstNode (repr(C), fixed-size):
-    Offset  Size  Field
-    0       2     kind: u16              (AST node type enum)
-    2       2     flags: NodeFlags       (bitflags: IS_VALID, HAS_ERROR, IS_SYNTHETIC, HAS_PAYLOAD)
-    4       4     parent: NodeOffset     (u32 offset to parent node)
-    8       4     first_child: NodeOffset
-    12      4     last_child: NodeOffset
-    16      4     next_sibling: NodeOffset
-    20      4     prev_sibling: NodeOffset
-    24      2     child_count: u16
-    26      2     (padding)
-    28      4     data: u32              (inline value: operator code, string offset, or literal)
-    32      4     source.file_id: u32
-    36      4     source.line: u32
-    40      4     source.column: u32
-    44      4     source.length: u32
-    48      4     payload_offset: NodeOffset
-    52      4     payload_len: u32
-    56      8     (padding to 64 for alignment)
-    Total: 64 bytes per node
-
-  String/Payload slot format:
-    Offset  Size  Field
-    0       4     length: u32            (byte length of stored data)
-    4       L     data: [u8; L]          (UTF-8 string or arbitrary bytes)
-    L       P     (padding to slot boundary)
-
-side_effects:
-  - "Creates and truncates the backing file on Arena::new()"
-  - "Memory-mapped region is flushed to disk on Drop"
-  - "alloc() mutates the mmap region by writing CAstNode at the next slot"
-  - "store_string() and store_payload() mutate the string pool region"
-  - "flush() explicitly syncs mmap changes to the backing file"
-  - "No deallocation is supported; arena is append-only (bump allocator)"
-
-llm_usage_examples:
-  - name: "Basic node allocation"
-    description: "Create an arena and allocate AST nodes with source location"
-    code: |
-      use optic_c::arena::{Arena, CAstNode, NodeOffset, SourceLocation, NodeFlags};
-
-      let mut arena = Arena::new("/tmp/ast.arena", 1_000_000)?;
-
-      let node = CAstNode::new(1)
-          .with_source(SourceLocation {
-              file_id: 0,
-              line: 42,
-              column: 5,
-              length: 12,
-          })
-          .with_flags(NodeFlags::IS_VALID);
-
-      let offset = arena.alloc(node).unwrap();
-      let retrieved = arena.get(offset).unwrap();
-      assert_eq!(retrieved.kind, 1);
-
-  - name: "String interning"
-    description: "Store identifier names in the string pool"
-    code: |
-      let mut arena = Arena::new("/tmp/ast.arena", 1_000_000)?;
-
-      let ident_offset = arena.store_string("printf")?;
-      let name = arena.get_string(ident_offset).unwrap();
-      assert_eq!(name, "printf");
-
-  - name: "Payload attachment"
-    description: "Attach binary payload (e.g., literal values) to nodes"
-    code: |
-      let mut arena = Arena::new("/tmp/ast.arena", 1_000_000)?;
-
-      let literal_bytes = b"\x00\x00\x00\x2A";
-      let (payload_off, payload_len) = arena.store_payload(literal_bytes)?;
-
-      let node = CAstNode {
-          kind: 10,
-          payload_offset: payload_off,
-          payload_len,
-          flags: NodeFlags::IS_VALID | NodeFlags::HAS_PAYLOAD,
-          ..CAstNode::new(10)
-      };
-      let node_off = arena.alloc(node)?;
-
-      let data = arena.get_payload(payload_off, payload_len).unwrap();
-      assert_eq!(data, literal_bytes);
-
-  - name: "High-speed bulk allocation"
-    description: "Allocate 10 million nodes for large translation units"
-    code: |
-      use std::time::Instant;
-
-      let mut arena = Arena::new("/tmp/large.arena", 10_000_001)?;
-      let node = CAstNode::new(0);
-
-      let start = Instant::now();
-      for _ in 0..10_000_000 {
-          arena.alloc(node);
-      }
-      let elapsed = start.elapsed();
-      println!("10M nodes in {:?}", elapsed);
-
-  - name: "Node tree traversal"
-    description: "Walk parent-child-sibling links using offsets"
-    code: |
-      fn visit_tree(arena: &Arena, offset: NodeOffset, depth: usize) {
-          let node = arena.get(offset).unwrap();
-          println!("{}kind={}", "  ".repeat(depth), node.kind);
-
-          let mut child = node.first_child;
-          while !child.is_null() {
-              let child_node = arena.get(child).unwrap();
-              visit_tree(arena, child, depth + 1);
-              child = child_node.next_sibling;
-          }
-      }
-
-api_reference:
-  types:
-    NodeOffset:
-      description: "Newtype wrapper around u32 representing an offset into the arena"
-      fields:
-        - "pub u32: raw offset value"
-      constants:
-        - "NULL: NodeOffset = NodeOffset(0)"
-      methods:
-        - "is_null(&self) -> bool"
-
-    SourceLocation:
-      description: "Source position metadata for an AST node"
-      fields:
-        - "file_id: u32"
-        - "line: u32"
-        - "column: u32"
-        - "length: u32"
-      methods:
-        - "unknown() -> Self"
-
-    NodeFlags:
-      description: "Bitflags for node properties"
-      flags:
-        - "NONE: 0"
-        - "IS_VALID: 1 << 0"
-        - "HAS_ERROR: 1 << 1"
-        - "IS_SYNTHETIC: 1 << 2"
-        - "HAS_PAYLOAD: 1 << 3"
-
-    CAstNode:
-      description: "Memory-mapped AST node stored in the arena"
-      fields:
-        - "kind: u16"
-        - "flags: NodeFlags"
-        - "parent: NodeOffset"
-        - "first_child: NodeOffset"
-        - "last_child: NodeOffset"
-        - "next_sibling: NodeOffset"
-        - "prev_sibling: NodeOffset"
-        - "child_count: u16"
-        - "data: u32"
-        - "source: SourceLocation"
-        - "payload_offset: NodeOffset"
-        - "payload_len: u32"
-      methods:
-        - "new(kind: u16) -> Self"
-        - "with_source(self, SourceLocation) -> Self"
-        - "with_flags(self, NodeFlags) -> Self"
-
-    ArenaError:
-      description: "Error type for arena operations"
-      variants:
-        - "ZeroCapacity"
-        - "AllocationFull"
-        - "StringPoolFull"
-        - "InvalidOffset"
-        - "IoError(io::Error)"
-
-    Arena:
-      description: "Memory-mapped bump allocator for AST nodes"
-      methods:
-        - "new<P: AsRef<Path>>(path: P, node_capacity: u32) -> Result<Self, ArenaError>"
-        - "alloc(&mut self, node: CAstNode) -> Option<NodeOffset>"
-        - "get(&self, offset: NodeOffset) -> Option<&CAstNode>"
-        - "get_mut(&mut self, offset: NodeOffset) -> Option<&mut CAstNode>"
-        - "store_string(&mut self, s: &str) -> Option<NodeOffset>"
-        - "get_string(&self, offset: NodeOffset) -> Option<&str>"
-        - "store_payload(&mut self, data: &[u8]) -> Option<(NodeOffset, u32)>"
-        - "get_payload(&self, offset: NodeOffset, len: u32) -> Option<&[u8]>"
-        - "node_capacity(&self) -> u32"
-        - "nodes_allocated(&self) -> u32"
-        - "remaining_nodes(&self) -> u32"
-        - "string_capacity(&self) -> u32"
-        - "string_bytes_used(&self) -> u32"
-        - "flush(&self) -> io::Result<()>"
+structs:
+  - name: NodeOffset
+    fields:
+      - name: "0"
+        type: u32
+  - name: CAstNode
+    fields:
+      - name: kind
+        type: u16
+      - name: flags
+        type: NodeFlags
+      - name: parent
+        type: NodeOffset
+      - name: first_child
+        type: NodeOffset
+      - name: next_sibling
+        type: NodeOffset
+      - name: data
+        type: u32
+  - name: NodeFlags
+    description: "Bitflags representing node metadata"
+  - name: Arena
+functions:
+  - name: Arena::new
+    inputs:
+      - name: path
+        type: P (AsRef<Path>)
+      - name: capacity
+        type: u32
+    returns: io::Result<Self>
+  - name: Arena::alloc
+    inputs:
+      - name: self
+        type: &mut Arena
+      - name: node
+        type: CAstNode
+    returns: Option<NodeOffset>
+  - name: Arena::get
+    inputs:
+      - name: self
+        type: &Arena
+      - name: offset
+        type: NodeOffset
+    returns: Option<&CAstNode>
+  - name: Arena::get_mut
+    inputs:
+      - name: self
+        type: &mut Arena
+      - name: offset
+        type: NodeOffset
+    returns: Option<&mut CAstNode>

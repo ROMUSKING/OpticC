@@ -1,168 +1,85 @@
 api_version: "1.0"
-squad: "db_infra"
-domain: "Embedded KV-Store (redb)"
+squad: "infra"
+domain: "Header Deduplication"
 
-semantic_description: >
-  The OpticDb provides persistent key-value storage using redb (embedded database)
-  for header deduplication and macro definition tracking. It wraps a redb Database
-  with typed table definitions for file hashes and macros. The file_hashes table
-  maps SHA-256 hashes ([u8; 32]) to file paths (&str), enabling #include
-  deduplication by checking if a header has already been processed. The macros
-  table maps macro names (&str) to their definitions/expansions (&str), allowing
-  the frontend to track and retrieve macro definitions during preprocessing.
-  All operations use redb's transactional API with proper commit semantics,
-  ensuring ACID guarantees. The database is created or opened via OpticDb::new()
-  which initializes both tables if they don't exist.
+structs:
+  - name: DB
+    semantic_description: "Embedded key-value store using redb for header file deduplication and macro definition caching."
+    fields:
+      - name: db
+        type: Database
+        description: "Internal redb database handle."
 
-memory_layout: |
-  +------------------+------------------------------------------+
-  | Table            | Key Type          | Value Type             |
-  +------------------+------------------------------------------+
-  | file_hashes      | &[u8; 32]         | &str (file path)       |
-  | macros           | &str (macro name) | &str (macro definition)|
-  +------------------+------------------------------------------+
+functions:
+  - name: DB::new
+    semantic_description: "Opens or creates a new redb database at the specified path, initializing both the includes and symbols tables."
+    parameters:
+      - name: path
+        type: "&str"
+        description: "File path for the database."
+    returns:
+      type: "Result<Self, redb::Error>"
+      description: "A new DB instance or an error if initialization failed."
+    side_effects: "Creates the database file if it does not exist and initializes table schemas."
 
-  redb internal structure (copy-on-write B-tree):
-    - Data stored in sorted B-tree pages
-    - MVCC: concurrent readers don't block writers
-    - Crash-safe: write-ahead logging with atomic commit
-    - Zero-copy reads via AccessGuard (memory-mapped access)
+  - name: DB::get_file_hash
+    semantic_description: "Retrieves the cached AST offset for a previously seen file hash, enabling #include deduplication."
+    parameters:
+      - name: key
+        type: "&[u8; 32]"
+        description: "SHA-256 hash of the file path for deduplication."
+    returns:
+      type: "Result<Option<u32>, redb::Error>"
+      description: "The AST offset if the file has been seen before, or None."
+    llm_usage_examples:
+      - title: "Checking if a header was already processed"
+        code: |
+          let db = DB::new("cache.db").unwrap();
+          let hash = sha256(b"/usr/include/stdio.h");
+          if let Some(offset) = db.get_file_hash(&hash).unwrap() {
+              // Reuse AST at offset
+          }
 
-  Storage characteristics:
-    - Key: [u8; 32] = 32 bytes (SHA-256 hash)
-    - Key: &str = variable length (macro name, typically < 64 bytes)
-    - Value: &str = variable length (file path or macro definition)
-    - B-tree overhead: ~4KB per page, logarithmic lookup
+  - name: DB::insert_file_hash
+    semantic_description: "Records a file hash with its corresponding AST offset for future deduplication."
+    parameters:
+      - name: key
+        type: "&[u8; 32]"
+        description: "SHA-256 hash of the file path."
+      - name: offset
+        type: "u32"
+        description: "AST node offset where this file's AST begins."
+    returns:
+      type: "Result<(), redb::Error>"
+      description: "Ok on success."
+    side_effects: "Persists to disk on commit."
 
-side_effects:
-  - "Creates the database file on OpticDb::new() if it doesn't exist"
-  - "Creates file_hashes and macros tables on first open"
-  - "insert_file_hash() opens a write transaction and commits"
-  - "insert_macro() opens a write transaction and commits"
-  - "remove_file_hash() opens a write transaction and commits"
-  - "remove_macro() opens a write transaction and commits"
-  - "Read operations (get_*, contains_*) use read-only transactions (MVCC)"
-  - "Database file persists across process restarts"
-  - "No explicit close needed; Database drops cleanly"
+  - name: DB::get_macro_def
+    semantic_description: "Retrieves the cached expansion for a macro definition, avoiding redundant re-parsing."
+    parameters:
+      - name: key
+        type: "&str"
+        description: "The macro name (e.g., 'MAX_PATH')"
+    returns:
+      type: "Result<Option<String>, redb::Error>"
+      description: "The macro expansion string if found, or None."
+    llm_usage_examples:
+      - title: "Looking up a cached macro"
+        code: |
+          if let Some(expansion) = db.get_macro_def("MAX_PATH").unwrap() {
+              // Use cached expansion
+          }
 
-llm_usage_examples:
-  - name: "Include deduplication"
-    description: "Check if a header file has already been processed before parsing"
-    code: |
-      use optic_c::db::{OpticDb, DbError};
-      use sha2::{Sha256, Digest};
-
-      let db = OpticDb::new("/tmp/ocf_db.redb")?;
-
-      let content = std::fs::read("/usr/include/stdio.h")?;
-      let hash: [u8; 32] = Sha256::digest(&content).into();
-
-      if db.contains_file_hash(&hash)? {
-          println!("Already processed stdio.h, skipping");
-      } else {
-          db.insert_file_hash(&hash, "/usr/include/stdio.h")?;
-          println!("Processing stdio.h for the first time");
-      }
-
-  - name: "Macro tracking"
-    description: "Store and retrieve macro definitions during preprocessing"
-    code: |
-      use optic_c::db::{OpticDb, DbError};
-
-      let db = OpticDb::new("/tmp/ocf_db.redb")?;
-
-      // Store macro definitions encountered during preprocessing
-      db.insert_macro("MAX", "(a > b ? a : b)")?;
-      db.insert_macro("MIN", "(a < b ? a : b)")?;
-      db.insert_macro("PI", "3.14159265358979")?;
-
-      // Later, retrieve macro expansion when needed
-      if let Some(expansion) = db.get_macro("MAX")? {
-          println!("MAX expands to: {}", expansion);
-      }
-
-  - name: "Lookup by hash"
-    description: "Resolve a file hash back to its original path"
-    code: |
-      use optic_c::db::{OpticDb, DbError};
-
-      let db = OpticDb::new("/tmp/ocf_db.redb")?;
-
-      let hash = [0xAB; 32];
-      match db.get_file_path_by_hash(&hash)? {
-          Some(path) => println!("Hash corresponds to: {}", path),
-          None => println!("Hash not found in database"),
-      }
-
-  - name: "Database statistics"
-    description: "Monitor the number of tracked files and macros"
-    code: |
-      use optic_c::db::{OpticDb, DbError};
-
-      let db = OpticDb::new("/tmp/ocf_db.redb")?;
-
-      println!("Tracked files: {}", db.file_hash_count()?);
-      println!("Tracked macros: {}", db.macro_count()?);
-
-  - name: "Cleanup entries"
-    description: "Remove entries when files are no longer needed"
-    code: |
-      use optic_c::db::{OpticDb, DbError};
-
-      let db = OpticDb::new("/tmp/ocf_db.redb")?;
-
-      // Remove a file hash entry
-      if let Some(old_path) = db.remove_file_hash(&hash)? {
-          println!("Removed entry for: {}", old_path);
-      }
-
-      // Undefine a macro (#undef)
-      if let Some(old_def) = db.remove_macro("TEMP_MACRO")? {
-          println!("Undefine: was defined as '{}'", old_def);
-      }
-
-api_reference:
-  types:
-    DbError:
-      description: "Error type for database operations"
-      variants:
-        - "Redb(redb::Error)"
-        - "Io(std::io::Error)"
-      implements:
-        - "std::fmt::Display"
-        - "std::error::Error"
-        - "From<redb::Error>"
-        - "From<std::io::Error>"
-
-    Result<T>:
-      description: "Type alias for Result<T, DbError>"
-      definition: "std::result::Result<T, DbError>"
-
-    OpticDb:
-      description: "Main database wrapper managing the redb database for file deduplication and macro tracking"
-      fields:
-        - "db: Database (internal redb database handle)"
-      methods:
-        - "new<P: AsRef<Path>>(path: P) -> Result<Self> - Creates or opens a database at the specified path, initializing tables"
-        - "insert_file_hash(&self, hash: &[u8; 32], file_path: &str) -> Result<()> - Stores a file hash to path mapping"
-        - "get_file_path_by_hash(&self, hash: &[u8; 32]) -> Result<Option<String>> - Retrieves the file path for a given hash"
-        - "contains_file_hash(&self, hash: &[u8; 32]) -> Result<bool> - Checks if a hash exists in the database"
-        - "insert_macro(&self, name: &str, definition: &str) -> Result<()> - Stores a macro name to definition mapping"
-        - "get_macro(&self, name: &str) -> Result<Option<String>> - Retrieves the definition for a given macro name"
-        - "remove_file_hash(&self, hash: &[u8; 32]) -> Result<Option<String>> - Removes a file hash entry, returns old path if existed"
-        - "remove_macro(&self, name: &str) -> Result<Option<String>> - Removes a macro entry, returns old definition if existed"
-        - "file_hash_count(&self) -> Result<u64> - Returns the number of entries in the file_hashes table"
-        - "macro_count(&self) -> Result<u64> - Returns the number of entries in the macros table"
-
-  tables:
-    file_hashes:
-      description: "Maps SHA-256 content hashes to file paths for #include deduplication"
-      key_type: "&[u8; 32]"
-      value_type: "&str"
-      definition: "TableDefinition<&[u8; 32], &str> = TableDefinition::new(\"file_hashes\")"
-
-    macros:
-      description: "Maps macro names to their definitions/expansions for preprocessing tracking"
-      key_type: "&str"
-      value_type: "&str"
-      definition: "TableDefinition<&str, &str> = TableDefinition::new(\"macros\")"
+  - name: DB::insert_macro_def
+    semantic_description: "Stores a macro name with its expanded definition for future lookups."
+    parameters:
+      - name: key
+        type: "&str"
+        description: "The macro name."
+      - name: value
+        type: "&str"
+        description: "The expanded definition."
+    returns:
+      type: "Result<(), redb::Error>"
+      description: "Ok on success."
+    side_effects: "Persists to disk on commit."
