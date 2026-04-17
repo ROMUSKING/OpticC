@@ -4,6 +4,7 @@ use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::thread;
 
 use rayon::prelude::*;
 
@@ -13,6 +14,8 @@ use crate::db::OpticDb;
 use crate::frontend::parser::Parser as CParser;
 use crate::frontend::preprocessor::Preprocessor;
 use crate::types::TypeSystem;
+
+const LARGE_COMPILER_STACK_SIZE: usize = 64 * 1024 * 1024;
 
 #[derive(Debug)]
 pub enum BuildError {
@@ -446,6 +449,28 @@ fn compile_file_to_object(
     defines: &HashMap<String, String>,
     optimization: u32,
 ) -> Result<PathBuf, BuildError> {
+    let source = source.to_path_buf();
+    let temp_dir = temp_dir.to_path_buf();
+    let include_paths = include_paths.to_vec();
+    let defines = defines.clone();
+    let source_name = source.display().to_string();
+
+    thread::Builder::new()
+        .name(format!("optic-compile-{}", source.file_stem().and_then(|s| s.to_str()).unwrap_or("file")))
+        .stack_size(LARGE_COMPILER_STACK_SIZE)
+        .spawn(move || compile_file_to_object_impl(&source, &temp_dir, &include_paths, &defines, optimization))
+        .map_err(BuildError::IoError)?
+        .join()
+        .unwrap_or_else(|_| Err(BuildError::CompileError(source_name, "compiler worker panicked".to_string())))
+}
+
+fn compile_file_to_object_impl(
+    source: &Path,
+    temp_dir: &Path,
+    include_paths: &[PathBuf],
+    defines: &HashMap<String, String>,
+    optimization: u32,
+) -> Result<PathBuf, BuildError> {
     let stem = source
         .file_stem()
         .and_then(|s| s.to_str())
@@ -550,6 +575,34 @@ pub fn compile_single_file(
     include_paths: &[PathBuf],
     defines: &HashMap<String, String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let input_path = input_path.to_path_buf();
+    let output_path = output_path.to_path_buf();
+    let include_paths = include_paths.to_vec();
+    let defines = defines.clone();
+    let input_name = input_path.display().to_string();
+
+    thread::Builder::new()
+        .name(format!(
+            "optic-single-{}",
+            input_path.file_stem().and_then(|s| s.to_str()).unwrap_or("input")
+        ))
+        .stack_size(LARGE_COMPILER_STACK_SIZE)
+        .spawn(move || compile_single_file_impl(&input_path, &output_path, opt_level, &include_paths, &defines))
+        .map_err(|e| -> Box<dyn std::error::Error> { Box::new(e) })?
+        .join()
+        .unwrap_or_else(|_| Err(format!("Compilation worker panicked while compiling {}", input_name)))
+        .map_err(|e| -> Box<dyn std::error::Error> {
+            Box::new(std::io::Error::other(e))
+        })
+}
+
+fn compile_single_file_impl(
+    input_path: &Path,
+    output_path: &Path,
+    opt_level: u32,
+    include_paths: &[PathBuf],
+    defines: &HashMap<String, String>,
+) -> Result<(), String> {
     let db_path = format!("/tmp/optic_db_{}.redb", std::process::id());
     let db = OpticDb::new(&db_path).map_err(|e| format!("Failed to create database: {}", e))?;
 
@@ -574,10 +627,7 @@ pub fn compile_single_file(
 
     let mut parser = CParser::new(arena);
     let ast_root = parser.parse_tokens(tokens).map_err(|e| {
-        format!(
-            "Parse error at line {}, column {}: {}",
-            e.line, e.column, e.message
-        )
+        format!("Parse error at line {}, column {}: {}", e.line, e.column, e.message)
     })?;
 
     let context = inkwell::context::Context::create();
