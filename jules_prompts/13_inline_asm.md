@@ -55,9 +55,9 @@ The repository already includes inline-assembly parsing support. The current foc
 - ✅ Parsing: `parse_asm_stmt()` in `src/frontend/inline_asm.rs` handles basic, extended, and goto asm
 - ✅ AST nodes: kind=207 (ASM_STMT), 208 (output), 209 (input), 210 (clobber), 211 (goto label)
 - ✅ `parse_statement()` dispatches `asm`/`__asm__`/`__asm` to `parse_asm_stmt()`
-- ❌ **CODEGEN NOT YET IMPLEMENTED**: Backend `lower_stmt` does not yet handle kind=207
+- ✅ **CODEGEN IMPLEMENTED**: `lower_asm_stmt` in backend dispatches kind=207, reads template from arena string, walks operand children to build LLVM constraint string, creates InlineAsm via `context.create_inline_asm()`, calls via `build_indirect_call()`, stores output operands to lvalue pointers
 
-## CODEGEN IMPLEMENTATION PLAN (Milestone 4)
+## CODEGEN IMPLEMENTATION (Milestone 4 — COMPLETED)
 The inline asm codegen path should be implemented in `src/backend/llvm.rs`:
 
 1. **Add `lower_asm_stmt` method**: Match on kind=207 in `lower_stmt` dispatch.

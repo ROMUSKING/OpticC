@@ -51,7 +51,7 @@ The parser now chains child nodes entirely via first_child chains, not via next_
 - [ ] **printf/variadic**: Auto-declaration with variadic signature is incorrect for most libc functions. Need proper declaration matching for common functions.
 
 ### KERNEL-PATH NEXT STEPS (Phase 3, Milestones 4–7)
-- [ ] **Inline asm codegen (M4)**: Lower ASM_STMT (kind=207) to LLVM `call asm`. Read template from arena string, build constraint string from output/input operand nodes, pass clobbers. Use `inkwell::values::InlineAsm::get()`.
+- [x] **Inline asm codegen (M4)**: `lower_asm_stmt` implemented. Reads template from arena, builds constraint string from operand children, creates InlineAsm via `context.create_inline_asm()`, calls via `build_indirect_call()`, stores outputs to lvalue pointers. Handles volatile, memory/cc clobbers, readwrite operands.
 - [ ] **Computed goto (M5)**: Lower `&&label` to LLVM `blockaddress(@fn, %bb)`. Lower `goto *expr` to LLVM `indirectbr`. Both need the label_blocks map from goto/label codegen.
 - [ ] **Case ranges (M5)**: `case 1 ... 5:` → emit multiple switch cases or an icmp range-check branch.
 - [ ] **Attribute lowering (M6)**: `__attribute__((weak))` → LLVM `weak` linkage. `__attribute__((section("name")))` → LLVM `section`. `__attribute__((visibility("hidden")))` → LLVM `hidden` visibility. `__attribute__((aligned(N)))` → LLVM alignment metadata.

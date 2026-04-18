@@ -92,10 +92,11 @@ GNU C extensions, inline assembly, Kbuild integration, 30M+ LOC scale.
 - ✅ 25+ builtins (clz/ctz/popcount/bswap/ffs/abs/unreachable/trap/expect/constant_p/offsetof/object_size/frame_address/prefetch)
 - ✅ Variadic function support (va_start/va_end/va_copy via LLVM intrinsics)
 
-**Milestone 4 📋 — Inline Assembly Codegen:**
-- 📋 Lower parsed asm statements to LLVM `call asm` instructions
-- 📋 Output/input operand constraint wiring
-- 📋 Memory and CC clobber handling
+**Milestone 4 ✅ — Inline Assembly Codegen (completed 2026-04-18):**
+- ✅ Lower parsed asm statements to LLVM `call asm` instructions
+- ✅ Output/input operand constraint wiring
+- ✅ Memory and CC clobber handling
+- ✅ `__builtin_alloca`, `__builtin_add/sub/mul_overflow`, `__sync_synchronize`
 
 **Milestone 5 📋 — Computed Goto & Advanced Control Flow:**
 - 📋 `&&label` → LLVM `blockaddress`, `goto *expr` → LLVM `indirectbr`

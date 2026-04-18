@@ -30,11 +30,12 @@ Arena, DB, Lexer, Macro, Parser, LLVM backend, analysis, and VFS code are all pr
 - ✅ Lexer 3-char punctuator fix (..., >>=, <<=)
 - ✅ Inline asm statement parsing from parse_statement()
 
-**Milestone 4 — Inline Assembly Codegen** (NEXT PRIORITY):
-- [ ] Lower parsed ASM_STMT nodes to LLVM `call asm` via inkwell InlineAsm API
-- [ ] Wire output/input operand constraints to LLVM constraint strings
-- [ ] Handle `"memory"` and `"cc"` clobbers as LLVM side-effect markers
-- [ ] Test with kernel-style asm patterns (barriers, register moves, syscall wrappers)
+**Milestone 4 — Inline Assembly Codegen** (✅ COMPLETED 2026-04-18):
+- [x] Lower parsed ASM_STMT nodes to LLVM `call asm` via inkwell InlineAsm API
+- [x] Wire output/input operand constraints to LLVM constraint strings
+- [x] Handle `"memory"` and `"cc"` clobbers as LLVM side-effect markers
+- [x] Test with kernel-style asm patterns (barriers, register moves)
+- [x] 5 end-to-end backend tests added
 
 **Milestone 5 — Computed Goto & Advanced Control Flow**:
 - [ ] Parse `&&label` (label-as-value, GCC extension) → AST node kind

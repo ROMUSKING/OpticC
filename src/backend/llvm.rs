@@ -4124,7 +4124,7 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                                 .builder
                                 .build_int_mul(*a, *b, "overflow_mul")
                                 .map_err(|_| BackendError::InvalidNode)?,
-                            _ => unreachable!(),
+                            _ => unreachable!("overflow builtin matched but not handled: {}", builtin_name),
                         };
                         self.builder
                             .build_store(*result_ptr, result)

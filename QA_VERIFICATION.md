@@ -180,7 +180,7 @@ cat /tmp/optic_vfs/path/to/source.c
 cd optic_c && cargo build
 
 # Run all tests
-cargo test   # 311 passed, 0 failed
+cargo test   # 319 passed, 0 failed
 
 # Run specific component tests
 cargo test --lib arena
@@ -222,12 +222,14 @@ cargo test --lib vfs
 - [x] Fixed flaky `test_preprocess_mock`: unique temp directories per integration test
 - [x] Fixed lexer 3-char punctuator tokenization: `...`, `>>=`, `<<=` now handled correctly
 
-### Milestone 4: Inline Assembly Codegen 📋
-- [ ] Add `lower_asm_stmt` to backend for kind=207 nodes
-- [ ] Build LLVM inline asm constraint strings from AST operand nodes
-- [ ] Handle output operands (=r, +r, =m) and input operands (r, m, i)
-- [ ] Handle clobbers (memory, cc, register names)
-- [ ] Test with kernel-style patterns (barriers, register moves)
+### Milestone 4: Inline Assembly Codegen ✅ (completed 2026-04-18)
+- [x] Add `lower_asm_stmt` to backend for kind=207 nodes
+- [x] Build LLVM inline asm constraint strings from AST operand nodes
+- [x] Handle output operands (=r, +r, =m) and input operands (r, m, i)
+- [x] Handle clobbers (memory, cc, register names)
+- [x] Test with kernel-style patterns (barriers, register moves)
+- [x] Add `__builtin_alloca`, `__builtin_add/sub/mul_overflow`, `__sync_synchronize`
+- [x] 8 new end-to-end tests (5 asm, 3 builtins)
 
 ### Milestone 5: Computed Goto & Advanced Control Flow 📋
 - [ ] Parse `&&label` (label-as-value) → new AST node kind

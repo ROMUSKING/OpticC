@@ -90,12 +90,13 @@ OpticC already includes a GNU-extensions module. The current task is to improve 
 ### Builtins — NOT YET IMPLEMENTED (Kernel Priority)
 - [ ] `__builtin_types_compatible_p(type1, type2)` → needs type system integration
 - [ ] `__builtin_choose_expr(const_expr, expr1, expr2)` → compile-time selection
-- [ ] `__builtin_memcpy/memset/strlen` → LLVM memcpy/memset intrinsics
-- [ ] `__builtin_add_overflow/sub_overflow/mul_overflow` → LLVM overflow intrinsics
+- [x] `__builtin_memcpy/memset/strlen` → external function call (working; LLVM intrinsic upgrade pending)
+- [x] `__builtin_add_overflow/sub_overflow/mul_overflow` → compute + store (conservative, no overflow detection yet)
 - [ ] `__sync_*` atomic builtins → LLVM atomic instructions (kernel uses these heavily)
+  - [x] `__sync_synchronize` → LLVM fence (SequentiallyConsistent)
 - [ ] `__atomic_*` C11-style atomic builtins → LLVM atomicrmw/cmpxchg
 - [ ] `__builtin_ia32_*` x86 intrinsics → LLVM x86 intrinsics (SSE/AVX)
-- [ ] `__builtin_alloca` → LLVM alloca (dynamic stack allocation)
+- [x] `__builtin_alloca` → LLVM array alloca (dynamic stack allocation)
 
 ### Attributes — NOT YET LOWERED (Kernel Priority)
 - [ ] `__attribute__((section("name")))` → LLVM section metadata (kernel .init.text etc.)
