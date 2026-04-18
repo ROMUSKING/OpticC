@@ -166,6 +166,45 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
         Ok(())
     }
 
+    /// Create an alloca in the entry block of the current function.
+    /// This ensures dominance: the alloca dominates all uses in the function.
+    fn build_entry_alloca(
+        &self,
+        alloca_type: BasicTypeEnum<'ctx>,
+        name: &str,
+    ) -> Result<PointerValue<'ctx>, BackendError> {
+        let current_fn = self
+            .builder
+            .get_insert_block()
+            .and_then(|bb| bb.get_parent())
+            .ok_or(BackendError::InvalidNode)?;
+        let entry_bb = current_fn
+            .get_first_basic_block()
+            .ok_or(BackendError::InvalidNode)?;
+
+        // Save current position
+        let saved_block = self.builder.get_insert_block();
+
+        // Position at the beginning of the entry block (before any existing instructions)
+        if let Some(first_instr) = entry_bb.get_first_instruction() {
+            self.builder.position_before(&first_instr);
+        } else {
+            self.builder.position_at_end(entry_bb);
+        }
+
+        let alloca = self
+            .builder
+            .build_alloca(alloca_type, name)
+            .map_err(|_| BackendError::InvalidNode)?;
+
+        // Restore position
+        if let Some(bb) = saved_block {
+            self.builder.position_at_end(bb);
+        }
+
+        Ok(alloca)
+    }
+
     pub fn module(&self) -> &Module<'ctx> {
         &self.module
     }
@@ -478,9 +517,8 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                         });
                         if let Some(var_name) = var_name_opt {
                             let var_ptr = self
-                                .builder
-                                .build_alloca(actual_alloca_type, &var_name)
-                                .map_err(|_| BackendError::InvalidNode)?;
+                                .build_entry_alloca(actual_alloca_type, &var_name)
+                                .or_else(|_| self.builder.build_alloca(actual_alloca_type, &var_name).map_err(|_| BackendError::InvalidNode))?;
                             if let Some((struct_type, field_names)) = struct_info.clone() {
                                 self.struct_fields
                                     .insert(var_name.clone(), field_names.clone());
@@ -530,9 +568,8 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
 
                         if let Some(var_name) = var_name_opt {
                             let var_ptr = self
-                                .builder
-                                .build_alloca(actual_alloca_type, &var_name)
-                                .map_err(|_| BackendError::InvalidNode)?;
+                                .build_entry_alloca(actual_alloca_type, &var_name)
+                                .or_else(|_| self.builder.build_alloca(actual_alloca_type, &var_name).map_err(|_| BackendError::InvalidNode))?;
                             if let Some((struct_type, field_names)) = struct_info.clone() {
                                 self.struct_fields
                                     .insert(var_name.clone(), field_names.clone());
