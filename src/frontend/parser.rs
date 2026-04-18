@@ -627,8 +627,8 @@ impl Parser {
 
             if let Some(attr_result) = self.parse_attribute_after_declarator() {
                 let attr = attr_result?;
-                // Attributes are just consumed, not linked to the declarator
-                let _ = attr;
+                // Link post-declarator attributes into the declaration child chain
+                self.link_siblings(&mut first_child, &mut last_child, attr);
             }
 
             // Handle __asm__ after attribute too

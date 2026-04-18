@@ -335,6 +335,8 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
     /// Lower a global variable declaration with optional initializer.
     fn lower_global_var(&mut self, arena: &Arena, node: &CAstNode, spec_kind: u16) -> Result<(), BackendError> {
         let llvm_type = self.node_kind_to_llvm_type(spec_kind);
+        // Extract attributes early so we can apply them to any globals we create
+        let attrs = self.extract_attributes(arena, node);
         
         // Find the variable name and initializer
         let mut name_opt: Option<String> = None;
@@ -426,6 +428,7 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                         );
                         global.set_initializer(&string_val);
                         global.set_constant(true);
+                        self.apply_global_attributes(global, &attrs);
                         // Store in variables for later reference
                         let binding = VariableBinding {
                                 ptr: global.as_pointer_value(),
@@ -457,6 +460,7 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                                 ptr: global.as_pointer_value(),
                                 pointee_type: global_type,
                         };
+                        self.apply_global_attributes(global, &attrs);
                         self.global_variables.insert(var_name.clone(), binding);
                         self.variables.insert(var_name, binding);
                         return Ok(());
@@ -477,6 +481,7 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                 _ => self.context.i32_type().const_zero().into(),
             };
             global.set_initializer(&zero);
+            self.apply_global_attributes(global, &attrs);
             let binding = VariableBinding {
                     ptr: global.as_pointer_value(),
                     pointee_type: global_type,
@@ -1299,6 +1304,9 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
             ret_llvm.fn_type(&param_types, is_variadic)
         };
         let function = self.module.add_function(&func_name, fn_type, None);
+        // Apply any __attribute__ decorations to the pre-registered function
+        let attrs = self.extract_attributes(arena, node);
+        self.apply_function_attributes(function, &attrs);
         self.functions.insert(func_name, function);
         Ok(())
     }
@@ -1415,6 +1423,9 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
         // Use the pre-registered function if available, otherwise create new
         let function = self.module.get_function(&func_name)
             .unwrap_or_else(|| self.module.add_function(&func_name, fn_type, None));
+        // Apply __attribute__ decorations to the function
+        let attrs = self.extract_attributes(arena, node);
+        self.apply_function_attributes(function, &attrs);
         self.functions.insert(func_name.clone(), function);
 
         let entry = self.context.append_basic_block(function, "entry");
@@ -4398,6 +4409,155 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
         None
     }
 
+    /// Extract attribute information from a node's child/sibling chain.
+    /// Returns a list of (attr_name, optional_string_arg, optional_int_arg) tuples.
+    fn extract_attributes(&self, arena: &Arena, node: &CAstNode) -> Vec<(String, Option<String>, Option<u32>)> {
+        let mut attrs = Vec::new();
+        let mut child_offset = node.first_child;
+        while child_offset != NodeOffset::NULL {
+            if let Some(child) = arena.get(child_offset) {
+                if child.kind == 200 {
+                    // kind=200 is AST_ATTRIBUTE; walk its children (individual attributes)
+                    let mut attr_child_offset = child.first_child;
+                    while attr_child_offset != NodeOffset::NULL {
+                        if let Some(attr_child) = arena.get(attr_child_offset) {
+                            // first_child = name string offset stored as an arena node
+                            // The attribute node stores: first_child=name_offset, next_sibling=first_arg
+                            if let Some(name) = arena.get_string(NodeOffset(attr_child.first_child.0)) {
+                                if !name.is_empty() {
+                                    let mut str_arg = None;
+                                    let mut int_arg = if attr_child.data != 0 {
+                                        Some(attr_child.data)
+                                    } else {
+                                        None
+                                    };
+                                    // Walk argument nodes
+                                    let mut arg_offset = attr_child.next_sibling;
+                                    while arg_offset != NodeOffset::NULL {
+                                        if let Some(arg_node) = arena.get(arg_offset) {
+                                            if arg_node.kind == 63 {
+                                                // String argument
+                                                str_arg = arena
+                                                    .get_string(NodeOffset(arg_node.data))
+                                                    .map(|s| s.to_string());
+                                            } else if arg_node.kind == 61 {
+                                                // Integer argument
+                                                int_arg = Some(arg_node.data);
+                                            }
+                                            arg_offset = arg_node.next_sibling;
+                                        } else {
+                                            break;
+                                        }
+                                    }
+                                    attrs.push((name.to_string(), str_arg, int_arg));
+                                }
+                            }
+                            attr_child_offset = attr_child.next_sibling;
+                        } else {
+                            break;
+                        }
+                    }
+                }
+                child_offset = child.next_sibling;
+            } else {
+                break;
+            }
+        }
+        attrs
+    }
+
+    /// Apply extracted attributes to an LLVM function value.
+    fn apply_function_attributes(
+        &self,
+        function: FunctionValue<'ctx>,
+        attrs: &[(String, Option<String>, Option<u32>)],
+    ) {
+        for (name, str_arg, _int_arg) in attrs {
+            match name.as_str() {
+                "weak" | "__weak__" => {
+                    function.set_linkage(inkwell::module::Linkage::ExternalWeak);
+                }
+                "section" | "__section__" => {
+                    if let Some(section_name) = str_arg {
+                        let clean = section_name.trim_matches('"');
+                        function.set_section(Some(clean));
+                    }
+                }
+                "visibility" | "__visibility__" => {
+                    if let Some(vis) = str_arg {
+                        let clean = vis.trim_matches('"');
+                        match clean {
+                            "hidden" => function
+                                .as_global_value()
+                                .set_visibility(inkwell::GlobalVisibility::Hidden),
+                            "protected" => function
+                                .as_global_value()
+                                .set_visibility(inkwell::GlobalVisibility::Protected),
+                            _ => {} // "default" or unknown: leave as-is
+                        }
+                    }
+                }
+                "noreturn" | "__noreturn__" => {
+                    // Mark function as noreturn via LLVM attribute
+                    function.add_attribute(
+                        inkwell::attributes::AttributeLoc::Function,
+                        self.context.create_enum_attribute(
+                            inkwell::attributes::Attribute::get_named_enum_kind_id("noreturn"),
+                            0,
+                        ),
+                    );
+                }
+                "cold" | "__cold__" => {
+                    function.add_attribute(
+                        inkwell::attributes::AttributeLoc::Function,
+                        self.context.create_enum_attribute(
+                            inkwell::attributes::Attribute::get_named_enum_kind_id("cold"),
+                            0,
+                        ),
+                    );
+                }
+                _ => {} // Other attributes: silently ignored for now
+            }
+        }
+    }
+
+    /// Apply extracted attributes to an LLVM global value.
+    fn apply_global_attributes(
+        &self,
+        global: inkwell::values::GlobalValue<'ctx>,
+        attrs: &[(String, Option<String>, Option<u32>)],
+    ) {
+        for (name, str_arg, int_arg) in attrs {
+            match name.as_str() {
+                "weak" | "__weak__" => {
+                    global.set_linkage(inkwell::module::Linkage::ExternalWeak);
+                }
+                "section" | "__section__" => {
+                    if let Some(section_name) = str_arg {
+                        let clean = section_name.trim_matches('"');
+                        global.set_section(Some(clean));
+                    }
+                }
+                "aligned" | "__aligned__" => {
+                    if let Some(align) = int_arg {
+                        global.set_alignment(*align);
+                    }
+                }
+                "visibility" | "__visibility__" => {
+                    if let Some(vis) = str_arg {
+                        let clean = vis.trim_matches('"');
+                        match clean {
+                            "hidden" => global.set_visibility(inkwell::GlobalVisibility::Hidden),
+                            "protected" => global.set_visibility(inkwell::GlobalVisibility::Protected),
+                            _ => {}
+                        }
+                    }
+                }
+                _ => {} // Other attributes silently ignored
+            }
+        }
+    }
+
     pub fn dump_ir(&self) -> String {
         self.module.print_to_string().to_string()
     }
@@ -4849,5 +5009,43 @@ mod tests {
             }"
         );
         assert!(ir.contains("switch"), "Expected switch in IR:\n{}", ir);
+    }
+
+    #[test]
+    fn test_attribute_weak_function() {
+        let ir = compile_c_to_ir(
+            "void my_weak_func(void) __attribute__((weak)); \
+             void my_weak_func(void) { return; }"
+        );
+        assert!(ir.contains("my_weak_func"), "Expected function in IR:\n{}", ir);
+        // weak linkage should appear as `weak` or `extern_weak`
+        assert!(ir.contains("weak"), "Expected weak linkage in IR:\n{}", ir);
+    }
+
+    #[test]
+    fn test_attribute_section_function() {
+        let ir = compile_c_to_ir(
+            "__attribute__((section(\".init.text\"))) void init_func(void) { return; }"
+        );
+        assert!(ir.contains("init_func"), "Expected function in IR:\n{}", ir);
+        assert!(ir.contains(".init.text"), "Expected section attribute in IR:\n{}", ir);
+    }
+
+    #[test]
+    fn test_attribute_noreturn_function() {
+        let ir = compile_c_to_ir(
+            "__attribute__((noreturn)) void die(void) { return; }"
+        );
+        assert!(ir.contains("die"), "Expected function in IR:\n{}", ir);
+        assert!(ir.contains("noreturn"), "Expected noreturn attribute in IR:\n{}", ir);
+    }
+
+    #[test]
+    fn test_attribute_cold_function() {
+        let ir = compile_c_to_ir(
+            "__attribute__((cold)) void rare_path(void) { return; }"
+        );
+        assert!(ir.contains("rare_path"), "Expected function in IR:\n{}", ir);
+        assert!(ir.contains("cold"), "Expected cold attribute in IR:\n{}", ir);
     }
 }
