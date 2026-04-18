@@ -221,3 +221,28 @@ cargo test --lib vfs
 - [x] Fixed `test_asm_volatile_flag_stored`: asm/\__asm__/\__asm dispatched from `parse_statement()`
 - [x] Fixed flaky `test_preprocess_mock`: unique temp directories per integration test
 - [x] Fixed lexer 3-char punctuator tokenization: `...`, `>>=`, `<<=` now handled correctly
+
+### Milestone 4: Inline Assembly Codegen 📋
+- [ ] Add `lower_asm_stmt` to backend for kind=207 nodes
+- [ ] Build LLVM inline asm constraint strings from AST operand nodes
+- [ ] Handle output operands (=r, +r, =m) and input operands (r, m, i)
+- [ ] Handle clobbers (memory, cc, register names)
+- [ ] Test with kernel-style patterns (barriers, register moves)
+
+### Milestone 5: Computed Goto & Advanced Control Flow 📋
+- [ ] Parse `&&label` (label-as-value) → new AST node kind
+- [ ] Parse `goto *expr` (computed goto) → new AST node kind
+- [ ] Backend: `&&label` → LLVM `blockaddress`, `goto *expr` → LLVM `indirectbr`
+- [ ] Case ranges (`case 1 ... 5:`)
+
+### Milestone 6: System Headers & Multi-File Compilation 📋
+- [ ] Preprocessor system include path resolution (-I, /usr/include)
+- [ ] Platform-specific predefined macros (__linux__, __x86_64__, __SIZEOF_POINTER__)
+- [ ] Multi-translation-unit compilation
+- [ ] Weak symbols, section attributes, visibility attributes
+- [ ] Aligned/packed struct layout
+
+### Milestone 7: Kernel-Scale Validation 📋
+- [ ] Compile minimal out-of-tree kernel module
+- [ ] Compile coreutils/busybox
+- [ ] Kbuild CC=optic_c integration

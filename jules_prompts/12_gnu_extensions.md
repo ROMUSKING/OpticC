@@ -87,11 +87,25 @@ OpticC already includes a GNU-extensions module. The current task is to improve 
 - [x] `__builtin_va_end(ap)` → LLVM `llvm.va_end`
 - [x] `__builtin_va_copy(dest, src)` → LLVM `llvm.va_copy`
 
-### Builtins — NOT YET IMPLEMENTED
+### Builtins — NOT YET IMPLEMENTED (Kernel Priority)
 - [ ] `__builtin_types_compatible_p(type1, type2)` → needs type system integration
 - [ ] `__builtin_choose_expr(const_expr, expr1, expr2)` → compile-time selection
 - [ ] `__builtin_memcpy/memset/strlen` → LLVM memcpy/memset intrinsics
 - [ ] `__builtin_add_overflow/sub_overflow/mul_overflow` → LLVM overflow intrinsics
+- [ ] `__sync_*` atomic builtins → LLVM atomic instructions (kernel uses these heavily)
+- [ ] `__atomic_*` C11-style atomic builtins → LLVM atomicrmw/cmpxchg
+- [ ] `__builtin_ia32_*` x86 intrinsics → LLVM x86 intrinsics (SSE/AVX)
+- [ ] `__builtin_alloca` → LLVM alloca (dynamic stack allocation)
+
+### Attributes — NOT YET LOWERED (Kernel Priority)
+- [ ] `__attribute__((section("name")))` → LLVM section metadata (kernel .init.text etc.)
+- [ ] `__attribute__((weak))` → LLVM weak linkage
+- [ ] `__attribute__((visibility("hidden")))` → LLVM hidden visibility
+- [ ] `__attribute__((aligned(N)))` → LLVM alignment on alloca/global
+- [ ] `__attribute__((packed))` → struct layout without padding
+- [ ] `__attribute__((constructor/destructor))` → LLVM ctors/dtors arrays
+- [ ] `__attribute__((format(printf, m, n)))` → type checking (optional, can ignore)
+- [ ] `__attribute__((noinline/always_inline))` → LLVM function attributes
 
 ### Other GNU Extensions
 - [x] `__attribute__((...))` — parsed and consumed (attributes stored for backend)

@@ -85,15 +85,31 @@ OpticC is a C frontend compiler that translates C99 source code to LLVM IR. It i
 ### Phase 3: Linux Kernel 📋
 GNU C extensions, inline assembly, Kbuild integration, 30M+ LOC scale.
 
-**Phase 3 Progress (Milestones 1–3 implemented):**
+**Milestones 1–3 ✅ (completed 2026-04-18):**
 - ✅ Switch/case codegen with fall-through, break, and default
 - ✅ Goto/label codegen with forward-reference label resolution
 - ✅ Break/continue in loops and switch statements
 - ✅ 25+ builtins (clz/ctz/popcount/bswap/ffs/abs/unreachable/trap/expect/constant_p/offsetof/object_size/frame_address/prefetch)
 - ✅ Variadic function support (va_start/va_end/va_copy via LLVM intrinsics)
-- 📋 Inline assembly codegen (parsing complete, codegen in progress)
-- 📋 Multi-file compilation and linking
-- 📋 Weak symbols, section attributes, visibility
+
+**Milestone 4 📋 — Inline Assembly Codegen:**
+- 📋 Lower parsed asm statements to LLVM `call asm` instructions
+- 📋 Output/input operand constraint wiring
+- 📋 Memory and CC clobber handling
+
+**Milestone 5 📋 — Computed Goto & Advanced Control Flow:**
+- 📋 `&&label` → LLVM `blockaddress`, `goto *expr` → LLVM `indirectbr`
+- 📋 Case ranges (`case 1 ... 5:`)
+
+**Milestone 6 📋 — System Headers & Multi-File Compilation:**
+- 📋 Preprocessor system include path resolution (`-I /usr/include`)
+- 📋 Multi-translation-unit compilation with shared symbol tables
+- 📋 Weak symbols, section/visibility attributes, aligned/packed
+
+**Milestone 7 📋 — Kernel-Scale Validation:**
+- 📋 Compile minimal out-of-tree kernel module
+- 📋 Compile coreutils/busybox as real-world validation
+- 📋 Kbuild integration (CC=optic_c)
 
 ### Phase 4: Production 📋
 Optimization pipeline, DWARF debug info, LTO, cross-compilation.

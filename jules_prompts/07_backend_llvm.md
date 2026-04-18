@@ -50,6 +50,16 @@ The parser now chains child nodes entirely via first_child chains, not via next_
 - [ ] **String literals**: `lower_string_const` uses node.data as a single byte; needs arena string lookup for full string content.
 - [ ] **printf/variadic**: Auto-declaration with variadic signature is incorrect for most libc functions. Need proper declaration matching for common functions.
 
+### KERNEL-PATH NEXT STEPS (Phase 3, Milestones 4–7)
+- [ ] **Inline asm codegen (M4)**: Lower ASM_STMT (kind=207) to LLVM `call asm`. Read template from arena string, build constraint string from output/input operand nodes, pass clobbers. Use `inkwell::values::InlineAsm::get()`.
+- [ ] **Computed goto (M5)**: Lower `&&label` to LLVM `blockaddress(@fn, %bb)`. Lower `goto *expr` to LLVM `indirectbr`. Both need the label_blocks map from goto/label codegen.
+- [ ] **Case ranges (M5)**: `case 1 ... 5:` → emit multiple switch cases or an icmp range-check branch.
+- [ ] **Attribute lowering (M6)**: `__attribute__((weak))` → LLVM `weak` linkage. `__attribute__((section("name")))` → LLVM `section`. `__attribute__((visibility("hidden")))` → LLVM `hidden` visibility. `__attribute__((aligned(N)))` → LLVM alignment metadata.
+- [ ] **Block scope (M6)**: Implement nested variable scoping instead of clearing `variables` per function. Required for kernel code with deeply nested blocks that shadow outer variables.
+- [ ] **Bitfield support**: Kernel structs use bitfields extensively. Need GEP + shift/mask patterns for bitfield access.
+- [ ] **Designated initializers**: `.field = value` and `[index] = value` in struct/array initializers.
+- [ ] **Compound literals**: `(struct foo){.x = 1}` → alloca + store pattern.
+
 ## KNOWN CAVEATS
 - **LLVM 18 target**: Targets `inkwell`'s `llvm18-1-prefer-dynamic` feature. `LLVM_SYS_181_PREFIX=/usr/lib/llvm-18` in `.cargo/config.toml`.
 - **Opaque pointers**: LLVM 18 uses opaque pointers. Loads must carry explicit pointee type.

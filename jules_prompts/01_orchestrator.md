@@ -30,11 +30,30 @@ Arena, DB, Lexer, Macro, Parser, LLVM backend, analysis, and VFS code are all pr
 - ✅ Lexer 3-char punctuator fix (..., >>=, <<=)
 - ✅ Inline asm statement parsing from parse_statement()
 
-**Remaining for kernel compilation:**
-- Inline assembly codegen (parsing exists, codegen incomplete)
-- Computed goto (&&label, goto *ptr → indirectbr)
-- Multi-file compilation at kernel scale
-- Weak symbols, section/visibility attributes
+**Milestone 4 — Inline Assembly Codegen** (NEXT PRIORITY):
+- [ ] Lower parsed ASM_STMT nodes to LLVM `call asm` via inkwell InlineAsm API
+- [ ] Wire output/input operand constraints to LLVM constraint strings
+- [ ] Handle `"memory"` and `"cc"` clobbers as LLVM side-effect markers
+- [ ] Test with kernel-style asm patterns (barriers, register moves, syscall wrappers)
+
+**Milestone 5 — Computed Goto & Advanced Control Flow**:
+- [ ] Parse `&&label` (label-as-value, GCC extension) → AST node kind
+- [ ] Parse `goto *expr` (computed goto) → AST node kind
+- [ ] Backend: lower `&&label` to LLVM blockaddress, `goto *expr` to LLVM indirectbr
+- [ ] Case ranges: `case 1 ... 5:` → multiple switch cases or range check
+
+**Milestone 6 — System Header & Multi-File Compilation**:
+- [ ] Preprocessor: resolve `#include <stdio.h>` from system include paths (/usr/include)
+- [ ] Preprocessor: handle platform-specific predefined macros (__linux__, __x86_64__, etc.)
+- [ ] Build system: multi-translation-unit compilation with shared symbol tables
+- [ ] Linker integration: generate relocatable .o files via LLC, link with system ld
+- [ ] Weak symbols (`__attribute__((weak))`) and visibility (`__attribute__((visibility("hidden")))`)
+
+**Milestone 7 — Kernel-Scale Validation**:
+- [ ] Compile a minimal out-of-tree kernel module (.ko) with OpticC
+- [ ] Compile coreutils or busybox as end-to-end C software validation
+- [ ] Section attributes (`__attribute__((section(".init.text")))`) for kernel layout
+- [ ] Kbuild integration: replace CC=gcc with CC=optic_c in Makefile
 
 ### Phase 4: Production Compiler (FUTURE)
 Optimization passes, debug info, LTO, cross-compilation, and general polish.

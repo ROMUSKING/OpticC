@@ -50,18 +50,36 @@ OpticC already contains implementations for the core compiler pipeline plus the 
 - ⚠️ The remaining work is on correctness gaps, SQLite-scale preprocessing edge cases, inline asm codegen, and optional VFS re-enablement
 
 ### Immediate Priorities for Agents
-1. Verify the relevant module against the current code in `src/`
-2. Fix root-cause issues or stale assumptions in the prompt notes
-3. Re-run targeted checks (`cargo test`, CLI smoke tests, or integration commands)
-4. Record only confirmed status and remaining blockers
+1. **Milestone 4 (Inline Asm Codegen)**: Lower parsed ASM_STMT to LLVM `call asm`. This is the highest-priority kernel blocker.
+2. **Backend correctness**: Fix multi-variable declarations, assignment expressions, and nested member access (see `07_backend_llvm.md` REMAINING BUGS).
+3. **Preprocessor system headers**: Add `-I` include path support so `#include <stdio.h>` resolves from `/usr/include`.
+4. **Computed goto**: Parse `&&label` / `goto *expr` and lower to LLVM blockaddress/indirectbr.
+5. Verify changes with `cargo test` and CLI smoke tests before reporting.
+6. Record only confirmed status and remaining blockers in the appropriate prompt file.
 
 ### Environment Notes
 - Target environment is the current dev container on Ubuntu 24.04
 - LLVM 18 is now the expected toolchain for the inkwell binding in this repository
 - Avoid hard-coding exact passing-test totals unless you have just re-verified them in the current session
 
+### Development Strategy: Path to Linux Kernel Compilation
+The kernel compilation path requires these capabilities in priority order:
+1. **Inline assembly codegen** — kernel code is saturated with `asm volatile` blocks for barriers, atomics, and architecture-specific ops
+2. **Computed goto** — kernel uses `goto *dispatch_table[opcode]` patterns in interpreters and dispatch loops
+3. **System headers** — kernel headers include system headers transitively; preprocessor must resolve include paths
+4. **Multi-translation-unit compilation** — kernel builds hundreds of .c files into .o files linked together
+5. **Attribute support** — `section`, `weak`, `visibility`, `aligned`, `packed` all affect kernel object layout
+6. **Architecture-specific builtins** — additional `__builtin_*` for atomic operations, memory barriers, and CPU feature detection
+
+### Intermediate Target: Compile coreutils/busybox
+Before attempting the kernel, validate against simpler real-world C projects:
+- **coreutils**: standard Unix utilities, moderate complexity, heavy libc use
+- **busybox**: single-binary multi-call, extensive use of GNU extensions
+- **musl libc**: minimal C library, tests preprocessor and type system rigor
+
 ### Long-Term Roadmap
 - **SQLite milestone**: improve complex macro handling and verify end-to-end library generation
+- **coreutils milestone**: compile a real multi-file C project end-to-end
 - **Kernel milestone**: expand inline asm codegen, computed goto, multi-file compilation, and build integration
 - **Production milestone**: optimization passes, debug info, cross-compilation, and polish
 

@@ -108,6 +108,35 @@ cargo run -- compile "$SQLITE_C"
 - **clang compiles sqlite3.c**: Full 255K LOC compiles in seconds. OpticC preprocessor is the bottleneck.
 - **Cross-module bugs are common**: Full-workspace checks are needed; individual module compilation isn't enough.
 
+## KERNEL COMPILATION TEST STRATEGY
+
+### Phase 3 Testing Stages
+1. **Unit tests**: Add tests for each new codegen feature (inline asm, computed goto, attributes) in `src/backend/llvm.rs` test module.
+2. **C sample files**: Create test samples in `test_samples/` for each kernel pattern:
+   - `test_samples/inline_asm.c` — basic and extended asm
+   - `test_samples/computed_goto.c` — label addresses and indirect branch
+   - `test_samples/attributes.c` — section, weak, visibility, aligned
+   - `test_samples/bitfields.c` — struct bitfield access
+   - `test_samples/atomics.c` — __sync_* and __atomic_* builtins
+3. **Real-world smoke tests**: Try compiling individual files from real projects:
+   - A single coreutils utility (e.g., `true.c`, `yes.c` — simplest)
+   - A single busybox applet
+   - A minimal kernel module (hello_world.ko source)
+4. **End-to-end**: Full multi-file compilation of a small project → link → run
+
+### Test Sample Template
+```c
+// test_samples/inline_asm.c
+void memory_barrier(void) {
+    asm volatile("" ::: "memory");
+}
+unsigned long read_cr0(void) {
+    unsigned long val;
+    asm volatile("mov %%cr0, %0" : "=r"(val));
+    return val;
+}
+```
+
 ## IMPLEMENTATION STATUS
 
 ### SQLite Integration Test Module (`src/integration/mod.rs`)
