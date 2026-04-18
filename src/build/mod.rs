@@ -499,12 +499,25 @@ fn compile_file_to_object(
     let source_name = source.display().to_string();
 
     thread::Builder::new()
-        .name(format!("optic-compile-{}", source.file_stem().and_then(|s| s.to_str()).unwrap_or("file")))
+        .name(format!(
+            "optic-compile-{}",
+            source
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("file")
+        ))
         .stack_size(LARGE_COMPILER_STACK_SIZE)
-        .spawn(move || compile_file_to_object_impl(&source, &temp_dir, &include_paths, &defines, optimization))
+        .spawn(move || {
+            compile_file_to_object_impl(&source, &temp_dir, &include_paths, &defines, optimization)
+        })
         .map_err(BuildError::IoError)?
         .join()
-        .unwrap_or_else(|_| Err(BuildError::CompileError(source_name, "compiler worker panicked".to_string())))
+        .unwrap_or_else(|_| {
+            Err(BuildError::CompileError(
+                source_name,
+                "compiler worker panicked".to_string(),
+            ))
+        })
 }
 
 fn compile_file_to_object_impl(
@@ -542,8 +555,14 @@ pub fn compile_single_file(
     defines: &HashMap<String, String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     if !should_use_large_stack(input_path) {
-        return compile_single_file_impl(input_path, output_path, opt_level, include_paths, defines)
-            .map_err(|e| -> Box<dyn std::error::Error> { Box::new(std::io::Error::other(e)) });
+        return compile_single_file_impl(
+            input_path,
+            output_path,
+            opt_level,
+            include_paths,
+            defines,
+        )
+        .map_err(|e| -> Box<dyn std::error::Error> { Box::new(std::io::Error::other(e)) });
     }
 
     let input_path = input_path.to_path_buf();
@@ -555,16 +574,30 @@ pub fn compile_single_file(
     thread::Builder::new()
         .name(format!(
             "optic-single-{}",
-            input_path.file_stem().and_then(|s| s.to_str()).unwrap_or("input")
+            input_path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("input")
         ))
         .stack_size(LARGE_COMPILER_STACK_SIZE)
-        .spawn(move || compile_single_file_impl(&input_path, &output_path, opt_level, &include_paths, &defines))
+        .spawn(move || {
+            compile_single_file_impl(
+                &input_path,
+                &output_path,
+                opt_level,
+                &include_paths,
+                &defines,
+            )
+        })
         .map_err(|e| -> Box<dyn std::error::Error> { Box::new(e) })?
         .join()
-        .unwrap_or_else(|_| Err(format!("Compilation worker panicked while compiling {}", input_name)))
-        .map_err(|e| -> Box<dyn std::error::Error> {
-            Box::new(std::io::Error::other(e))
+        .unwrap_or_else(|_| {
+            Err(format!(
+                "Compilation worker panicked while compiling {}",
+                input_name
+            ))
         })
+        .map_err(|e| -> Box<dyn std::error::Error> { Box::new(std::io::Error::other(e)) })
 }
 
 fn compile_single_file_impl(
@@ -581,7 +614,11 @@ fn compile_single_file_impl(
         include_paths,
         defines,
         &format!("/tmp/optic_db_{}_{}.redb", std::process::id(), compile_id),
-        &format!("/tmp/optic_c_arena_{}_{}.bin", std::process::id(), compile_id),
+        &format!(
+            "/tmp/optic_c_arena_{}_{}.bin",
+            std::process::id(),
+            compile_id
+        ),
     )?;
 
     let start = Instant::now();
@@ -635,7 +672,10 @@ pub fn compile_source_to_object_with_stats(
     thread::Builder::new()
         .name(format!(
             "optic-object-{}",
-            input_path.file_stem().and_then(|s| s.to_str()).unwrap_or("input")
+            input_path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("input")
         ))
         .stack_size(LARGE_COMPILER_STACK_SIZE)
         .spawn(move || {
@@ -756,7 +796,10 @@ fn compile_to_ir_artifacts(
         let parse_start = Instant::now();
         let mut parser = CParser::new(arena);
         let ast_root = parser.parse_tokens(tokens).map_err(|e| {
-            format!("Parse error at line {}, column {}: {}", e.line, e.column, e.message)
+            format!(
+                "Parse error at line {}, column {}: {}",
+                e.line, e.column, e.message
+            )
         })?;
         let parse_ms = parse_start.elapsed().as_millis() as u64;
 

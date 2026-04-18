@@ -272,7 +272,11 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
 
     /// Extract (llvm_type, param_name) from a kind=24 parameter declaration node.
     /// Layout after parser fix: first_child chain = type_spec -> kind=60(name)
-    fn extract_param_type_name(&self, arena: &Arena, param: &CAstNode) -> (BasicTypeEnum<'ctx>, String) {
+    fn extract_param_type_name(
+        &self,
+        arena: &Arena,
+        param: &CAstNode,
+    ) -> (BasicTypeEnum<'ctx>, String) {
         let type_kind = arena.get(param.first_child).map(|n| n.kind).unwrap_or(2);
         let llvm_type = self.node_kind_to_llvm_type(type_kind);
         let mut name = "p".to_string();
@@ -339,7 +343,8 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                         let (actual_alloca_type, is_array) = if let Some(dn) = declarator_node {
                             if dn.kind == 8 {
                                 let array_size = dn.data;
-                                let arr_type = alloca_type.array_type(array_size).as_basic_type_enum();
+                                let arr_type =
+                                    alloca_type.array_type(array_size).as_basic_type_enum();
                                 (arr_type, true)
                             } else {
                                 (alloca_type, false)
@@ -350,7 +355,8 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
 
                         let var_name_opt: Option<String> = declarator_node.and_then(|n| {
                             if n.kind == 60 {
-                                arena.get_string(NodeOffset(n.data))
+                                arena
+                                    .get_string(NodeOffset(n.data))
                                     .filter(|s| !s.is_empty())
                                     .map(|s| s.to_string())
                             } else {
@@ -368,8 +374,12 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                                     let field_names = if sn.data != 0 {
                                         arena
                                             .get_string(NodeOffset(sn.data))
-                                            .and_then(|tag| self.struct_tag_fields.get(tag).cloned())
-                                            .unwrap_or_else(|| Self::collect_struct_field_names(arena, sn))
+                                            .and_then(|tag| {
+                                                self.struct_tag_fields.get(tag).cloned()
+                                            })
+                                            .unwrap_or_else(|| {
+                                                Self::collect_struct_field_names(arena, sn)
+                                            })
                                     } else {
                                         Self::collect_struct_field_names(arena, sn)
                                     };
@@ -412,7 +422,8 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                         } else {
                             (
                                 alloca_type,
-                                arena.get_string(NodeOffset(child.data))
+                                arena
+                                    .get_string(NodeOffset(child.data))
                                     .filter(|s| !s.is_empty())
                                     .map(|s| s.to_string()),
                             )
@@ -514,7 +525,12 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                             let zero = self.context.i32_type().const_zero();
                             let ptr = unsafe {
                                 self.builder
-                                    .build_gep(array_type, binding.ptr, &[zero, index_val], "arrayidx")
+                                    .build_gep(
+                                        array_type,
+                                        binding.ptr,
+                                        &[zero, index_val],
+                                        "arrayidx",
+                                    )
                                     .map_err(|_| BackendError::InvalidNode)?
                             };
                             return Ok(Some((ptr, array_type.get_element_type())));
@@ -573,10 +589,26 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
             };
 
             return match op_code {
-                1 => Ok(self.builder.build_float_add(lhs_float, rhs_float, "assign_fadd").map_err(|_| BackendError::InvalidNode)?.into()),
-                2 => Ok(self.builder.build_float_sub(lhs_float, rhs_float, "assign_fsub").map_err(|_| BackendError::InvalidNode)?.into()),
-                3 => Ok(self.builder.build_float_mul(lhs_float, rhs_float, "assign_fmul").map_err(|_| BackendError::InvalidNode)?.into()),
-                4 => Ok(self.builder.build_float_div(lhs_float, rhs_float, "assign_fdiv").map_err(|_| BackendError::InvalidNode)?.into()),
+                1 => Ok(self
+                    .builder
+                    .build_float_add(lhs_float, rhs_float, "assign_fadd")
+                    .map_err(|_| BackendError::InvalidNode)?
+                    .into()),
+                2 => Ok(self
+                    .builder
+                    .build_float_sub(lhs_float, rhs_float, "assign_fsub")
+                    .map_err(|_| BackendError::InvalidNode)?
+                    .into()),
+                3 => Ok(self
+                    .builder
+                    .build_float_mul(lhs_float, rhs_float, "assign_fmul")
+                    .map_err(|_| BackendError::InvalidNode)?
+                    .into()),
+                4 => Ok(self
+                    .builder
+                    .build_float_div(lhs_float, rhs_float, "assign_fdiv")
+                    .map_err(|_| BackendError::InvalidNode)?
+                    .into()),
                 _ => Err(BackendError::InvalidOperator(op_code)),
             };
         }
@@ -584,16 +616,56 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
         let lhs_int = lhs_val.into_int_value();
         let rhs_int = rhs_val.into_int_value();
         match op_code {
-            1 => Ok(self.builder.build_int_add(lhs_int, rhs_int, "assign_add").map_err(|_| BackendError::InvalidNode)?.into()),
-            2 => Ok(self.builder.build_int_sub(lhs_int, rhs_int, "assign_sub").map_err(|_| BackendError::InvalidNode)?.into()),
-            3 => Ok(self.builder.build_int_mul(lhs_int, rhs_int, "assign_mul").map_err(|_| BackendError::InvalidNode)?.into()),
-            4 => Ok(self.builder.build_int_signed_div(lhs_int, rhs_int, "assign_div").map_err(|_| BackendError::InvalidNode)?.into()),
-            5 => Ok(self.builder.build_int_signed_rem(lhs_int, rhs_int, "assign_rem").map_err(|_| BackendError::InvalidNode)?.into()),
-            14 => Ok(self.builder.build_and(lhs_int, rhs_int, "assign_and").map_err(|_| BackendError::InvalidNode)?.into()),
-            15 => Ok(self.builder.build_or(lhs_int, rhs_int, "assign_or").map_err(|_| BackendError::InvalidNode)?.into()),
-            16 => Ok(self.builder.build_xor(lhs_int, rhs_int, "assign_xor").map_err(|_| BackendError::InvalidNode)?.into()),
-            17 => Ok(self.builder.build_left_shift(lhs_int, rhs_int, "assign_shl").map_err(|_| BackendError::InvalidNode)?.into()),
-            18 => Ok(self.builder.build_right_shift(lhs_int, rhs_int, false, "assign_shr").map_err(|_| BackendError::InvalidNode)?.into()),
+            1 => Ok(self
+                .builder
+                .build_int_add(lhs_int, rhs_int, "assign_add")
+                .map_err(|_| BackendError::InvalidNode)?
+                .into()),
+            2 => Ok(self
+                .builder
+                .build_int_sub(lhs_int, rhs_int, "assign_sub")
+                .map_err(|_| BackendError::InvalidNode)?
+                .into()),
+            3 => Ok(self
+                .builder
+                .build_int_mul(lhs_int, rhs_int, "assign_mul")
+                .map_err(|_| BackendError::InvalidNode)?
+                .into()),
+            4 => Ok(self
+                .builder
+                .build_int_signed_div(lhs_int, rhs_int, "assign_div")
+                .map_err(|_| BackendError::InvalidNode)?
+                .into()),
+            5 => Ok(self
+                .builder
+                .build_int_signed_rem(lhs_int, rhs_int, "assign_rem")
+                .map_err(|_| BackendError::InvalidNode)?
+                .into()),
+            14 => Ok(self
+                .builder
+                .build_and(lhs_int, rhs_int, "assign_and")
+                .map_err(|_| BackendError::InvalidNode)?
+                .into()),
+            15 => Ok(self
+                .builder
+                .build_or(lhs_int, rhs_int, "assign_or")
+                .map_err(|_| BackendError::InvalidNode)?
+                .into()),
+            16 => Ok(self
+                .builder
+                .build_xor(lhs_int, rhs_int, "assign_xor")
+                .map_err(|_| BackendError::InvalidNode)?
+                .into()),
+            17 => Ok(self
+                .builder
+                .build_left_shift(lhs_int, rhs_int, "assign_shl")
+                .map_err(|_| BackendError::InvalidNode)?
+                .into()),
+            18 => Ok(self
+                .builder
+                .build_right_shift(lhs_int, rhs_int, false, "assign_shr")
+                .map_err(|_| BackendError::InvalidNode)?
+                .into()),
             _ => Err(BackendError::InvalidOperator(op_code)),
         }
     }
@@ -704,7 +776,8 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                             while param_off != NodeOffset::NULL {
                                 if let Some(param) = arena.get(param_off) {
                                     if param.kind == 24 {
-                                        let (ptype, pname) = self.extract_param_type_name(arena, param);
+                                        let (ptype, pname) =
+                                            self.extract_param_type_name(arena, param);
                                         param_types.push(ptype.into());
                                         param_llvm_types_list.push(ptype);
                                         param_names.push(pname);
@@ -727,8 +800,8 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
             }
         }
 
-        let ret_llvm = return_llvm_type
-            .unwrap_or_else(|| self.context.i32_type().as_basic_type_enum());
+        let ret_llvm =
+            return_llvm_type.unwrap_or_else(|| self.context.i32_type().as_basic_type_enum());
         let fn_type = if is_void_ret {
             self.context.void_type().fn_type(&param_types, false)
         } else {
@@ -742,7 +815,11 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
 
         self.variables.clear();
 
-        for (i, (pname, ptype)) in param_names.iter().zip(param_llvm_types_list.iter()).enumerate() {
+        for (i, (pname, ptype)) in param_names
+            .iter()
+            .zip(param_llvm_types_list.iter())
+            .enumerate()
+        {
             let param_ptr = self
                 .builder
                 .build_alloca(*ptype, pname)
@@ -843,8 +920,14 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
         //   cond_wrap.first_child=condition_expr, cond_wrap.next_sibling=body_wrap(kind=0)
         //     body_wrap.first_child=then_stmt, body_wrap.next_sibling=else_stmt
         let cond_wrap_offset = node.first_child;
-        let cond_offset = arena.get(cond_wrap_offset).map(|w| w.first_child).unwrap_or(NodeOffset::NULL);
-        let body_wrap_offset = arena.get(cond_wrap_offset).map(|w| w.next_sibling).unwrap_or(NodeOffset::NULL);
+        let cond_offset = arena
+            .get(cond_wrap_offset)
+            .map(|w| w.first_child)
+            .unwrap_or(NodeOffset::NULL);
+        let body_wrap_offset = arena
+            .get(cond_wrap_offset)
+            .map(|w| w.next_sibling)
+            .unwrap_or(NodeOffset::NULL);
         let (then_offset, else_offset) = if let Some(bw) = arena.get(body_wrap_offset) {
             (bw.first_child, bw.next_sibling)
         } else {
@@ -913,8 +996,14 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
         // kind=42: first_child=cond_wrap(kind=0)
         //   cond_wrap.first_child=condition_expr, cond_wrap.next_sibling=body
         let cond_wrap_offset = node.first_child;
-        let cond_offset = arena.get(cond_wrap_offset).map(|w| w.first_child).unwrap_or(NodeOffset::NULL);
-        let body_offset = arena.get(cond_wrap_offset).map(|w| w.next_sibling).unwrap_or(NodeOffset::NULL);
+        let cond_offset = arena
+            .get(cond_wrap_offset)
+            .map(|w| w.first_child)
+            .unwrap_or(NodeOffset::NULL);
+        let body_offset = arena
+            .get(cond_wrap_offset)
+            .map(|w| w.next_sibling)
+            .unwrap_or(NodeOffset::NULL);
 
         let function = self
             .builder
@@ -972,10 +1061,22 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
         //     cond_wrap.first_child=condition_expr, cond_wrap.next_sibling=incr_wrap(kind=0)
         //       incr_wrap.first_child=increment, incr_wrap.next_sibling=body
         let init_wrap_offset = node.first_child;
-        let init_offset = arena.get(init_wrap_offset).map(|n| n.first_child).unwrap_or(NodeOffset::NULL);
-        let cond_wrap_offset = arena.get(init_wrap_offset).map(|n| n.next_sibling).unwrap_or(NodeOffset::NULL);
-        let cond_offset = arena.get(cond_wrap_offset).map(|n| n.first_child).unwrap_or(NodeOffset::NULL);
-        let incr_wrap_offset = arena.get(cond_wrap_offset).map(|n| n.next_sibling).unwrap_or(NodeOffset::NULL);
+        let init_offset = arena
+            .get(init_wrap_offset)
+            .map(|n| n.first_child)
+            .unwrap_or(NodeOffset::NULL);
+        let cond_wrap_offset = arena
+            .get(init_wrap_offset)
+            .map(|n| n.next_sibling)
+            .unwrap_or(NodeOffset::NULL);
+        let cond_offset = arena
+            .get(cond_wrap_offset)
+            .map(|n| n.first_child)
+            .unwrap_or(NodeOffset::NULL);
+        let incr_wrap_offset = arena
+            .get(cond_wrap_offset)
+            .map(|n| n.next_sibling)
+            .unwrap_or(NodeOffset::NULL);
         let (incr_offset, body_offset) = if let Some(iw) = arena.get(incr_wrap_offset) {
             (iw.first_child, iw.next_sibling)
         } else {

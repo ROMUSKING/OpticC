@@ -23,7 +23,12 @@ pub struct Token {
 
 impl Token {
     pub fn new(kind: TokenKind, start: u32, end: u32, data: u32) -> Self {
-        Self { kind, start, end, data }
+        Self {
+            kind,
+            start,
+            end,
+            data,
+        }
     }
 }
 
@@ -110,7 +115,8 @@ impl<'a> Lexer<'a> {
                 Some(b'x') | Some(b'X') => {
                     self.advance();
                     while let Some(c) = self.current_byte() {
-                        if Self::is_digit(c) || (c >= b'a' && c <= b'f') || (c >= b'A' && c <= b'F') {
+                        if Self::is_digit(c) || (c >= b'a' && c <= b'f') || (c >= b'A' && c <= b'F')
+                        {
                             self.advance();
                         } else {
                             break;
@@ -239,12 +245,14 @@ impl<'a> Lexer<'a> {
         Token::new(TokenKind::Preprocessor, start, self.position, 0)
     }
 
-fn read_punctuator(&mut self) -> Token {
+    fn read_punctuator(&mut self) -> Token {
         let start = self.position;
         let c = self.current_byte().unwrap_or(b' ');
 
         match c {
-            b'[' | b']' | b'(' | b')' | b'{' | b'}' | b'.' | b'&' | b'*' | b'+' | b'-' | b'~' | b'!' | b'/' | b'%' | b'<' | b'>' | b'^' | b'|' | b'?' | b':' | b';' | b'=' | b',' | b'#' => {
+            b'[' | b']' | b'(' | b')' | b'{' | b'}' | b'.' | b'&' | b'*' | b'+' | b'-' | b'~'
+            | b'!' | b'/' | b'%' | b'<' | b'>' | b'^' | b'|' | b'?' | b':' | b';' | b'=' | b','
+            | b'#' => {
                 self.advance();
                 let next = self.current_byte().unwrap_or(b' ');
                 match (c, next) {
@@ -266,10 +274,22 @@ fn read_punctuator(&mut self) -> Token {
                             self.advance();
                         }
                     }
-                    (b'+', b'+') | (b'-', b'-') | (b'&', b'&') | (b'|', b'|')
-                    | (b'<', b'=') | (b'>', b'=') | (b'=', b'=') | (b'!', b'=')
-                    | (b'*', b'=') | (b'/', b'=') | (b'%', b'=') | (b'+', b'=')
-                    | (b'-', b'=') | (b'&', b'=') | (b'^', b'=') | (b'|', b'=') => {
+                    (b'+', b'+')
+                    | (b'-', b'-')
+                    | (b'&', b'&')
+                    | (b'|', b'|')
+                    | (b'<', b'=')
+                    | (b'>', b'=')
+                    | (b'=', b'=')
+                    | (b'!', b'=')
+                    | (b'*', b'=')
+                    | (b'/', b'=')
+                    | (b'%', b'=')
+                    | (b'+', b'=')
+                    | (b'-', b'=')
+                    | (b'&', b'=')
+                    | (b'^', b'=')
+                    | (b'|', b'=') => {
                         self.advance();
                     }
                     (b'#', b'#') => {
@@ -372,11 +392,43 @@ fn read_punctuator(&mut self) -> Token {
 }
 
 const KEYWORDS: &[&[u8]] = &[
-    b"auto", b"break", b"case", b"char", b"const", b"continue", b"default", b"do", b"double",
-    b"else", b"enum", b"extern", b"float", b"for", b"goto", b"if", b"inline", b"int", b"long",
-    b"register", b"restrict", b"return", b"short", b"signed", b"sizeof", b"static", b"struct",
-    b"switch", b"typedef", b"union", b"unsigned", b"void", b"volatile", b"while", b"_Bool",
-    b"_Complex", b"_Imaginary",
+    b"auto",
+    b"break",
+    b"case",
+    b"char",
+    b"const",
+    b"continue",
+    b"default",
+    b"do",
+    b"double",
+    b"else",
+    b"enum",
+    b"extern",
+    b"float",
+    b"for",
+    b"goto",
+    b"if",
+    b"inline",
+    b"int",
+    b"long",
+    b"register",
+    b"restrict",
+    b"return",
+    b"short",
+    b"signed",
+    b"sizeof",
+    b"static",
+    b"struct",
+    b"switch",
+    b"typedef",
+    b"union",
+    b"unsigned",
+    b"void",
+    b"volatile",
+    b"while",
+    b"_Bool",
+    b"_Complex",
+    b"_Imaginary",
 ];
 
 pub fn get_keyword_index(text: &[u8]) -> Option<u16> {

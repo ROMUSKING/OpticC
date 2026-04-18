@@ -5,7 +5,7 @@ use std::hash::{Hash, Hasher};
 use crate::arena::{Arena, CAstNode, NodeOffset};
 
 pub mod resolve;
-pub use resolve::{TypeResolver, TypeError};
+pub use resolve::{TypeError, TypeResolver};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct TypeId(pub u32);
@@ -33,16 +33,31 @@ impl TypeId {
 pub enum CType {
     Void,
     Bool,
-    Char { signed: bool },
-    Short { signed: bool },
-    Int { signed: bool },
-    Long { signed: bool },
-    LongLong { signed: bool },
+    Char {
+        signed: bool,
+    },
+    Short {
+        signed: bool,
+    },
+    Int {
+        signed: bool,
+    },
+    Long {
+        signed: bool,
+    },
+    LongLong {
+        signed: bool,
+    },
     Float,
     Double,
     LongDouble,
-    Pointer { base: TypeId },
-    Array { element: TypeId, size: Option<u64> },
+    Pointer {
+        base: TypeId,
+    },
+    Array {
+        element: TypeId,
+        size: Option<u64>,
+    },
     Struct {
         name: Option<String>,
         members: Vec<StructMember>,
@@ -174,8 +189,14 @@ impl TypeSignature {
                 return_type,
                 params,
                 variadic,
-            } => Some(TypeSignature::Function(*return_type, params.clone(), *variadic)),
-            CType::Enum { name, underlying } => Some(TypeSignature::Enum(name.clone(), *underlying)),
+            } => Some(TypeSignature::Function(
+                *return_type,
+                params.clone(),
+                *variadic,
+            )),
+            CType::Enum { name, underlying } => {
+                Some(TypeSignature::Enum(name.clone(), *underlying))
+            }
             CType::Typedef { name, underlying } => {
                 Some(TypeSignature::Typedef(name.clone(), *underlying))
             }
@@ -377,16 +398,8 @@ impl TypeSystem {
 
     pub fn compute_struct_layout(&mut self, id: TypeId) {
         let (members, align, is_union) = match self.get_type(id) {
-            Some(CType::Struct {
-                members,
-                align,
-                ..
-            }) => (members.clone(), *align, false),
-            Some(CType::Union {
-                members,
-                align,
-                ..
-            }) => (members.clone(), *align, true),
+            Some(CType::Struct { members, align, .. }) => (members.clone(), *align, false),
+            Some(CType::Union { members, align, .. }) => (members.clone(), *align, true),
             _ => return,
         };
 
@@ -519,7 +532,13 @@ impl TypeSystem {
         }
     }
 
-    fn update_struct_layout(&mut self, id: TypeId, size: u64, align: u64, members: Vec<StructMember>) {
+    fn update_struct_layout(
+        &mut self,
+        id: TypeId,
+        size: u64,
+        align: u64,
+        members: Vec<StructMember>,
+    ) {
         if let Some(ty) = self.types.get_mut(id.0 as usize) {
             match ty {
                 CType::Struct {
@@ -672,9 +691,7 @@ mod tests {
     #[test]
     fn test_pointer_type_creation() {
         let mut ts = TypeSystem::new();
-        let int_ptr = ts.add_type(CType::Pointer {
-            base: TypeId::INT,
-        });
+        let int_ptr = ts.add_type(CType::Pointer { base: TypeId::INT });
         assert!(ts.is_pointer(int_ptr));
         assert_eq!(ts.size_of(int_ptr), 8);
         assert_eq!(ts.align_of(int_ptr), 8);
@@ -684,9 +701,7 @@ mod tests {
     #[test]
     fn test_pointer_to_pointer() {
         let mut ts = TypeSystem::new();
-        let int_ptr = ts.add_type(CType::Pointer {
-            base: TypeId::INT,
-        });
+        let int_ptr = ts.add_type(CType::Pointer { base: TypeId::INT });
         let ptr_ptr = ts.add_type(CType::Pointer { base: int_ptr });
         assert!(ts.is_pointer(ptr_ptr));
         assert_eq!(ts.pointer_base(ptr_ptr), Some(int_ptr));
@@ -931,9 +946,7 @@ mod tests {
         let mut ts = TypeSystem::new();
         assert!(ts.is_scalar(TypeId::INT));
         assert!(ts.is_scalar(TypeId::DOUBLE));
-        let ptr = ts.add_type(CType::Pointer {
-            base: TypeId::INT,
-        });
+        let ptr = ts.add_type(CType::Pointer { base: TypeId::INT });
         assert!(ts.is_scalar(ptr));
         assert!(!ts.is_scalar(TypeId::VOID));
     }
@@ -1018,12 +1031,8 @@ mod tests {
     #[test]
     fn test_type_deduplication() {
         let mut ts = TypeSystem::new();
-        let ptr1 = ts.add_type(CType::Pointer {
-            base: TypeId::INT,
-        });
-        let ptr2 = ts.add_type(CType::Pointer {
-            base: TypeId::INT,
-        });
+        let ptr1 = ts.add_type(CType::Pointer { base: TypeId::INT });
+        let ptr2 = ts.add_type(CType::Pointer { base: TypeId::INT });
         assert_eq!(ptr1, ptr2);
     }
 

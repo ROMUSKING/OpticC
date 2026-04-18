@@ -15,7 +15,7 @@ pub struct BenchmarkResult {
     pub metrics: BenchmarkMetrics,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct BenchmarkMetrics {
     pub compile_time_ms: u64,
@@ -31,6 +31,12 @@ pub struct BenchmarkMetrics {
     pub test_total: u64,
     pub test_passed: u64,
     pub test_failed: u64,
+}
+
+impl Default for BenchmarkMetrics {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl BenchmarkMetrics {
@@ -467,7 +473,9 @@ impl BenchmarkRunner {
                 &[],
                 &HashMap::new(),
             )
-            .map_err(|e| BenchmarkError::CompileError(src_path.display().to_string(), e.to_string()))?;
+            .map_err(|e| {
+                BenchmarkError::CompileError(src_path.display().to_string(), e.to_string())
+            })?;
 
             return Ok(CompileMeasurement {
                 total_ms: timings.total_ms(),
@@ -540,7 +548,8 @@ impl BenchmarkRunner {
     }
 
     fn save_results(&self, results: &[BenchmarkResult]) -> Result<(), BenchmarkError> {
-        let json = generate_json_report(results).map_err(|e| BenchmarkError::RuntimeError(e.to_string()))?;
+        let json = generate_json_report(results)
+            .map_err(|e| BenchmarkError::RuntimeError(e.to_string()))?;
         let results_path = self.results_dir.join("results.json");
         fs::write(&results_path, json)?;
         Ok(())
@@ -612,9 +621,18 @@ pub fn generate_markdown_report(results: &[BenchmarkResult]) -> String {
             let baseline = bench_results.iter().find(|r| r.compiler == "gcc");
             if let Some(base) = baseline {
                 for r in &bench_results {
-                    if r.compiler != base.compiler && base.metrics.compile_time_ms > 0 {
-                        let ratio = r.metrics.compile_time_ms as f64
-                            / base.metrics.compile_time_ms as f64;
+                    if r.compiler == base.compiler {
+                        continue;
+                    }
+
+                    if r.metrics.correctness == "error" {
+                        md.push_str(&format!(
+                            "- {} vs {}: unavailable (compile error)\n",
+                            r.compiler, base.compiler
+                        ));
+                    } else if base.metrics.compile_time_ms > 0 {
+                        let ratio =
+                            r.metrics.compile_time_ms as f64 / base.metrics.compile_time_ms as f64;
                         md.push_str(&format!(
                             "- {} vs {}: {:.2}x compile time\n",
                             r.compiler, base.compiler, ratio
@@ -628,10 +646,22 @@ pub fn generate_markdown_report(results: &[BenchmarkResult]) -> String {
     md.push_str("\n## Statistics\n\n");
 
     let total = results.len();
-    let passed = results.iter().filter(|r| r.metrics.correctness == "pass").count();
-    let failed = results.iter().filter(|r| r.metrics.correctness == "fail").count();
-    let errors = results.iter().filter(|r| r.metrics.correctness == "error").count();
-    let skipped = results.iter().filter(|r| r.metrics.correctness == "skipped").count();
+    let passed = results
+        .iter()
+        .filter(|r| r.metrics.correctness == "pass")
+        .count();
+    let failed = results
+        .iter()
+        .filter(|r| r.metrics.correctness == "fail")
+        .count();
+    let errors = results
+        .iter()
+        .filter(|r| r.metrics.correctness == "error")
+        .count();
+    let skipped = results
+        .iter()
+        .filter(|r| r.metrics.correctness == "skipped")
+        .count();
 
     md.push_str(&format!("- Total benchmarks: {}\n", total));
     md.push_str(&format!("- Passed: {}\n", passed));
@@ -686,8 +716,11 @@ pub fn calculate_averages(results: &[BenchmarkResult]) -> Vec<BenchmarkResult> {
         }
         let avg_compile =
             group.iter().map(|r| r.metrics.compile_time_ms).sum::<u64>() / group.len() as u64;
-        let avg_output =
-            group.iter().map(|r| r.metrics.output_size_bytes).sum::<u64>() / group.len() as u64;
+        let avg_output = group
+            .iter()
+            .map(|r| r.metrics.output_size_bytes)
+            .sum::<u64>()
+            / group.len() as u64;
         let avg_memory =
             group.iter().map(|r| r.metrics.peak_memory_kb).sum::<u64>() / group.len() as u64;
 
@@ -701,15 +734,24 @@ pub fn calculate_averages(results: &[BenchmarkResult]) -> Vec<BenchmarkResult> {
                 compile_time_ms: avg_compile,
                 output_size_bytes: avg_output,
                 peak_memory_kb: avg_memory,
-                preprocess_time_ms: group.iter().map(|r| r.metrics.preprocess_time_ms).sum::<u64>()
+                preprocess_time_ms: group
+                    .iter()
+                    .map(|r| r.metrics.preprocess_time_ms)
+                    .sum::<u64>()
                     / group.len() as u64,
                 parse_time_ms: group.iter().map(|r| r.metrics.parse_time_ms).sum::<u64>()
                     / group.len() as u64,
                 codegen_time_ms: group.iter().map(|r| r.metrics.codegen_time_ms).sum::<u64>()
                     / group.len() as u64,
-                optimize_time_ms: group.iter().map(|r| r.metrics.optimize_time_ms).sum::<u64>()
+                optimize_time_ms: group
+                    .iter()
+                    .map(|r| r.metrics.optimize_time_ms)
+                    .sum::<u64>()
                     / group.len() as u64,
-                ir_write_time_ms: group.iter().map(|r| r.metrics.ir_write_time_ms).sum::<u64>()
+                ir_write_time_ms: group
+                    .iter()
+                    .map(|r| r.metrics.ir_write_time_ms)
+                    .sum::<u64>()
                     / group.len() as u64,
                 llc_time_ms: group.iter().map(|r| r.metrics.llc_time_ms).sum::<u64>()
                     / group.len() as u64,
@@ -769,11 +811,7 @@ fn average_measurements(measurements: &[CompileMeasurement]) -> CompileMeasureme
     let len = measurements.len() as u64;
     CompileMeasurement {
         total_ms: measurements.iter().map(|m| m.total_ms).sum::<u64>() / len,
-        peak_memory_kb: measurements
-            .iter()
-            .map(|m| m.peak_memory_kb)
-            .sum::<u64>()
-            / len,
+        peak_memory_kb: measurements.iter().map(|m| m.peak_memory_kb).sum::<u64>() / len,
         phase_timings: CompilePhaseTimings {
             preprocess_ms: measurements
                 .iter()
@@ -1069,7 +1107,8 @@ mod tests {
     fn test_measure_output_size() {
         // Use a test-specific suffix to avoid colliding with test_measure_correctness_pass
         // which runs in parallel and uses the same process ID.
-        let temp_dir = std::env::temp_dir().join(format!("optic_bench_size_test_{}", std::process::id()));
+        let temp_dir =
+            std::env::temp_dir().join(format!("optic_bench_size_test_{}", std::process::id()));
         fs::create_dir_all(&temp_dir).unwrap();
         let test_file = temp_dir.join("test_output");
         fs::write(&test_file, "hello world").unwrap();
@@ -1097,7 +1136,8 @@ mod tests {
     fn test_measure_correctness_pass() {
         // Use a test-specific suffix to avoid colliding with test_measure_output_size
         // which runs in parallel and uses the same process ID.
-        let temp_dir = std::env::temp_dir().join(format!("optic_bench_pass_test_{}", std::process::id()));
+        let temp_dir =
+            std::env::temp_dir().join(format!("optic_bench_pass_test_{}", std::process::id()));
         fs::create_dir_all(&temp_dir).unwrap();
 
         #[cfg(target_os = "linux")]
@@ -1111,8 +1151,11 @@ mod tests {
                 let _ = Command::new("gcc").arg("-o").arg(&out).arg(&src).output();
                 if out.exists() {
                     let runner = BenchmarkRunner::new();
-                    let metrics =
-                        runner.measure_correctness(&out, &CompilerConfig::new("gcc", "gcc"), "test");
+                    let metrics = runner.measure_correctness(
+                        &out,
+                        &CompilerConfig::new("gcc", "gcc"),
+                        "test",
+                    );
                     assert_eq!(metrics.correctness, "pass");
                 }
             }
@@ -1130,20 +1173,18 @@ mod tests {
 
     #[test]
     fn test_generate_markdown_report_with_results() {
-        let results = vec![
-            BenchmarkResult {
-                name: "loop_sum".to_string(),
-                compiler: "gcc".to_string(),
-                version: "11.0".to_string(),
-                optimization: "O0".to_string(),
-                metrics: BenchmarkMetrics {
-                    compile_time_ms: 100,
-                    output_size_bytes: 8192,
-                    peak_memory_kb: 1024,
-                    ..BenchmarkMetrics::pass(1)
-                },
+        let results = vec![BenchmarkResult {
+            name: "loop_sum".to_string(),
+            compiler: "gcc".to_string(),
+            version: "11.0".to_string(),
+            optimization: "O0".to_string(),
+            metrics: BenchmarkMetrics {
+                compile_time_ms: 100,
+                output_size_bytes: 8192,
+                peak_memory_kb: 1024,
+                ..BenchmarkMetrics::pass(1)
             },
-        ];
+        }];
 
         let report = generate_markdown_report(&results);
         assert!(report.contains("loop_sum"));
@@ -1290,7 +1331,8 @@ mod tests {
 
     #[test]
     fn test_error_handling_failed_compilation() {
-        let temp_dir = std::env::temp_dir().join(format!("optic_bench_test_{}", std::process::id()));
+        let temp_dir =
+            std::env::temp_dir().join(format!("optic_bench_test_{}", std::process::id()));
         fs::create_dir_all(&temp_dir).unwrap();
 
         let src = temp_dir.join("invalid.c");
@@ -1371,7 +1413,10 @@ mod tests {
 
         assert_eq!(deserialized.name, result.name);
         assert_eq!(deserialized.compiler, result.compiler);
-        assert_eq!(deserialized.metrics.compile_time_ms, result.metrics.compile_time_ms);
+        assert_eq!(
+            deserialized.metrics.compile_time_ms,
+            result.metrics.compile_time_ms
+        );
         assert_eq!(deserialized.metrics.correctness, result.metrics.correctness);
     }
 

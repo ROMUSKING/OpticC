@@ -251,9 +251,7 @@ impl Arena {
             return Some("");
         }
 
-        if offset.0 < self.string_start
-            || offset.0 >= self.string_start + self.string_allocated
-        {
+        if offset.0 < self.string_start || offset.0 >= self.string_start + self.string_allocated {
             return None;
         }
 
@@ -266,7 +264,9 @@ impl Arena {
             let len_ptr = self.mmap.as_ptr().add(byte_offset) as *const u32;
             let len = std::ptr::read(len_ptr) as usize;
             let bytes = std::slice::from_raw_parts(
-                self.mmap.as_ptr().add(byte_offset + std::mem::size_of::<u32>()),
+                self.mmap
+                    .as_ptr()
+                    .add(byte_offset + std::mem::size_of::<u32>()),
                 len,
             );
             std::str::from_utf8(bytes).ok()
@@ -311,9 +311,7 @@ impl Arena {
             return Some(&[]);
         }
 
-        if offset.0 < self.string_start
-            || offset.0 >= self.string_start + self.string_allocated
-        {
+        if offset.0 < self.string_start || offset.0 >= self.string_start + self.string_allocated {
             return None;
         }
 
@@ -323,16 +321,17 @@ impl Arena {
             + (string_slot as usize) * std::mem::size_of::<CAstNode>();
 
         unsafe {
-            let stored_len = std::ptr::read(
-                self.mmap.as_ptr().add(byte_offset) as *const u32,
-            ) as usize;
+            let stored_len =
+                std::ptr::read(self.mmap.as_ptr().add(byte_offset) as *const u32) as usize;
 
             if stored_len != len as usize {
                 return None;
             }
 
             Some(std::slice::from_raw_parts(
-                self.mmap.as_ptr().add(byte_offset + std::mem::size_of::<u32>()),
+                self.mmap
+                    .as_ptr()
+                    .add(byte_offset + std::mem::size_of::<u32>()),
                 len as usize,
             ))
         }
@@ -387,8 +386,8 @@ impl Drop for Arena {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::NamedTempFile;
     use std::time::Instant;
+    use tempfile::NamedTempFile;
 
     #[test]
     fn test_basic_allocation() {

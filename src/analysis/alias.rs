@@ -79,7 +79,11 @@ impl<'a> AliasAnalyzer<'a> {
         }
     }
 
-    pub fn trace_provenance(&self, node: NodeOffset, visited: &mut HashSet<u32>) -> PointerProvenance {
+    pub fn trace_provenance(
+        &self,
+        node: NodeOffset,
+        visited: &mut HashSet<u32>,
+    ) -> PointerProvenance {
         if visited.contains(&node.0) {
             return PointerProvenance {
                 source: node,
@@ -182,7 +186,8 @@ impl<'a> AliasAnalyzer<'a> {
     }
 
     pub fn mark_freed(&mut self, node: NodeOffset) {
-        self.taint_state.insert(node, TaintState::Tainted { source: node });
+        self.taint_state
+            .insert(node, TaintState::Tainted { source: node });
         self.emit_diagnostic(
             DiagnosticSeverity::Warning,
             node,
@@ -207,8 +212,7 @@ impl<'a> AliasAnalyzer<'a> {
 
         // Case 2: the node is a dereference (*p) whose operand p is a freed pointer.
         if let Some(ast_node) = self.arena.get(deref) {
-            if ast_node.kind == AST_UNOP && ast_node.data == OP_DEREF
-                && ast_node.first_child.0 != 0
+            if ast_node.kind == AST_UNOP && ast_node.data == OP_DEREF && ast_node.first_child.0 != 0
             {
                 let child_taint = self.check_taint(ast_node.first_child);
                 if let TaintState::Tainted { source } = child_taint {
@@ -311,7 +315,11 @@ impl<'a> AliasAnalyzer<'a> {
         &self.provenance_cache
     }
 
-    pub fn compute_pointer_relationship(&mut self, ptr_a: NodeOffset, ptr_b: NodeOffset) -> AffineGrade {
+    pub fn compute_pointer_relationship(
+        &mut self,
+        ptr_a: NodeOffset,
+        ptr_b: NodeOffset,
+    ) -> AffineGrade {
         if self.is_noalias(ptr_a, ptr_b) {
             AffineGrade::Owned
         } else {
@@ -331,7 +339,12 @@ impl<'a> AliasAnalyzer<'a> {
         result
     }
 
-    fn dfs_recursive(&self, node: NodeOffset, visited: &mut HashSet<u32>, result: &mut Vec<NodeOffset>) {
+    fn dfs_recursive(
+        &self,
+        node: NodeOffset,
+        visited: &mut HashSet<u32>,
+        result: &mut Vec<NodeOffset>,
+    ) {
         if visited.contains(&node.0) || node.0 == 0 {
             return;
         }
@@ -396,8 +409,6 @@ impl<'a> AliasAnalyzer<'a> {
     }
 }
 
-
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -418,7 +429,12 @@ mod tests {
         (arena, path)
     }
 
-    fn make_node(kind: u16, data: u32, first_child: NodeOffset, next_sibling: NodeOffset) -> CAstNode {
+    fn make_node(
+        kind: u16,
+        data: u32,
+        first_child: NodeOffset,
+        next_sibling: NodeOffset,
+    ) -> CAstNode {
         CAstNode {
             kind,
             flags: NodeFlags::empty(),
@@ -440,8 +456,12 @@ mod tests {
         let (mut arena, path) = create_test_arena();
 
         arena.alloc(make_node(0, 0, NodeOffset(0), NodeOffset(0)));
-        let node_a = arena.alloc(make_node(AST_VAR_DECL, 0, NodeOffset(0), NodeOffset(0))).unwrap();
-        let node_b = arena.alloc(make_node(AST_VAR_DECL, 0, NodeOffset(0), NodeOffset(0))).unwrap();
+        let node_a = arena
+            .alloc(make_node(AST_VAR_DECL, 0, NodeOffset(0), NodeOffset(0)))
+            .unwrap();
+        let node_b = arena
+            .alloc(make_node(AST_VAR_DECL, 0, NodeOffset(0), NodeOffset(0)))
+            .unwrap();
 
         let analyzer = AliasAnalyzer::new(&arena);
         assert!(analyzer.is_noalias(node_a, node_b));
@@ -454,17 +474,23 @@ mod tests {
     fn test_is_noalias_shared_provenance() {
         let (mut arena, path) = create_test_arena();
 
-        let shared = arena.alloc(make_node(AST_VAR_DECL, 0, NodeOffset(0), NodeOffset(0))).unwrap();
+        let shared = arena
+            .alloc(make_node(AST_VAR_DECL, 0, NodeOffset(0), NodeOffset(0)))
+            .unwrap();
 
-        let node_a = arena.alloc(CAstNode {
-            first_child: shared,
-            ..make_node(AST_ASSIGN, 0, NodeOffset(0), NodeOffset(0))
-        }).unwrap();
+        let node_a = arena
+            .alloc(CAstNode {
+                first_child: shared,
+                ..make_node(AST_ASSIGN, 0, NodeOffset(0), NodeOffset(0))
+            })
+            .unwrap();
 
-        let node_b = arena.alloc(CAstNode {
-            first_child: shared,
-            ..make_node(AST_ASSIGN, 0, NodeOffset(0), NodeOffset(0))
-        }).unwrap();
+        let node_b = arena
+            .alloc(CAstNode {
+                first_child: shared,
+                ..make_node(AST_ASSIGN, 0, NodeOffset(0), NodeOffset(0))
+            })
+            .unwrap();
 
         let analyzer = AliasAnalyzer::new(&arena);
         assert!(!analyzer.is_noalias(node_a, node_b));
@@ -477,7 +503,9 @@ mod tests {
     fn test_affine_grade_owned() {
         let (mut arena, path) = create_test_arena();
 
-        let node = arena.alloc(make_node(AST_VAR_DECL, 0, NodeOffset(0), NodeOffset(0))).unwrap();
+        let node = arena
+            .alloc(make_node(AST_VAR_DECL, 0, NodeOffset(0), NodeOffset(0)))
+            .unwrap();
 
         let analyzer = AliasAnalyzer::new(&arena);
         assert_eq!(analyzer.get_affine_grade(node), AffineGrade::Owned);
@@ -490,13 +518,18 @@ mod tests {
     fn test_taint_tracking() {
         let (mut arena, path) = create_test_arena();
 
-        let node = arena.alloc(make_node(AST_VAR_DECL, 0, NodeOffset(0), NodeOffset(0))).unwrap();
+        let node = arena
+            .alloc(make_node(AST_VAR_DECL, 0, NodeOffset(0), NodeOffset(0)))
+            .unwrap();
 
         let mut analyzer = AliasAnalyzer::new(&arena);
         assert_eq!(analyzer.check_taint(node), TaintState::Untainted);
 
         analyzer.mark_freed(node);
-        assert!(matches!(analyzer.check_taint(node), TaintState::Tainted { .. }));
+        assert!(matches!(
+            analyzer.check_taint(node),
+            TaintState::Tainted { .. }
+        ));
 
         drop(arena);
         let _ = fs::remove_file(path);
@@ -506,13 +539,17 @@ mod tests {
     fn test_uaf_detection() {
         let (mut arena, path) = create_test_arena();
 
-        let freed_node = arena.alloc(make_node(AST_VAR_DECL, 0, NodeOffset(0), NodeOffset(0))).unwrap();
+        let freed_node = arena
+            .alloc(make_node(AST_VAR_DECL, 0, NodeOffset(0), NodeOffset(0)))
+            .unwrap();
 
-        let deref_node = arena.alloc(CAstNode {
-            first_child: freed_node,
-            data: OP_DEREF as u32,
-            ..make_node(AST_UNOP, 0, NodeOffset(0), NodeOffset(0))
-        }).unwrap();
+        let deref_node = arena
+            .alloc(CAstNode {
+                first_child: freed_node,
+                data: OP_DEREF as u32,
+                ..make_node(AST_UNOP, 0, NodeOffset(0), NodeOffset(0))
+            })
+            .unwrap();
 
         let mut analyzer = AliasAnalyzer::new(&arena);
         analyzer.mark_freed(freed_node);
@@ -529,12 +566,16 @@ mod tests {
     fn test_dfs_provenance_walk() {
         let (mut arena, path) = create_test_arena();
 
-        let child = arena.alloc(make_node(AST_IDENT, 0, NodeOffset(0), NodeOffset(0))).unwrap();
+        let child = arena
+            .alloc(make_node(AST_IDENT, 0, NodeOffset(0), NodeOffset(0)))
+            .unwrap();
 
-        let parent = arena.alloc(CAstNode {
-            first_child: child,
-            ..make_node(AST_PTR, 0, NodeOffset(0), NodeOffset(0))
-        }).unwrap();
+        let parent = arena
+            .alloc(CAstNode {
+                first_child: child,
+                ..make_node(AST_PTR, 0, NodeOffset(0), NodeOffset(0))
+            })
+            .unwrap();
 
         let analyzer = AliasAnalyzer::new(&arena);
         let result = analyzer.dfs_provenance_walk(parent);
@@ -550,10 +591,16 @@ mod tests {
     fn test_cycle_handling() {
         let (mut arena, path) = create_test_arena();
 
-        let _dummy = arena.alloc(make_node(0, 0, NodeOffset(0), NodeOffset(0))).unwrap();
+        let _dummy = arena
+            .alloc(make_node(0, 0, NodeOffset(0), NodeOffset(0)))
+            .unwrap();
 
-        let node_a = arena.alloc(make_node(AST_VAR_DECL, 0, NodeOffset(0), NodeOffset(0))).unwrap();
-        let node_b = arena.alloc(make_node(AST_VAR_DECL, 0, NodeOffset(0), NodeOffset(0))).unwrap();
+        let node_a = arena
+            .alloc(make_node(AST_VAR_DECL, 0, NodeOffset(0), NodeOffset(0)))
+            .unwrap();
+        let node_b = arena
+            .alloc(make_node(AST_VAR_DECL, 0, NodeOffset(0), NodeOffset(0)))
+            .unwrap();
 
         let analyzer = AliasAnalyzer::new(&arena);
         // Two disjoint VAR_DECL nodes have no shared provenance, so they ARE noalias
@@ -567,8 +614,12 @@ mod tests {
     fn test_pointer_relationship_owned() {
         let (mut arena, path) = create_test_arena();
 
-        let node_a = arena.alloc(make_node(AST_VAR_DECL, 0, NodeOffset(0), NodeOffset(0))).unwrap();
-        let node_b = arena.alloc(make_node(AST_VAR_DECL, 0, NodeOffset(0), NodeOffset(0))).unwrap();
+        let node_a = arena
+            .alloc(make_node(AST_VAR_DECL, 0, NodeOffset(0), NodeOffset(0)))
+            .unwrap();
+        let node_b = arena
+            .alloc(make_node(AST_VAR_DECL, 0, NodeOffset(0), NodeOffset(0)))
+            .unwrap();
 
         let mut analyzer = AliasAnalyzer::new(&arena);
         assert_eq!(
@@ -584,7 +635,9 @@ mod tests {
     fn test_error_and_warning_counts() {
         let (mut arena, path) = create_test_arena();
 
-        let node = arena.alloc(make_node(AST_VAR_DECL, 0, NodeOffset(0), NodeOffset(0))).unwrap();
+        let node = arena
+            .alloc(make_node(AST_VAR_DECL, 0, NodeOffset(0), NodeOffset(0)))
+            .unwrap();
 
         let mut analyzer = AliasAnalyzer::new(&arena);
 

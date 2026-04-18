@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use optic_c::benchmark::{BenchmarkRunner, BenchmarkSuite, CompilerConfig};
-use optic_c::build::{BuildConfig, Builder, OutputType, compile_single_file};
+use optic_c::build::{compile_single_file, BuildConfig, Builder, OutputType};
 use optic_c::integration::IntegrationTest;
 
 #[derive(Parser)]
@@ -57,7 +57,10 @@ enum Commands {
         test_dir: PathBuf,
         #[arg(long, short = 'o', default_value = "/tmp/optic_integration/output")]
         output_dir: PathBuf,
-        #[arg(long, default_value = "https://www.sqlite.org/2026/sqlite-amalgamation-3490200.zip")]
+        #[arg(
+            long,
+            default_value = "https://www.sqlite.org/2026/sqlite-amalgamation-3490200.zip"
+        )]
         sqlite_url: String,
     },
 }
@@ -79,17 +82,21 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             optimization,
         } => {
             let input_path = input.as_path();
-            let output_path = output
-                .unwrap_or_else(|| {
-                    let stem = input_path.file_stem()
-                        .and_then(|s| s.to_str())
-                        .unwrap_or("a");
-                    Path::new(&format!("{}.ll", stem)).to_path_buf()
-                });
+            let output_path = output.unwrap_or_else(|| {
+                let stem = input_path
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("a");
+                Path::new(&format!("{}.ll", stem)).to_path_buf()
+            });
 
             compile_single_file(input_path, &output_path, optimization, &[], &HashMap::new())?;
 
-            println!("Compiled {} -> {}", input_path.display(), output_path.display());
+            println!(
+                "Compiled {} -> {}",
+                input_path.display(),
+                output_path.display()
+            );
         }
         Commands::Build {
             src_dir,
@@ -183,8 +190,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     let name = name.trim();
                     let config = match name {
                         "opticc" => CompilerConfig::opticc(),
-                        "gcc" => CompilerConfig::new("gcc", "gcc").with_compile_args(vec!["-c".to_string()]),
-                        "clang" => CompilerConfig::new("clang", "clang").with_compile_args(vec!["-c".to_string()]),
+                        "gcc" => CompilerConfig::new("gcc", "gcc")
+                            .with_compile_args(vec!["-c".to_string()]),
+                        "clang" => CompilerConfig::new("clang", "clang")
+                            .with_compile_args(vec!["-c".to_string()]),
                         _ => {
                             eprintln!("Unknown compiler: {}", name);
                             continue;
@@ -234,11 +243,46 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 
             println!();
             println!("Integration test completed.");
-            println!("  Download: {}", if result.download_success { "SUCCESS" } else { "FAILED" });
-            println!("  Preprocess: {}", if result.preprocess_success { "SUCCESS" } else { "FAILED" });
-            println!("  Compile: {}", if result.compile_success { "SUCCESS" } else { "FAILED" });
-            println!("  Link: {}", if result.link_success { "SUCCESS" } else { "FAILED" });
-            println!("  Library: {}", if result.library_created { "CREATED" } else { "NOT CREATED" });
+            println!(
+                "  Download: {}",
+                if result.download_success {
+                    "SUCCESS"
+                } else {
+                    "FAILED"
+                }
+            );
+            println!(
+                "  Preprocess: {}",
+                if result.preprocess_success {
+                    "SUCCESS"
+                } else {
+                    "FAILED"
+                }
+            );
+            println!(
+                "  Compile: {}",
+                if result.compile_success {
+                    "SUCCESS"
+                } else {
+                    "FAILED"
+                }
+            );
+            println!(
+                "  Link: {}",
+                if result.link_success {
+                    "SUCCESS"
+                } else {
+                    "FAILED"
+                }
+            );
+            println!(
+                "  Library: {}",
+                if result.library_created {
+                    "CREATED"
+                } else {
+                    "NOT CREATED"
+                }
+            );
             println!("  Size: {} bytes", result.library_size_bytes);
             println!("  Time: {} ms", result.compile_time_ms);
 
