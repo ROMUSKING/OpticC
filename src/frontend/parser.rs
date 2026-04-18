@@ -327,11 +327,27 @@ impl Parser {
                 | "_Bool"
                 | "_Complex"
                 | "_Imaginary"
+                | "_Atomic"
+                | "_Noreturn"
                 | "typeof"
                 | "__typeof__"
                 | "__attribute__"
                 | "__extension__"
                 | "__label__"
+                | "__asm__"
+                | "__asm"
+                | "asm"
+                | "__inline"
+                | "__inline__"
+                | "__volatile__"
+                | "__volatile"
+                | "__restrict"
+                | "__restrict__"
+                | "__const"
+                | "__const__"
+                | "__signed__"
+                | "__signed"
+                | "__noreturn__"
         ) || text.starts_with("__builtin_")
     }
 
@@ -480,13 +496,29 @@ impl Parser {
                 | "_Imaginary"
                 | "typeof"
                 | "__typeof__"
+                | "__signed__"
+                | "__signed"
         )
+    }
+
+    fn is_gnu_signed_keyword(&self) -> bool {
+        let token = self.current_token();
+        (token.kind == TokenKind::Keyword || token.kind == TokenKind::Identifier)
+            && matches!(token.text.as_str(), "__signed__" | "__signed")
     }
 
     fn is_function_specifier(&self) -> bool {
         let token = self.current_token();
-        token.kind == TokenKind::Keyword
-            && matches!(token.text.as_str(), "inline" | "_Noreturn" | "noreturn")
+        (token.kind == TokenKind::Keyword || token.kind == TokenKind::Identifier)
+            && matches!(
+                token.text.as_str(),
+                "inline"
+                    | "__inline"
+                    | "__inline__"
+                    | "_Noreturn"
+                    | "noreturn"
+                    | "__noreturn__"
+            )
     }
 
     pub fn is_storage_class_specifier(&self) -> bool {
@@ -531,6 +563,13 @@ impl Parser {
             return self.parse_extension_wrapper();
         }
 
+        // Skip __extension__ at the start of external declarations
+        if self.current_token().kind == TokenKind::Identifier
+            && self.current_token().text == "__extension__"
+        {
+            self.advance();
+        }
+
         let specifiers = self.parse_declaration_specifiers()?;
         let mut first_child = specifiers;
         let mut last_child = specifiers;
@@ -539,10 +578,16 @@ impl Parser {
             let declarator = self.parse_declarator()?;
             self.link_siblings(&mut first_child, &mut last_child, declarator);
 
+            // Handle __asm__("...") after declarator (GCC redirect)
+            self.skip_asm_label();
+
             if let Some(attr_result) = self.parse_attribute_after_declarator() {
                 let attr = attr_result?;
                 self.link_siblings(&mut first_child, &mut last_child, attr);
             }
+
+            // Handle __asm__ after attribute too
+            self.skip_asm_label();
         }
 
         while self.current_token().kind == TokenKind::Punctuator && self.current_token().text == ","
@@ -551,10 +596,14 @@ impl Parser {
             let declarator = self.parse_declarator()?;
             self.link_siblings(&mut first_child, &mut last_child, declarator);
 
+            self.skip_asm_label();
+
             if let Some(attr_result) = self.parse_attribute_after_declarator() {
                 let attr = attr_result?;
                 self.link_siblings(&mut first_child, &mut last_child, attr);
             }
+
+            self.skip_asm_label();
         }
 
         if self.skip_punctuator(";") {
@@ -578,14 +627,59 @@ impl Parser {
         let mut last_spec = NodeOffset::NULL;
         let mut has_type_specifier = false;
 
-        while self.current_token().kind == TokenKind::Keyword
-            || self.is_storage_class_specifier()
-            || self.is_type_qualifier()
-        {
+        loop {
+            // Skip __attribute__ appearing among declaration specifiers
+            if (self.current_token().kind == TokenKind::Keyword
+                || self.current_token().kind == TokenKind::Identifier)
+                && self.current_token().text == "__attribute__"
+            {
+                self.advance();
+                let attr = self.parse_attribute_list()?;
+                self.link_siblings(&mut first_spec, &mut last_spec, attr);
+                continue;
+            }
+            // Skip __extension__ appearing among specifiers
+            if self.current_token().text == "__extension__" {
+                self.advance();
+                continue;
+            }
+            if !(self.current_token().kind == TokenKind::Keyword
+                || self.current_token().kind == TokenKind::Identifier
+                    && (self.is_type_specifier()
+                        || self.is_type_qualifier()
+                        || self.is_storage_class_specifier()
+                        || self.is_function_specifier()))
+            {
+                // Also check if identifier is a GNU-ish qualifier/specifier
+                if self.current_token().kind == TokenKind::Identifier {
+                    let txt = self.current_token().text.as_str();
+                    if matches!(
+                        txt,
+                        "__restrict"
+                            | "__restrict__"
+                            | "__volatile"
+                            | "__volatile__"
+                            | "__const"
+                            | "__const__"
+                            | "__inline"
+                            | "__inline__"
+                            | "__signed__"
+                            | "__signed"
+                            | "_Atomic"
+                    ) {
+                        // Fall through to the qualifier/specifier handling below
+                    } else {
+                        break;
+                    }
+                } else {
+                    break;
+                }
+            }
+
             if self.is_storage_class_specifier() {
                 let spec = self.parse_storage_class_specifier()?;
                 self.link_siblings(&mut first_spec, &mut last_spec, spec);
-            } else if self.is_type_specifier() {
+            } else if self.is_type_specifier() || self.is_gnu_signed_keyword() {
                 has_type_specifier = true;
                 let spec = self.parse_type_specifier()?;
                 self.link_siblings(&mut first_spec, &mut last_spec, spec);
@@ -613,8 +707,20 @@ impl Parser {
 
     fn is_type_qualifier(&self) -> bool {
         let token = self.current_token();
-        token.kind == TokenKind::Keyword
-            && matches!(token.text.as_str(), "const" | "restrict" | "volatile")
+        (token.kind == TokenKind::Keyword || token.kind == TokenKind::Identifier)
+            && matches!(
+                token.text.as_str(),
+                "const"
+                    | "restrict"
+                    | "volatile"
+                    | "__const"
+                    | "__const__"
+                    | "__restrict"
+                    | "__restrict__"
+                    | "__volatile"
+                    | "__volatile__"
+                    | "_Atomic"
+            )
     }
 
     fn parse_storage_class_specifier(&mut self) -> Result<NodeOffset, ParseError> {
@@ -653,7 +759,7 @@ impl Parser {
             "double" => 84,
             "short" => 10,
             "long" => 11,
-            "signed" => 12,
+            "signed" | "__signed__" | "__signed" => 12,
             "unsigned" => 13,
             "struct" => return self.parse_struct_specifier(),
             "union" => return self.parse_union_specifier(),
@@ -768,12 +874,19 @@ impl Parser {
     }
 
     fn parse_struct_declaration(&mut self) -> Result<NodeOffset, ParseError> {
+        // Skip __extension__ before struct members
+        if self.current_token().text == "__extension__" {
+            self.advance();
+        }
+
         let specifiers = self.parse_declaration_specifiers()?;
         let mut first_declarator = NodeOffset::NULL;
         let mut last_declarator = NodeOffset::NULL;
+        let mut safety = 0;
 
         while !self.skip_punctuator(";") {
-            if self.is_at_end() {
+            safety += 1;
+            if self.is_at_end() || safety > 500 {
                 break;
             }
             if self.current_token().kind == TokenKind::Punctuator
@@ -782,8 +895,46 @@ impl Parser {
                 self.advance();
                 continue;
             }
+            // Handle anonymous bitfields: `:width` without a declarator name
+            if self.current_token().kind == TokenKind::Punctuator
+                && self.current_token().text == ":"
+            {
+                self.advance(); // skip ':'
+                let _width = self.parse_constant_expression()?;
+                let bitfield_node =
+                    self.alloc_node(27, 0, NodeOffset::NULL, NodeOffset::NULL, NodeOffset::NULL);
+                self.link_siblings(&mut first_declarator, &mut last_declarator, bitfield_node);
+                continue;
+            }
+            // Skip __attribute__ appearing before declarators in structs
+            if self.current_token().text == "__attribute__" {
+                self.advance();
+                let _ = self.parse_attribute_list();
+                continue;
+            }
+            let before = self.current;
             let declarator = self.parse_declarator()?;
-            self.link_siblings(&mut first_declarator, &mut last_declarator, declarator);
+            // Handle bitfield width after declarator: `name : width`
+            if self.current_token().kind == TokenKind::Punctuator
+                && self.current_token().text == ":"
+            {
+                self.advance(); // skip ':'
+                let _width = self.parse_constant_expression()?;
+                // Wrap as bitfield node (kind=27) with declarator as child
+                let bitfield_node =
+                    self.alloc_node(27, 0, NodeOffset::NULL, declarator, NodeOffset::NULL);
+                self.link_siblings(&mut first_declarator, &mut last_declarator, bitfield_node);
+            } else {
+                self.link_siblings(&mut first_declarator, &mut last_declarator, declarator);
+            }
+            // Skip __attribute__ after declarators in struct members
+            if self.current_token().text == "__attribute__" {
+                self.advance();
+                let _ = self.parse_attribute_list();
+            }
+            if self.current == before {
+                self.advance();
+            }
         }
 
         if first_declarator != NodeOffset::NULL {
@@ -881,8 +1032,8 @@ impl Parser {
         self.advance();
 
         let kind = match text.as_str() {
-            "inline" => 93,
-            "_Noreturn" | "noreturn" => 94,
+            "inline" | "__inline" | "__inline__" => 93,
+            "_Noreturn" | "noreturn" | "__noreturn__" => 94,
             _ => 93,
         };
 
@@ -1108,10 +1259,15 @@ impl Parser {
                 let declarator = self.parse_declarator()?;
                 let mut init = declarator;
 
+                // Handle __asm__("...") after declarator
+                self.skip_asm_label();
+
                 if let Some(attr_result) = self.parse_attribute_after_declarator() {
                     let attr = attr_result?;
                     self.link_siblings(&mut first_init, &mut last_init, attr);
                 }
+
+                self.skip_asm_label();
 
                 if self.skip_punctuator("=") {
                     if self.current_token().kind == TokenKind::Punctuator
@@ -1210,7 +1366,23 @@ impl Parser {
             return self.parse_compound_statement(None);
         }
 
-        if token.kind == TokenKind::Keyword {
+        // Handle __attribute__ before statements (e.g. __attribute__((fallthrough));)
+        if (token.kind == TokenKind::Keyword || token.kind == TokenKind::Identifier)
+            && token.text == "__attribute__"
+        {
+            self.advance();
+            let _ = self.parse_attribute_list();
+            self.skip_punctuator(";");
+            return Ok(self.alloc_node(
+                48,
+                0,
+                NodeOffset::NULL,
+                NodeOffset::NULL,
+                NodeOffset::NULL,
+            ));
+        }
+
+        if token.kind == TokenKind::Keyword || token.kind == TokenKind::Identifier {
             match token.text.as_str() {
                 "if" => return self.parse_if_statement(),
                 "while" => return self.parse_while_statement(),
@@ -1241,11 +1413,67 @@ impl Parser {
                 "switch" => return self.parse_switch_statement(),
                 "goto" => return self.parse_goto_statement(),
                 "do" => return self.parse_do_statement(),
+                "case" => return self.parse_case_label(),
+                "default" => return self.parse_default_label(),
+                "__extension__" => {
+                    self.advance();
+                    return self.parse_statement();
+                }
+                "__label__" => {
+                    // GCC local label declaration: __label__ name1, name2, ...;
+                    self.advance();
+                    while !self.skip_punctuator(";") && !self.is_at_end() {
+                        self.advance();
+                    }
+                    return Ok(self.alloc_node(
+                        48,
+                        0,
+                        NodeOffset::NULL,
+                        NodeOffset::NULL,
+                        NodeOffset::NULL,
+                    ));
+                }
                 _ => {}
             }
         }
 
+        // Check for labeled statements: `identifier :`
+        if token.kind == TokenKind::Identifier {
+            if let Some(next) = self.peek_token(1) {
+                if next.kind == TokenKind::Punctuator && next.text == ":" {
+                    let _label_name = token.text.clone();
+                    self.advance(); // skip label name
+                    self.advance(); // skip ':'
+                    // A label must be followed by a statement
+                    let stmt = self.parse_statement()?;
+                    // kind=51 for labeled statement
+                    return Ok(self.alloc_node(
+                        51,
+                        0,
+                        NodeOffset::NULL,
+                        stmt,
+                        NodeOffset::NULL,
+                    ));
+                }
+            }
+        }
+
         self.parse_expression_statement()
+    }
+
+    fn parse_case_label(&mut self) -> Result<NodeOffset, ParseError> {
+        self.expect("case")?;
+        let expr = self.parse_constant_expression()?;
+        self.expect(":")?;
+        let stmt = self.parse_statement()?;
+        Ok(self.alloc_node(52, 0, NodeOffset::NULL, expr, stmt))
+    }
+
+    fn parse_default_label(&mut self) -> Result<NodeOffset, ParseError> {
+        self.expect("default")?;
+        self.expect(":")?;
+        let stmt = self.parse_statement()?;
+        Ok(self.alloc_node(53, 0, NodeOffset::NULL, stmt, NodeOffset::NULL))
     }
 
     fn parse_if_statement(&mut self) -> Result<NodeOffset, ParseError> {
@@ -1792,8 +2020,46 @@ impl Parser {
             && self.current_token().text == "__attribute__"
         {
             Some(self.parse_attribute_list())
+        } else if self.current_token().kind == TokenKind::Identifier
+            && self.current_token().text == "__attribute__"
+        {
+            Some(self.parse_attribute_list())
         } else {
             None
+        }
+    }
+
+    /// Skip __asm__("..." "...") or asm("...") labels used by GCC for symbol redirects.
+    pub fn skip_asm_label(&mut self) {
+        if (self.current_token().kind == TokenKind::Keyword
+            || self.current_token().kind == TokenKind::Identifier)
+            && matches!(
+                self.current_token().text.as_str(),
+                "__asm__" | "__asm" | "asm"
+            )
+        {
+            self.advance(); // skip __asm__
+            if self.skip_punctuator("(") {
+                // Skip everything inside the parens, handling nested parens
+                let mut depth = 1;
+                let mut asm_safety = 0;
+                while depth > 0 && !self.is_at_end() {
+                    asm_safety += 1;
+                    if asm_safety > 200 {
+                        break;
+                    }
+                    if self.current_token().text == "(" {
+                        depth += 1;
+                    } else if self.current_token().text == ")" {
+                        depth -= 1;
+                        if depth == 0 {
+                            self.advance(); // skip final ')'
+                            break;
+                        }
+                    }
+                    self.advance();
+                }
+            }
         }
     }
 
