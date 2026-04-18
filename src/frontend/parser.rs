@@ -608,18 +608,48 @@ impl Parser {
                 }
             }
 
-            self.link_siblings(&mut first_child, &mut last_child, declarator);
-
             // Handle __asm__("...") after declarator (GCC redirect)
             self.skip_asm_label();
 
             if let Some(attr_result) = self.parse_attribute_after_declarator() {
                 let attr = attr_result?;
-                self.link_siblings(&mut first_child, &mut last_child, attr);
+                // Attributes are just consumed, not linked to the declarator
+                let _ = attr;
             }
 
             // Handle __asm__ after attribute too
             self.skip_asm_label();
+
+            // Check for initializer: `= expr`
+            if self.skip_punctuator("=") {
+                let init = self.parse_initializer()?;
+                // Create an init-declarator (kind=73) wrapping the declarator
+                // with the initializer as a sibling of the declarator's first child
+                let init_decl = self.alloc_node(73, 0, NodeOffset::NULL, declarator, NodeOffset::NULL);
+                // Link the initializer as next_sibling of the declarator
+                if let Some(decl_node) = self.arena.get_mut(declarator) {
+                    decl_node.next_sibling = init;
+                }
+                // Create a var_decl (kind=21) with the specifiers and init-declarator
+                let var_decl = self.alloc_node(21, 0, NodeOffset::NULL, specifiers, NodeOffset::NULL);
+                // Link init_decl as sibling of specifiers
+                if specifiers != NodeOffset::NULL {
+                    let mut tail = specifiers;
+                    loop {
+                        let ns = self.arena.get(tail).map(|n| n.next_sibling).unwrap_or(NodeOffset::NULL);
+                        if ns == NodeOffset::NULL { break; }
+                        tail = ns;
+                    }
+                    if let Some(tail_node) = self.arena.get_mut(tail) {
+                        tail_node.next_sibling = init_decl;
+                    }
+                }
+                // Wrap in declaration (kind=20)
+                first_child = var_decl;
+                last_child = var_decl;
+            } else {
+                self.link_siblings(&mut first_child, &mut last_child, declarator);
+            }
         }
 
         while self.current_token().kind == TokenKind::Punctuator && self.current_token().text == ","
@@ -2064,12 +2094,97 @@ impl Parser {
                 ))
             }
             TokenKind::CharConstant => {
+                let text = token.text.clone();
                 self.advance();
-                Ok(self.alloc_node(62, 0, NodeOffset::NULL, NodeOffset::NULL, NodeOffset::NULL))
+                // Parse char constant value: 'x' -> x as u32
+                let char_val = if text.len() >= 3 && text.starts_with('\'') && text.ends_with('\'') {
+                    let inner = &text[1..text.len()-1];
+                    if inner.starts_with('\\') && inner.len() >= 2 {
+                        match inner.as_bytes()[1] {
+                            b'n' => 10u32,
+                            b't' => 9,
+                            b'r' => 13,
+                            b'0' => 0,
+                            b'\\' => 92,
+                            b'\'' => 39,
+                            b'"' => 34,
+                            b'a' => 7,
+                            b'b' => 8,
+                            b'f' => 12,
+                            b'v' => 11,
+                            b'x' => u32::from_str_radix(&inner[2..], 16).unwrap_or(0),
+                            c => c as u32,
+                        }
+                    } else if !inner.is_empty() {
+                        inner.as_bytes()[0] as u32
+                    } else {
+                        0
+                    }
+                } else {
+                    0
+                };
+                Ok(self.alloc_node(62, char_val, NodeOffset::NULL, NodeOffset::NULL, NodeOffset::NULL))
             }
             TokenKind::StringLiteral => {
+                let text = token.text.clone();
                 self.advance();
-                Ok(self.alloc_node(63, 0, NodeOffset::NULL, NodeOffset::NULL, NodeOffset::NULL))
+                // Strip quotes and process escape sequences
+                let inner = if text.len() >= 2 && text.starts_with('"') && text.ends_with('"') {
+                    let raw = &text[1..text.len()-1];
+                    let mut result = String::new();
+                    let mut chars = raw.chars();
+                    while let Some(c) = chars.next() {
+                        if c == '\\' {
+                            match chars.next() {
+                                Some('n') => result.push('\n'),
+                                Some('t') => result.push('\t'),
+                                Some('r') => result.push('\r'),
+                                Some('0') => result.push('\0'),
+                                Some('\\') => result.push('\\'),
+                                Some('\'') => result.push('\''),
+                                Some('"') => result.push('"'),
+                                Some('a') => result.push('\x07'),
+                                Some('b') => result.push('\x08'),
+                                Some('f') => result.push('\x0C'),
+                                Some('v') => result.push('\x0B'),
+                                Some(other) => { result.push('\\'); result.push(other); }
+                                None => result.push('\\'),
+                            }
+                        } else {
+                            result.push(c);
+                        }
+                    }
+                    result
+                } else {
+                    text.clone()
+                };
+                // Concatenate adjacent string literals
+                let mut full_string = inner;
+                while self.current < self.tokens.len() && self.tokens[self.current].kind == TokenKind::StringLiteral {
+                    let next_text = self.tokens[self.current].text.clone();
+                    self.advance();
+                    if next_text.len() >= 2 && next_text.starts_with('"') && next_text.ends_with('"') {
+                        let raw = &next_text[1..next_text.len()-1];
+                        let mut chars = raw.chars();
+                        while let Some(c) = chars.next() {
+                            if c == '\\' {
+                                match chars.next() {
+                                    Some('n') => full_string.push('\n'),
+                                    Some('t') => full_string.push('\t'),
+                                    Some('r') => full_string.push('\r'),
+                                    Some('0') => full_string.push('\0'),
+                                    Some('\\') => full_string.push('\\'),
+                                    Some(other) => { full_string.push('\\'); full_string.push(other); }
+                                    None => full_string.push('\\'),
+                                }
+                            } else {
+                                full_string.push(c);
+                            }
+                        }
+                    }
+                }
+                let string_offset = self.arena.store_string(&full_string).unwrap_or(NodeOffset::NULL);
+                Ok(self.alloc_node(63, string_offset.0, NodeOffset::NULL, NodeOffset::NULL, NodeOffset::NULL))
             }
             TokenKind::Punctuator if token.text == "(" => {
                 self.advance();

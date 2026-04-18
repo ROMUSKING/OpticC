@@ -13,6 +13,7 @@ pub struct LlvmBackend<'ctx, 'types> {
     module: Module<'ctx>,
     builder: Builder<'ctx>,
     variables: HashMap<String, VariableBinding<'ctx>>,
+    global_variables: HashMap<String, VariableBinding<'ctx>>,
     functions: HashMap<String, FunctionValue<'ctx>>,
     vectorization_hints: VectorizationHints,
     types: Option<&'types TypeSystem>,
@@ -49,6 +50,7 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
             module,
             builder,
             variables: HashMap::new(),
+            global_variables: HashMap::new(),
             functions: HashMap::new(),
             vectorization_hints: VectorizationHints::default(),
             types: None,
@@ -73,6 +75,7 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
             module,
             builder,
             variables: HashMap::new(),
+            global_variables: HashMap::new(),
             functions: HashMap::new(),
             vectorization_hints: VectorizationHints::default(),
             types: Some(types),
@@ -246,7 +249,8 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
             if let Some(node) = arena.get(child_offset) {
                 match node.kind {
                     1..=9 | 83 => {}
-                    20 => { let _ = self.lower_decl(arena, node); }
+                    20 => { let _ = self.lower_global_decl(arena, node); }
+                    21 => { let _ = self.lower_global_var(arena, node, node.kind); }
                     22 => { let _ = self.lower_func_decl(arena, node); }
                     23 => { let _ = self.lower_func_def(arena, node); }
                     101..=105 => {}
@@ -256,6 +260,212 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
             } else {
                 break;
             }
+        }
+        Ok(())
+    }
+
+    /// Lower a top-level declaration, handling global variables properly.
+    fn lower_global_decl(&mut self, arena: &Arena, node: &CAstNode) -> Result<(), BackendError> {
+        let mut child_offset = node.first_child;
+        // Find the type specifier and then the declarator(s)
+        let mut spec_kind: u16 = 2; // default int
+        let mut _is_const = false;
+        let mut first_spec = NodeOffset::NULL;
+        
+        // First pass: find type info
+        let mut scan_off = node.first_child;
+        while scan_off != NodeOffset::NULL {
+            if let Some(child) = arena.get(scan_off) {
+                match child.kind {
+                    1..=6 | 83 => {
+                        spec_kind = child.kind;
+                        if first_spec == NodeOffset::NULL {
+                            first_spec = scan_off;
+                        }
+                    }
+                    101..=105 => {
+                        if child.kind == 104 { _is_const = true; } // const qualifier
+                    }
+                    _ => break,
+                }
+                scan_off = child.next_sibling;
+            } else {
+                break;
+            }
+        }
+
+        // Process each child - function decls, func defs, and var decls
+        child_offset = node.first_child;
+        while child_offset != NodeOffset::NULL {
+            if let Some(child) = arena.get(child_offset) {
+                match child.kind {
+                    21 => {
+                        // Try to handle as a global variable
+                        let _ = self.lower_global_var(arena, child, spec_kind);
+                    }
+                    22 => { let _ = self.lower_func_decl(arena, child); }
+                    23 => { let _ = self.lower_func_def(arena, child); }
+                    _ => {}
+                }
+                child_offset = child.next_sibling;
+            } else {
+                break;
+            }
+        }
+        Ok(())
+    }
+
+    /// Lower a global variable declaration with optional initializer.
+    fn lower_global_var(&mut self, arena: &Arena, node: &CAstNode, spec_kind: u16) -> Result<(), BackendError> {
+        let llvm_type = self.node_kind_to_llvm_type(spec_kind);
+        
+        // Find the variable name and initializer
+        let mut name_opt: Option<String> = None;
+        let mut is_pointer = false;
+        let mut is_array = false;
+        let mut init_offset = NodeOffset::NULL;
+        
+        let mut child_offset = node.first_child;
+        while child_offset != NodeOffset::NULL {
+            if let Some(child) = arena.get(child_offset) {
+                match child.kind {
+                    // init-declarator (name = init)
+                    73 => {
+                        let decl_node = arena.get(child.first_child);
+                        if let Some(dn) = decl_node {
+                            match dn.kind {
+                                60 => {
+                                    name_opt = arena.get_string(NodeOffset(dn.data))
+                                        .filter(|s| !s.is_empty())
+                                        .map(|s| s.to_string());
+                                    init_offset = dn.next_sibling;
+                                }
+                                7 => {
+                                    is_pointer = true;
+                                    name_opt = self.find_ident_name_in(arena, dn);
+                                    init_offset = dn.next_sibling;
+                                }
+                                8 => {
+                                    is_array = true;
+                                    name_opt = self.find_ident_name_in(arena, dn);
+                                    init_offset = dn.next_sibling;
+                                }
+                                _ => {
+                                    name_opt = self.find_ident_name_in(arena, dn);
+                                    init_offset = dn.next_sibling;
+                                }
+                            }
+                        }
+                    }
+                    // plain identifier
+                    60 => {
+                        name_opt = arena.get_string(NodeOffset(child.data))
+                            .filter(|s| !s.is_empty())
+                            .map(|s| s.to_string());
+                    }
+                    // pointer declarator
+                    7 => {
+                        is_pointer = true;
+                        name_opt = self.find_ident_name_in(arena, child);
+                    }
+                    // array declarator
+                    8 => {
+                        is_array = true;
+                        name_opt = self.find_ident_name_in(arena, child);
+                    }
+                    // type specifiers - skip
+                    1..=6 | 83 | 101..=105 => {}
+                    _ => {}
+                }
+                child_offset = child.next_sibling;
+            } else {
+                break;
+            }
+        }
+
+        if let Some(var_name) = name_opt {
+            let global_type = if is_pointer {
+                self.context.ptr_type(AddressSpace::default()).as_basic_type_enum()
+            } else if is_array {
+                // For arrays like `char name[] = "..."`, use the initializer to determine type
+                llvm_type
+            } else {
+                llvm_type
+            };
+
+            // Check if there's a string initializer (for char arrays)
+            if init_offset != NodeOffset::NULL {
+                if let Some(init_node) = arena.get(init_offset) {
+                    if init_node.kind == 63 || init_node.kind == 81 {
+                        // String literal initializer - create global string
+                        let string_offset = NodeOffset(init_node.data);
+                        let string_text = arena.get_string(string_offset).unwrap_or("");
+                        let bytes = string_text.as_bytes();
+                        let string_val = self.context.const_string(bytes, true);
+                        let global = self.module.add_global(
+                            string_val.get_type(),
+                            Some(AddressSpace::default()),
+                            &var_name,
+                        );
+                        global.set_initializer(&string_val);
+                        global.set_constant(true);
+                        // Store in variables for later reference
+                        let binding = VariableBinding {
+                                ptr: global.as_pointer_value(),
+                                pointee_type: string_val.get_type().as_basic_type_enum(),
+                        };
+                        self.global_variables.insert(var_name.clone(), binding);
+                        self.variables.insert(var_name, binding);
+                        return Ok(());
+                    } else if init_node.kind == 61 || init_node.kind == 80 {
+                        // Integer constant initializer
+                        let value = init_node.data as u64;
+                        let global = self.module.add_global(
+                            global_type,
+                            Some(AddressSpace::default()),
+                            &var_name,
+                        );
+                        // For pointer types, use null instead of integer 0
+                        if global_type.is_pointer_type() {
+                            let null_val = self.context.ptr_type(AddressSpace::default()).const_null();
+                            global.set_initializer(&null_val);
+                        } else {
+                            let const_val = match global_type {
+                                BasicTypeEnum::IntType(it) => it.const_int(value, false),
+                                _ => self.context.i32_type().const_int(value, false),
+                            };
+                            global.set_initializer(&const_val);
+                        }
+                        let binding = VariableBinding {
+                                ptr: global.as_pointer_value(),
+                                pointee_type: global_type,
+                        };
+                        self.global_variables.insert(var_name.clone(), binding);
+                        self.variables.insert(var_name, binding);
+                        return Ok(());
+                    }
+                }
+            }
+
+            // Default: create zero-initialized global
+            let global = self.module.add_global(
+                global_type,
+                Some(AddressSpace::default()),
+                &var_name,
+            );
+            let zero: BasicValueEnum = match global_type {
+                BasicTypeEnum::IntType(it) => it.const_zero().into(),
+                BasicTypeEnum::FloatType(ft) => ft.const_zero().into(),
+                BasicTypeEnum::PointerType(pt) => pt.const_null().into(),
+                _ => self.context.i32_type().const_zero().into(),
+            };
+            global.set_initializer(&zero);
+            let binding = VariableBinding {
+                    ptr: global.as_pointer_value(),
+                    pointee_type: global_type,
+            };
+            self.global_variables.insert(var_name.clone(), binding);
+            self.variables.insert(var_name, binding);
         }
         Ok(())
     }
@@ -1184,6 +1394,10 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
         self.builder.position_at_end(entry);
 
         self.variables.clear();
+        // Restore global variables so function bodies can reference them
+        for (name, binding) in &self.global_variables {
+            self.variables.insert(name.clone(), *binding);
+        }
         self.struct_fields.clear();
         self.pointer_struct_types.clear();
         self.current_return_type = if is_void_ret { None } else { Some(ret_llvm) };
@@ -1886,7 +2100,7 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
             60 => self.lower_ident(arena, &node),
             61 => self.lower_int_const(&node),
             62 => self.lower_char_const(&node),
-            63 | 81 => self.lower_string_const(&node),
+            63 | 81 => self.lower_string_const(arena, &node),
             64 => self.lower_binop(arena, &node),
             65 => self.lower_unop(arena, &node),
             66 => self.lower_cond_expr(arena, &node),
@@ -1976,15 +2190,20 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
 
     fn lower_string_const(
         &self,
+        arena: &Arena,
         node: &CAstNode,
     ) -> Result<Option<BasicValueEnum<'ctx>>, BackendError> {
-        let byte = node.data as u8;
-        let string_val = self.context.const_string(&[byte], true);
+        let string_offset = NodeOffset(node.data);
+        let string_text = arena.get_string(string_offset).unwrap_or("");
+        let bytes = string_text.as_bytes();
+        let string_val = self.context.const_string(bytes, true); // true = null-terminated
         let global =
             self.module
-                .add_global(string_val.get_type(), Some(AddressSpace::default()), "str");
+                .add_global(string_val.get_type(), Some(AddressSpace::default()), ".str");
         global.set_initializer(&string_val);
         global.set_constant(true);
+        global.set_linkage(inkwell::module::Linkage::Private);
+        global.set_unnamed_addr(true);
         Ok(Some(global.as_pointer_value().into()))
     }
 
