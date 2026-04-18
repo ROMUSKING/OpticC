@@ -4,8 +4,11 @@ use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::thread;
+use std::time::Instant;
 
-use rayon::prelude::*;
+use rayon::{prelude::*, ThreadPoolBuilder};
 
 use crate::arena::Arena;
 use crate::backend::llvm::LlvmBackend;
@@ -13,6 +16,32 @@ use crate::db::OpticDb;
 use crate::frontend::parser::Parser as CParser;
 use crate::frontend::preprocessor::Preprocessor;
 use crate::types::TypeSystem;
+
+const LARGE_COMPILER_STACK_SIZE: usize = 64 * 1024 * 1024;
+const LARGE_STACK_INPUT_THRESHOLD_BYTES: u64 = 512 * 1024;
+
+static COMPILE_INVOCATION_ID: AtomicU64 = AtomicU64::new(1);
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CompilePhaseTimings {
+    pub preprocess_ms: u64,
+    pub parse_ms: u64,
+    pub codegen_ms: u64,
+    pub optimize_ms: u64,
+    pub ir_write_ms: u64,
+    pub llc_ms: u64,
+}
+
+impl CompilePhaseTimings {
+    pub fn total_ms(&self) -> u64 {
+        self.preprocess_ms
+            + self.parse_ms
+            + self.codegen_ms
+            + self.optimize_ms
+            + self.ir_write_ms
+            + self.llc_ms
+    }
+}
 
 #[derive(Debug)]
 pub enum BuildError {
@@ -83,7 +112,7 @@ pub struct CacheKey {
 
 impl CacheKey {
     pub fn new(source: &str, flags: &[String]) -> Self {
-        use sha2::{Sha256, Digest};
+        use sha2::{Digest, Sha256};
         let mut h1 = Sha256::new();
         h1.update(source.as_bytes());
         let source_hash: [u8; 32] = h1.finalize().into();
@@ -94,7 +123,10 @@ impl CacheKey {
         }
         let flags_hash: [u8; 32] = h2.finalize().into();
 
-        CacheKey { source_hash, flags_hash }
+        CacheKey {
+            source_hash,
+            flags_hash,
+        }
     }
 }
 
@@ -275,26 +307,33 @@ impl Builder {
         let include_paths = self.config.include_paths.clone();
         let defines = self.config.defines.clone();
         let optimization = self.config.optimization;
+        let source_files = self.config.source_files.clone();
 
         fs::create_dir_all(&temp_dir)?;
 
-        let results: Vec<Result<PathBuf, BuildError>> = self
-            .config
-            .source_files
-            .par_iter()
-            .map_with(
-                (temp_dir, include_paths, defines, optimization),
-                |(temp_dir, include_paths, defines, optimization), source| {
-                    compile_file_to_object(
+        let pool = ThreadPoolBuilder::new()
+            .num_threads(self.config.jobs)
+            .stack_size(LARGE_COMPILER_STACK_SIZE)
+            .build()
+            .map_err(|e| BuildError::ExternalToolError {
+                tool: "rayon".to_string(),
+                message: e.to_string(),
+            })?;
+
+        let results: Vec<Result<PathBuf, BuildError>> = pool.install(|| {
+            source_files
+                .par_iter()
+                .map(|source| {
+                    compile_file_to_object_impl(
                         source,
-                        temp_dir,
-                        include_paths,
-                        defines,
-                        *optimization,
+                        &temp_dir,
+                        &include_paths,
+                        &defines,
+                        optimization,
                     )
-                },
-            )
-            .collect();
+                })
+                .collect()
+        });
 
         let mut objects = Vec::new();
         for result in results {
@@ -347,7 +386,9 @@ impl Builder {
 
     fn create_static_lib(&self) -> Result<(), BuildError> {
         if self.object_files.is_empty() {
-            return Err(BuildError::LinkError("no object files to archive".to_string()));
+            return Err(BuildError::LinkError(
+                "no object files to archive".to_string(),
+            ));
         }
 
         let ar = find_tool(&["ar"])?;
@@ -447,6 +488,45 @@ fn compile_file_to_object(
     defines: &HashMap<String, String>,
     optimization: u32,
 ) -> Result<PathBuf, BuildError> {
+    if !should_use_large_stack(source) {
+        return compile_file_to_object_impl(source, temp_dir, include_paths, defines, optimization);
+    }
+
+    let source = source.to_path_buf();
+    let temp_dir = temp_dir.to_path_buf();
+    let include_paths = include_paths.to_vec();
+    let defines = defines.clone();
+    let source_name = source.display().to_string();
+
+    thread::Builder::new()
+        .name(format!(
+            "optic-compile-{}",
+            source
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("file")
+        ))
+        .stack_size(LARGE_COMPILER_STACK_SIZE)
+        .spawn(move || {
+            compile_file_to_object_impl(&source, &temp_dir, &include_paths, &defines, optimization)
+        })
+        .map_err(BuildError::IoError)?
+        .join()
+        .unwrap_or_else(|_| {
+            Err(BuildError::CompileError(
+                source_name,
+                "compiler worker panicked".to_string(),
+            ))
+        })
+}
+
+fn compile_file_to_object_impl(
+    source: &Path,
+    temp_dir: &Path,
+    include_paths: &[PathBuf],
+    defines: &HashMap<String, String>,
+    optimization: u32,
+) -> Result<PathBuf, BuildError> {
     let stem = source
         .file_stem()
         .and_then(|s| s.to_str())
@@ -455,83 +535,14 @@ fn compile_file_to_object(
     let ll_path = temp_dir.join(format!("{}.ll", stem));
     let obj_path = temp_dir.join(format!("{}.o", stem));
 
-    let db_path = format!("/tmp/optic_db_build_{}_{}.redb", std::process::id(), stem);
-    let db = OpticDb::new(&db_path)
-        .map_err(|e| BuildError::CompileError(source.display().to_string(), e.to_string()))?;
-
-    let mut pp = Preprocessor::new(db);
-
-    for path in include_paths {
-        pp.add_include_path(path.to_str().unwrap_or(""));
-    }
-    for (name, value) in defines {
-        pp.define_macro(name, value);
-    }
-
-    let tokens = pp
-        .process(source.to_str().unwrap())
-        .map_err(|e| BuildError::CompileError(source.display().to_string(), e.to_string()))?;
-
-    let estimated_nodes = (tokens.len() / 2).max(1024) as u32;
-    let arena_path = format!("/tmp/optic_c_arena_build_{}_{}.bin", std::process::id(), stem);
-
-    let arena = Arena::new(&arena_path, estimated_nodes * 2)
-        .map_err(|e| BuildError::CompileError(source.display().to_string(), e.to_string()))?;
-
-    let mut parser = CParser::new(arena);
-    let ast_root = parser
-        .parse_tokens(tokens)
-        .map_err(|e| {
-            BuildError::CompileError(
-                source.display().to_string(),
-                format!("parse error at line {}, column {}: {}", e.line, e.column, e.message),
-            )
-        })?;
-
-    let context = inkwell::context::Context::create();
-    let module_name = source.file_stem().and_then(|s| s.to_str()).unwrap_or("input");
-    let type_system = TypeSystem::new();
-    let mut backend = LlvmBackend::with_types(&context, module_name, &type_system);
-
-    backend
-        .compile(&parser.arena, ast_root)
-        .map_err(|e| BuildError::CompileError(source.display().to_string(), e.to_string()))?;
-
-    if optimization > 0 {
-        backend
-            .optimize(optimization)
-            .map_err(|e| BuildError::CompileError(source.display().to_string(), e.to_string()))?;
-    }
-
-    let _ = backend.verify();
-
-    let ir = backend.dump_ir();
-
-    let mut file = fs::File::create(&ll_path)
-        .map_err(|e| BuildError::CompileError(source.display().to_string(), e.to_string()))?;
-
-    file.write_all(ir.as_bytes())
-        .map_err(|e| BuildError::CompileError(source.display().to_string(), e.to_string()))?;
-
-    let llc = find_tool(&["llc"])?;
-    let llc_output = Command::new(&llc)
-        .arg("-filetype=obj")
-        .arg("-o")
-        .arg(&obj_path)
-        .arg(&ll_path)
-        .output()
-        .map_err(BuildError::IoError)?;
-
-    if !llc_output.status.success() {
-        let stderr = String::from_utf8_lossy(&llc_output.stderr);
-        return Err(BuildError::ExternalToolError {
-            tool: "llc".to_string(),
-            message: stderr.to_string(),
-        });
-    }
-
-    let _ = std::fs::remove_file(&arena_path);
-    let _ = std::fs::remove_file(&db_path);
+    compile_source_to_object_with_stats_impl(
+        source,
+        &ll_path,
+        &obj_path,
+        include_paths,
+        defines,
+        optimization,
+    )?;
 
     Ok(obj_path)
 }
@@ -543,66 +554,306 @@ pub fn compile_single_file(
     include_paths: &[PathBuf],
     defines: &HashMap<String, String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let db_path = format!("/tmp/optic_db_{}.redb", std::process::id());
-    let db = OpticDb::new(&db_path)
-        .map_err(|e| format!("Failed to create database: {}", e))?;
-
-    let mut pp = Preprocessor::new(db);
-
-    for path in include_paths {
-        pp.add_include_path(path.to_str().unwrap_or(""));
-    }
-    for (name, value) in defines {
-        pp.define_macro(name, value);
+    if !should_use_large_stack(input_path) {
+        return compile_single_file_impl(
+            input_path,
+            output_path,
+            opt_level,
+            include_paths,
+            defines,
+        )
+        .map_err(|e| -> Box<dyn std::error::Error> { Box::new(std::io::Error::other(e)) });
     }
 
-    let tokens = pp
-        .process(input_path.to_str().unwrap())
-        .map_err(|e| format!("Preprocessor error: {}", e))?;
+    let input_path = input_path.to_path_buf();
+    let output_path = output_path.to_path_buf();
+    let include_paths = include_paths.to_vec();
+    let defines = defines.clone();
+    let input_name = input_path.display().to_string();
 
-    let estimated_nodes = (tokens.len() / 2).max(1024) as u32;
-    let arena_path = format!("/tmp/optic_c_arena_{}.bin", std::process::id());
+    thread::Builder::new()
+        .name(format!(
+            "optic-single-{}",
+            input_path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("input")
+        ))
+        .stack_size(LARGE_COMPILER_STACK_SIZE)
+        .spawn(move || {
+            compile_single_file_impl(
+                &input_path,
+                &output_path,
+                opt_level,
+                &include_paths,
+                &defines,
+            )
+        })
+        .map_err(|e| -> Box<dyn std::error::Error> { Box::new(e) })?
+        .join()
+        .unwrap_or_else(|_| {
+            Err(format!(
+                "Compilation worker panicked while compiling {}",
+                input_name
+            ))
+        })
+        .map_err(|e| -> Box<dyn std::error::Error> { Box::new(std::io::Error::other(e)) })
+}
 
-    let arena = Arena::new(&arena_path, estimated_nodes * 2)
-        .map_err(|e| format!("Failed to create AST arena: {}", e))?;
+fn compile_single_file_impl(
+    input_path: &Path,
+    output_path: &Path,
+    opt_level: u32,
+    include_paths: &[PathBuf],
+    defines: &HashMap<String, String>,
+) -> Result<(), String> {
+    let compile_id = next_compile_invocation_id();
+    let artifacts = compile_to_ir_artifacts(
+        input_path,
+        opt_level,
+        include_paths,
+        defines,
+        &format!("/tmp/optic_db_{}_{}.redb", std::process::id(), compile_id),
+        &format!(
+            "/tmp/optic_c_arena_{}_{}.bin",
+            std::process::id(),
+            compile_id
+        ),
+    )?;
 
-    let mut parser = CParser::new(arena);
-    let ast_root = parser
-        .parse_tokens(tokens)
-        .map_err(|e| format!("Parse error at line {}, column {}: {}", e.line, e.column, e.message))?;
+    let start = Instant::now();
+    let mut file = fs::File::create(output_path).map_err(|e| {
+        format!(
+            "Failed to create output file '{}': {}",
+            output_path.display(),
+            e
+        )
+    })?;
 
-    let context = inkwell::context::Context::create();
-    let module_name = input_path
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("input");
-    let type_system = TypeSystem::new();
-    let mut backend = LlvmBackend::with_types(&context, module_name, &type_system);
-
-    backend
-        .compile(&parser.arena, ast_root)
-        .map_err(|e| format!("Backend compilation error: {}", e))?;
-
-    if opt_level > 0 {
-        backend
-            .optimize(opt_level)
-            .map_err(|e| format!("Optimization error: {}", e))?;
-    }
-
-    let _ = backend.verify();
-
-    let ir = backend.dump_ir();
-
-    let mut file = fs::File::create(output_path)
-        .map_err(|e| format!("Failed to create output file '{}': {}", output_path.display(), e))?;
-
-    file.write_all(ir.as_bytes())
+    file.write_all(artifacts.ir.as_bytes())
         .map_err(|e| format!("Failed to write output file: {}", e))?;
-
-    let _ = std::fs::remove_file(&arena_path);
-    let _ = std::fs::remove_file(&db_path);
+    let _ = start.elapsed();
 
     Ok(())
+}
+
+pub fn compile_source_to_object_with_stats(
+    input_path: &Path,
+    output_path: &Path,
+    opt_level: u32,
+    include_paths: &[PathBuf],
+    defines: &HashMap<String, String>,
+) -> Result<CompilePhaseTimings, BuildError> {
+    let compile_id = next_compile_invocation_id();
+    let ll_path = std::env::temp_dir().join(format!(
+        "opticc_bench_{}_{}.ll",
+        std::process::id(),
+        compile_id
+    ));
+
+    if !should_use_large_stack(input_path) {
+        return compile_source_to_object_with_stats_impl(
+            input_path,
+            &ll_path,
+            output_path,
+            include_paths,
+            defines,
+            opt_level,
+        );
+    }
+
+    let input_path = input_path.to_path_buf();
+    let output_path = output_path.to_path_buf();
+    let ll_path_clone = ll_path.clone();
+    let include_paths = include_paths.to_vec();
+    let defines = defines.clone();
+    let input_name = input_path.display().to_string();
+
+    thread::Builder::new()
+        .name(format!(
+            "optic-object-{}",
+            input_path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("input")
+        ))
+        .stack_size(LARGE_COMPILER_STACK_SIZE)
+        .spawn(move || {
+            compile_source_to_object_with_stats_impl(
+                &input_path,
+                &ll_path_clone,
+                &output_path,
+                &include_paths,
+                &defines,
+                opt_level,
+            )
+        })
+        .map_err(BuildError::IoError)?
+        .join()
+        .unwrap_or_else(|_| {
+            Err(BuildError::CompileError(
+                input_name,
+                "compiler worker panicked".to_string(),
+            ))
+        })
+}
+
+struct CompileArtifacts {
+    ir: String,
+    timings: CompilePhaseTimings,
+}
+
+fn compile_source_to_object_with_stats_impl(
+    source: &Path,
+    ll_path: &Path,
+    obj_path: &Path,
+    include_paths: &[PathBuf],
+    defines: &HashMap<String, String>,
+    optimization: u32,
+) -> Result<CompilePhaseTimings, BuildError> {
+    let compile_id = next_compile_invocation_id();
+    let artifacts = compile_to_ir_artifacts(
+        source,
+        optimization,
+        include_paths,
+        defines,
+        &format!(
+            "/tmp/optic_db_build_{}_{}.redb",
+            std::process::id(),
+            compile_id
+        ),
+        &format!(
+            "/tmp/optic_c_arena_build_{}_{}.bin",
+            std::process::id(),
+            compile_id
+        ),
+    )
+    .map_err(|e| BuildError::CompileError(source.display().to_string(), e))?;
+    let mut timings = artifacts.timings;
+
+    let ir_start = Instant::now();
+    let mut file = fs::File::create(ll_path)
+        .map_err(|e| BuildError::CompileError(source.display().to_string(), e.to_string()))?;
+    file.write_all(artifacts.ir.as_bytes())
+        .map_err(|e| BuildError::CompileError(source.display().to_string(), e.to_string()))?;
+    timings.ir_write_ms = ir_start.elapsed().as_millis() as u64;
+
+    let llc = find_tool(&["llc-18", "llc", "llc-17", "llc-16"])?;
+    let llc_start = Instant::now();
+    let llc_output = Command::new(&llc)
+        .arg("-filetype=obj")
+        .arg("-o")
+        .arg(obj_path)
+        .arg(ll_path)
+        .output()
+        .map_err(BuildError::IoError)?;
+    timings.llc_ms = llc_start.elapsed().as_millis() as u64;
+
+    let _ = fs::remove_file(ll_path);
+
+    if !llc_output.status.success() {
+        let stderr = String::from_utf8_lossy(&llc_output.stderr);
+        return Err(BuildError::ExternalToolError {
+            tool: "llc".to_string(),
+            message: stderr.to_string(),
+        });
+    }
+
+    Ok(timings)
+}
+
+fn compile_to_ir_artifacts(
+    input_path: &Path,
+    opt_level: u32,
+    include_paths: &[PathBuf],
+    defines: &HashMap<String, String>,
+    db_path: &str,
+    arena_path: &str,
+) -> Result<CompileArtifacts, String> {
+    let result = (|| {
+        let db = OpticDb::new(db_path).map_err(|e| format!("Failed to create database: {}", e))?;
+
+        let mut pp = Preprocessor::new(db);
+
+        for path in include_paths {
+            pp.add_include_path(path.to_str().unwrap_or(""));
+        }
+        for (name, value) in defines {
+            pp.define_macro(name, value);
+        }
+
+        let preprocess_start = Instant::now();
+        let tokens = pp
+            .process(input_path.to_str().unwrap())
+            .map_err(|e| format!("Preprocessor error: {}", e))?;
+        let preprocess_ms = preprocess_start.elapsed().as_millis() as u64;
+
+        let estimated_nodes = (tokens.len() / 2).max(1024) as u32;
+
+        let arena = Arena::new(arena_path, estimated_nodes * 2)
+            .map_err(|e| format!("Failed to create AST arena: {}", e))?;
+
+        let parse_start = Instant::now();
+        let mut parser = CParser::new(arena);
+        let ast_root = parser.parse_tokens(tokens).map_err(|e| {
+            format!(
+                "Parse error at line {}, column {}: {}",
+                e.line, e.column, e.message
+            )
+        })?;
+        let parse_ms = parse_start.elapsed().as_millis() as u64;
+
+        let context = inkwell::context::Context::create();
+        let module_name = input_path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("input");
+        let type_system = TypeSystem::new();
+        let mut backend = LlvmBackend::with_types(&context, module_name, &type_system);
+
+        let codegen_start = Instant::now();
+        backend
+            .compile(&parser.arena, ast_root)
+            .map_err(|e| format!("Backend compilation error: {}", e))?;
+        let codegen_ms = codegen_start.elapsed().as_millis() as u64;
+
+        let optimize_start = Instant::now();
+        if opt_level > 0 {
+            backend
+                .optimize(opt_level)
+                .map_err(|e| format!("Optimization error: {}", e))?;
+        }
+        let optimize_ms = optimize_start.elapsed().as_millis() as u64;
+
+        let _ = backend.verify();
+
+        Ok(CompileArtifacts {
+            ir: backend.dump_ir(),
+            timings: CompilePhaseTimings {
+                preprocess_ms,
+                parse_ms,
+                codegen_ms,
+                optimize_ms,
+                ir_write_ms: 0,
+                llc_ms: 0,
+            },
+        })
+    })();
+
+    let _ = fs::remove_file(arena_path);
+    let _ = fs::remove_file(db_path);
+
+    result
+}
+
+fn should_use_large_stack(path: &Path) -> bool {
+    fs::metadata(path)
+        .map(|metadata| metadata.len() >= LARGE_STACK_INPUT_THRESHOLD_BYTES)
+        .unwrap_or(true)
+}
+
+fn next_compile_invocation_id() -> u64 {
+    COMPILE_INVOCATION_ID.fetch_add(1, Ordering::Relaxed)
 }
 
 #[cfg(test)]
@@ -648,11 +899,26 @@ mod tests {
 
     #[test]
     fn test_output_type_from_extension() {
-        assert_eq!(OutputType::from_extension(Path::new("foo.o")), OutputType::Object);
-        assert_eq!(OutputType::from_extension(Path::new("foo.a")), OutputType::StaticLib);
-        assert_eq!(OutputType::from_extension(Path::new("foo.so")), OutputType::SharedLib);
-        assert_eq!(OutputType::from_extension(Path::new("foo")), OutputType::Executable);
-        assert_eq!(OutputType::from_extension(Path::new("foo.exe")), OutputType::Executable);
+        assert_eq!(
+            OutputType::from_extension(Path::new("foo.o")),
+            OutputType::Object
+        );
+        assert_eq!(
+            OutputType::from_extension(Path::new("foo.a")),
+            OutputType::StaticLib
+        );
+        assert_eq!(
+            OutputType::from_extension(Path::new("foo.so")),
+            OutputType::SharedLib
+        );
+        assert_eq!(
+            OutputType::from_extension(Path::new("foo")),
+            OutputType::Executable
+        );
+        assert_eq!(
+            OutputType::from_extension(Path::new("foo.exe")),
+            OutputType::Executable
+        );
     }
 
     #[test]
@@ -660,7 +926,10 @@ mod tests {
         assert_eq!(OutputType::from_str("object"), Some(OutputType::Object));
         assert_eq!(OutputType::from_str("static"), Some(OutputType::StaticLib));
         assert_eq!(OutputType::from_str("shared"), Some(OutputType::SharedLib));
-        assert_eq!(OutputType::from_str("executable"), Some(OutputType::Executable));
+        assert_eq!(
+            OutputType::from_str("executable"),
+            Some(OutputType::Executable)
+        );
         assert_eq!(OutputType::from_str("auto"), None);
         assert_eq!(OutputType::from_str("unknown"), None);
     }
@@ -693,11 +962,14 @@ mod tests {
 
     #[test]
     fn test_config_validate_missing_file() {
-        let config = BuildConfig::new()
-            .with_source_files(vec![PathBuf::from("/nonexistent/file.c")]);
+        let config =
+            BuildConfig::new().with_source_files(vec![PathBuf::from("/nonexistent/file.c")]);
         let result = config.validate();
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), BuildError::CompileError(_, _)));
+        assert!(matches!(
+            result.unwrap_err(),
+            BuildError::CompileError(_, _)
+        ));
     }
 
     #[test]
@@ -817,7 +1089,10 @@ mod tests {
         let builder = Builder::new(config);
         let result = builder.run_external("false", &[]);
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), BuildError::ExternalToolError { .. }));
+        assert!(matches!(
+            result.unwrap_err(),
+            BuildError::ExternalToolError { .. }
+        ));
     }
 
     #[test]

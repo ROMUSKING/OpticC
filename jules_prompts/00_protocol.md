@@ -55,11 +55,10 @@ OpticC already contains implementations for the core compiler pipeline plus the 
 
 ### Environment Notes
 - Target environment is the current dev container on Ubuntu 24.04
-- LLVM 14 is still the expected toolchain for the inkwell binding in this repository
+- LLVM 18 is now the expected toolchain for the inkwell binding in this repository
 - Avoid hard-coding exact passing-test totals unless you have just re-verified them in the current session
 
 ### Long-Term Roadmap
 - **SQLite milestone**: improve complex macro handling and verify end-to-end library generation
 - **Kernel milestone**: expand GNU C coverage, inline asm fidelity, and build integration
 - **Production milestone**: optimization passes, debug info, cross-compilation, and polish
-

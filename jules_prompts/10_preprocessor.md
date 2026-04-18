@@ -69,6 +69,8 @@ OpticC already includes a substantial preprocessor implementation. The current c
 - **`__VA_ARGS__` support**: Variadic macros now properly replace `__VA_ARGS__` with variadic arguments.
 - **`#pragma once` support**: Header guard detection now recognizes `#pragma once` directive.
 - **Parameter placeholder handling**: Improved macro expansion with proper parameter substitution.
+- **GNU/compiler predefined macros**: Added `__GNUC_PATCHLEVEL__`, `__STDC_HOSTED__`, and common `__SIZEOF_*__` macros so kernel-style `#if` gating can take the expected branches.
+- **`#if` numeric macro evaluation**: Integer macros with suffixes such as `201112L` now evaluate correctly inside conditional expressions instead of falling back to truthy/non-truthy handling.
 
 ## KNOWN LIMITATIONS (SQLite Testing)
 - **Complex macro patterns**: sqlite3.c uses advanced macro patterns that the current preprocessor doesn't handle:
@@ -76,7 +78,7 @@ OpticC already includes a substantial preprocessor implementation. The current c
   - Variadic macros with complex argument patterns
   - Macros that expand to partial syntax (e.g., `#define BEGIN {` without matching `}`)
   - Nested macro definitions with conditional compilation
-- **Toolchain verified**: gcc 11.4, clang 14, LLVM 14 all installed and working. clang compiles sqlite3.c (255K LOC) successfully.
+- **LLVM toolchain caveat**: the repository now targets the LLVM 18 C API through `inkwell`/`llvm-sys`; keep Cargo pointed at `/usr/lib/llvm-18` via `LLVM_SYS_181_PREFIX` when validating.
 - **Next step**: Enhance preprocessor to handle attribute-style macros and complex variadic patterns for SQLite compilation.
 
 ## ACCEPTANCE CRITERIA

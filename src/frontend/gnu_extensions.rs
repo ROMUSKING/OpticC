@@ -1,5 +1,5 @@
 use crate::arena::NodeOffset;
-use crate::frontend::parser::{Parser, TokenKind, ParseError};
+use crate::frontend::parser::{ParseError, Parser, TokenKind};
 
 pub const AST_ATTRIBUTE: u16 = 200;
 pub const AST_TYPEOF: u16 = 201;
@@ -20,7 +20,11 @@ pub enum AttrKind {
     Section(String),
     Constructor,
     Destructor,
-    Format { kind: String, fmt_idx: u32, first_arg: u32 },
+    Format {
+        kind: String,
+        fmt_idx: u32,
+        first_arg: u32,
+    },
     Nonnull,
     Pure,
     Const,
@@ -75,7 +79,11 @@ impl AttrKind {
             "section" => AttrKind::Section(String::new()),
             "constructor" => AttrKind::Constructor,
             "destructor" => AttrKind::Destructor,
-            "format" => AttrKind::Format { kind: String::new(), fmt_idx: 0, first_arg: 0 },
+            "format" => AttrKind::Format {
+                kind: String::new(),
+                fmt_idx: 0,
+                first_arg: 0,
+            },
             "nonnull" => AttrKind::Nonnull,
             "pure" => AttrKind::Pure,
             "const" => AttrKind::Const,
@@ -99,8 +107,9 @@ impl Parser {
 
     pub fn is_typeof_keyword(&self) -> bool {
         let token = self.current_token();
-        token.kind == TokenKind::Keyword || token.kind == TokenKind::Identifier
-            && matches!(token.text.as_str(), "typeof" | "__typeof__")
+        token.kind == TokenKind::Keyword
+            || token.kind == TokenKind::Identifier
+                && matches!(token.text.as_str(), "typeof" | "__typeof__")
     }
 
     fn is_gnu_type_specifier(&self) -> bool {
@@ -123,7 +132,10 @@ impl Parser {
             expr
         };
 
-        let keyword_offset = self.arena.store_string(&keyword_text).unwrap_or(NodeOffset::NULL);
+        let keyword_offset = self
+            .arena
+            .store_string(&keyword_text)
+            .unwrap_or(NodeOffset::NULL);
         Ok(self.alloc_node(
             AST_TYPEOF,
             keyword_offset.0,
@@ -147,12 +159,15 @@ impl Parser {
                 break;
             }
 
-            if self.current_token().kind == TokenKind::Punctuator && self.current_token().text == "}" {
+            if self.current_token().kind == TokenKind::Punctuator
+                && self.current_token().text == "}"
+            {
                 break;
             }
 
             if self.skip_punctuator(";") {
-                let empty = self.alloc_node(48, 0, NodeOffset::NULL, NodeOffset::NULL, NodeOffset::NULL);
+                let empty =
+                    self.alloc_node(48, 0, NodeOffset::NULL, NodeOffset::NULL, NodeOffset::NULL);
                 self.link_siblings(&mut first_stmt, &mut last_stmt, empty);
                 continue;
             }
@@ -220,14 +235,18 @@ impl Parser {
         let mut last_attr = NodeOffset::NULL;
 
         loop {
-            if self.current_token().kind == TokenKind::Punctuator && self.current_token().text == ")" {
+            if self.current_token().kind == TokenKind::Punctuator
+                && self.current_token().text == ")"
+            {
                 break;
             }
 
             let attr = self.parse_single_attribute()?;
             self.link_siblings(&mut first_attr, &mut last_attr, attr);
 
-            if self.current_token().kind == TokenKind::Punctuator && self.current_token().text == "," {
+            if self.current_token().kind == TokenKind::Punctuator
+                && self.current_token().text == ","
+            {
                 self.advance();
             } else {
                 break;
@@ -247,7 +266,9 @@ impl Parser {
     }
 
     fn parse_single_attribute(&mut self) -> Result<NodeOffset, ParseError> {
-        if self.current_token().kind != TokenKind::Identifier && self.current_token().kind != TokenKind::Keyword {
+        if self.current_token().kind != TokenKind::Identifier
+            && self.current_token().kind != TokenKind::Keyword
+        {
             return Err(ParseError {
                 message: "Expected attribute name".to_string(),
                 line: self.current_token().line,
@@ -266,7 +287,9 @@ impl Parser {
 
         if self.skip_punctuator("(") {
             loop {
-                if self.current_token().kind == TokenKind::Punctuator && self.current_token().text == ")" {
+                if self.current_token().kind == TokenKind::Punctuator
+                    && self.current_token().text == ")"
+                {
                     break;
                 }
 
@@ -274,18 +297,32 @@ impl Parser {
                     let s = self.current_token().text.clone();
                     self.advance();
                     let s_offset = self.arena.store_string(&s).unwrap_or(NodeOffset::NULL);
-                    self.alloc_node(63, s_offset.0, NodeOffset::NULL, NodeOffset::NULL, NodeOffset::NULL)
+                    self.alloc_node(
+                        63,
+                        s_offset.0,
+                        NodeOffset::NULL,
+                        NodeOffset::NULL,
+                        NodeOffset::NULL,
+                    )
                 } else if self.current_token().kind == TokenKind::IntConstant {
                     let val = self.current_token().text.parse::<u32>().unwrap_or(0);
                     self.advance();
-                    self.alloc_node(61, val, NodeOffset::NULL, NodeOffset::NULL, NodeOffset::NULL)
+                    self.alloc_node(
+                        61,
+                        val,
+                        NodeOffset::NULL,
+                        NodeOffset::NULL,
+                        NodeOffset::NULL,
+                    )
                 } else {
                     let expr = self.parse_expression()?;
                     expr
                 };
                 self.link_siblings(&mut first_arg, &mut last_arg, arg);
 
-                if self.current_token().kind == TokenKind::Punctuator && self.current_token().text == "," {
+                if self.current_token().kind == TokenKind::Punctuator
+                    && self.current_token().text == ","
+                {
                     self.advance();
                 } else {
                     break;
@@ -333,13 +370,8 @@ impl Parser {
             self.expect("=")?;
             let value = self.parse_initializer()?;
 
-            let designator = self.alloc_node(
-                AST_DESIGNATED_INIT,
-                1,
-                NodeOffset::NULL,
-                index,
-                value,
-            );
+            let designator =
+                self.alloc_node(AST_DESIGNATED_INIT, 1, NodeOffset::NULL, index, value);
             return Ok(designator);
         }
 
@@ -364,13 +396,7 @@ impl Parser {
             self.parse_expression()?
         };
 
-        Ok(self.alloc_node(
-            AST_EXTENSION,
-            0,
-            NodeOffset::NULL,
-            inner,
-            NodeOffset::NULL,
-        ))
+        Ok(self.alloc_node(AST_EXTENSION, 0, NodeOffset::NULL, inner, NodeOffset::NULL))
     }
 
     pub fn parse_builtin_call(&mut self, name: &str) -> Result<NodeOffset, ParseError> {
@@ -387,7 +413,9 @@ impl Parser {
                 let arg = self.parse_assignment_expression()?;
                 self.link_siblings(&mut first_arg, &mut last_arg, arg);
 
-                if self.current_token().kind == TokenKind::Punctuator && self.current_token().text == "," {
+                if self.current_token().kind == TokenKind::Punctuator
+                    && self.current_token().text == ","
+                {
                     self.advance();
                 } else {
                     break;
@@ -423,7 +451,11 @@ impl Parser {
         let token = self.current_token();
 
         if token.kind == TokenKind::Punctuator && token.text == "(" {
-            if self.peek_token(1).map(|t| t.kind == TokenKind::Punctuator && t.text == "{").unwrap_or(false) {
+            if self
+                .peek_token(1)
+                .map(|t| t.kind == TokenKind::Punctuator && t.text == "{")
+                .unwrap_or(false)
+            {
                 return self.parse_statement_expr();
             }
         }
@@ -433,7 +465,11 @@ impl Parser {
         }
 
         if token.kind == TokenKind::Punctuator && token.text == "&" {
-            if self.peek_token(1).map(|t| t.kind == TokenKind::Punctuator && t.text == "&").unwrap_or(false) {
+            if self
+                .peek_token(1)
+                .map(|t| t.kind == TokenKind::Punctuator && t.text == "&")
+                .unwrap_or(false)
+            {
                 return self.parse_label_addr();
             }
         }
@@ -780,24 +816,57 @@ mod tests {
 
     #[test]
     fn test_builtin_kind_from_name() {
-        assert!(matches!(BuiltinKind::from_name("__builtin_expect"), BuiltinKind::Expect));
-        assert!(matches!(BuiltinKind::from_name("__builtin_constant_p"), BuiltinKind::ConstantP));
-        assert!(matches!(BuiltinKind::from_name("__builtin_memcpy"), BuiltinKind::Memcpy));
-        assert!(matches!(BuiltinKind::from_name("__builtin_memset"), BuiltinKind::Memset));
-        assert!(matches!(BuiltinKind::from_name("__builtin_strlen"), BuiltinKind::Strlen));
-        assert!(matches!(BuiltinKind::from_name("__builtin_offsetof"), BuiltinKind::OffsetOf));
-        assert!(matches!(BuiltinKind::from_name("__builtin_va_arg"), BuiltinKind::VaArg));
-        assert!(matches!(BuiltinKind::from_name("__builtin_unknown"), BuiltinKind::Other(_)));
+        assert!(matches!(
+            BuiltinKind::from_name("__builtin_expect"),
+            BuiltinKind::Expect
+        ));
+        assert!(matches!(
+            BuiltinKind::from_name("__builtin_constant_p"),
+            BuiltinKind::ConstantP
+        ));
+        assert!(matches!(
+            BuiltinKind::from_name("__builtin_memcpy"),
+            BuiltinKind::Memcpy
+        ));
+        assert!(matches!(
+            BuiltinKind::from_name("__builtin_memset"),
+            BuiltinKind::Memset
+        ));
+        assert!(matches!(
+            BuiltinKind::from_name("__builtin_strlen"),
+            BuiltinKind::Strlen
+        ));
+        assert!(matches!(
+            BuiltinKind::from_name("__builtin_offsetof"),
+            BuiltinKind::OffsetOf
+        ));
+        assert!(matches!(
+            BuiltinKind::from_name("__builtin_va_arg"),
+            BuiltinKind::VaArg
+        ));
+        assert!(matches!(
+            BuiltinKind::from_name("__builtin_unknown"),
+            BuiltinKind::Other(_)
+        ));
     }
 
     #[test]
     fn test_attr_kind_from_name() {
-        assert!(matches!(AttrKind::from_name("noreturn"), AttrKind::Noreturn));
+        assert!(matches!(
+            AttrKind::from_name("noreturn"),
+            AttrKind::Noreturn
+        ));
         assert!(matches!(AttrKind::from_name("unused"), AttrKind::Unused));
         assert!(matches!(AttrKind::from_name("packed"), AttrKind::Packed));
         assert!(matches!(AttrKind::from_name("weak"), AttrKind::Weak));
-        assert!(matches!(AttrKind::from_name("constructor"), AttrKind::Constructor));
-        assert!(matches!(AttrKind::from_name("destructor"), AttrKind::Destructor));
+        assert!(matches!(
+            AttrKind::from_name("constructor"),
+            AttrKind::Constructor
+        ));
+        assert!(matches!(
+            AttrKind::from_name("destructor"),
+            AttrKind::Destructor
+        ));
         assert!(matches!(AttrKind::from_name("nonnull"), AttrKind::Nonnull));
         assert!(matches!(AttrKind::from_name("pure"), AttrKind::Pure));
         assert!(matches!(AttrKind::from_name("const"), AttrKind::Const));

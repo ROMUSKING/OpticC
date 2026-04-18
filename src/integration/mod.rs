@@ -135,9 +135,12 @@ impl IntegrationTest {
 
         #[cfg(feature = "network")]
         {
-            let response = ureq::get(&self.sqlite_url)
-                .call()
-                .map_err(|e| format!("Failed to download SQLite: {}. This may be an environment limitation.", e))?;
+            let response = ureq::get(&self.sqlite_url).call().map_err(|e| {
+                format!(
+                    "Failed to download SQLite: {}. This may be an environment limitation.",
+                    e
+                )
+            })?;
 
             let mut file = fs::File::create(&zip_path)
                 .map_err(|e| format!("Failed to create zip file: {}", e))?;
@@ -174,14 +177,15 @@ impl IntegrationTest {
         fs::create_dir_all(&extract_dir)
             .map_err(|e| format!("Failed to create extract directory: {}", e))?;
 
-        let file = fs::File::open(zip_path)
-            .map_err(|e| format!("Failed to open zip file: {}", e))?;
+        let file =
+            fs::File::open(zip_path).map_err(|e| format!("Failed to open zip file: {}", e))?;
 
-        let mut archive = zip::ZipArchive::new(file)
-            .map_err(|e| format!("Failed to read zip archive: {}", e))?;
+        let mut archive =
+            zip::ZipArchive::new(file).map_err(|e| format!("Failed to read zip archive: {}", e))?;
 
         for i in 0..archive.len() {
-            let mut file = archive.by_index(i)
+            let mut file = archive
+                .by_index(i)
                 .map_err(|e| format!("Failed to access file in archive: {}", e))?;
 
             let outpath = match file.enclosed_name() {
@@ -425,7 +429,10 @@ const char *sqlite3_sourceid(void) {
                 return Ok(candidate.to_string());
             }
         }
-        Err(format!("No suitable tool found from: {}", candidates.join(", ")))
+        Err(format!(
+            "No suitable tool found from: {}",
+            candidates.join(", ")
+        ))
     }
 
     pub fn run(&self) -> IntegrationResult {
@@ -537,20 +544,44 @@ const char *sqlite3_sourceid(void) {
         report.push_str("## Configuration\n\n");
         report.push_str(&format!("- **SQLite URL:** {}\n", self.sqlite_url));
         report.push_str(&format!("- **SQLite Version:** {}\n", self.sqlite_version));
-        report.push_str(&format!("- **Test Directory:** {}\n", self.test_dir.display()));
-        report.push_str(&format!("- **Output Directory:** {}\n", self.output_dir.display()));
+        report.push_str(&format!(
+            "- **Test Directory:** {}\n",
+            self.test_dir.display()
+        ));
+        report.push_str(&format!(
+            "- **Output Directory:** {}\n",
+            self.output_dir.display()
+        ));
         report.push('\n');
 
         report.push_str("## Results Summary\n\n");
 
         let status = if result.all_passed() { "PASS" } else { "FAIL" };
         report.push_str(&format!("- Overall Status: {}\n", status));
-        report.push_str(&format!("- Download: {}\n", self.bool_status(result.download_success)));
-        report.push_str(&format!("- Preprocess: {}\n", self.bool_status(result.preprocess_success)));
-        report.push_str(&format!("- Compile: {}\n", self.bool_status(result.compile_success)));
-        report.push_str(&format!("- Link: {}\n", self.bool_status(result.link_success)));
-        report.push_str(&format!("- Library Created: {}\n", self.bool_status(result.library_created)));
-        report.push_str(&format!("- Library Size: {} bytes\n", result.library_size_bytes));
+        report.push_str(&format!(
+            "- Download: {}\n",
+            self.bool_status(result.download_success)
+        ));
+        report.push_str(&format!(
+            "- Preprocess: {}\n",
+            self.bool_status(result.preprocess_success)
+        ));
+        report.push_str(&format!(
+            "- Compile: {}\n",
+            self.bool_status(result.compile_success)
+        ));
+        report.push_str(&format!(
+            "- Link: {}\n",
+            self.bool_status(result.link_success)
+        ));
+        report.push_str(&format!(
+            "- Library Created: {}\n",
+            self.bool_status(result.library_created)
+        ));
+        report.push_str(&format!(
+            "- Library Size: {} bytes\n",
+            result.library_size_bytes
+        ));
         report.push_str(&format!("- Compile Time: {} ms\n", result.compile_time_ms));
         report.push('\n');
 
@@ -582,7 +613,11 @@ const char *sqlite3_sourceid(void) {
     }
 
     fn bool_status(&self, success: bool) -> &'static str {
-        if success { "SUCCESS" } else { "FAILED" }
+        if success {
+            "SUCCESS"
+        } else {
+            "FAILED"
+        }
     }
 }
 
@@ -610,7 +645,10 @@ mod tests {
     fn test_integration_test_with_defaults() {
         let test = IntegrationTest::with_defaults();
         assert_eq!(test.test_dir, PathBuf::from("/tmp/optic_integration"));
-        assert_eq!(test.output_dir, PathBuf::from("/tmp/optic_integration/output"));
+        assert_eq!(
+            test.output_dir,
+            PathBuf::from("/tmp/optic_integration/output")
+        );
         assert!(test.sqlite_url.contains("sqlite-amalgamation"));
     }
 
@@ -659,7 +697,9 @@ mod tests {
 
     #[test]
     fn test_url_validation() {
-        assert!(IntegrationTest::validate_url("https://example.com/file.zip"));
+        assert!(IntegrationTest::validate_url(
+            "https://example.com/file.zip"
+        ));
         assert!(IntegrationTest::validate_url("http://example.com/file.zip"));
         assert!(!IntegrationTest::validate_url("ftp://example.com/file.zip"));
         assert!(!IntegrationTest::validate_url("/local/path/file.zip"));
@@ -787,7 +827,8 @@ mod tests {
 
     #[test]
     fn test_download_mock() {
-        let temp_dir = std::env::temp_dir().join(format!("optic_integration_test_{}", std::process::id()));
+        let temp_dir =
+            std::env::temp_dir().join(format!("optic_integration_test_{}", std::process::id()));
         let output_dir = temp_dir.join("output");
 
         let test = IntegrationTest::new(
@@ -806,7 +847,8 @@ mod tests {
 
     #[test]
     fn test_preprocess_mock() {
-        let temp_dir = std::env::temp_dir().join(format!("optic_integration_test_{}", std::process::id()));
+        let temp_dir =
+            std::env::temp_dir().join(format!("optic_integration_test_{}", std::process::id()));
         let output_dir = temp_dir.join("output");
         fs::create_dir_all(&temp_dir).unwrap();
 
@@ -829,7 +871,8 @@ mod tests {
 
     #[test]
     fn test_compile_mock() {
-        let temp_dir = std::env::temp_dir().join(format!("optic_integration_test_{}", std::process::id()));
+        let temp_dir =
+            std::env::temp_dir().join(format!("optic_integration_test_{}", std::process::id()));
         let output_dir = temp_dir.join("output");
         fs::create_dir_all(&temp_dir).unwrap();
 
@@ -852,7 +895,8 @@ mod tests {
 
     #[test]
     fn test_link_mock() {
-        let temp_dir = std::env::temp_dir().join(format!("optic_integration_test_{}", std::process::id()));
+        let temp_dir =
+            std::env::temp_dir().join(format!("optic_integration_test_{}", std::process::id()));
         let output_dir = temp_dir.join("output");
         fs::create_dir_all(&temp_dir).unwrap();
 
@@ -876,7 +920,8 @@ mod tests {
 
     #[test]
     fn test_extract_mock() {
-        let temp_dir = std::env::temp_dir().join(format!("optic_integration_test_{}", std::process::id()));
+        let temp_dir =
+            std::env::temp_dir().join(format!("optic_integration_test_{}", std::process::id()));
         let output_dir = temp_dir.join("output");
         fs::create_dir_all(&temp_dir).unwrap();
 
@@ -901,7 +946,8 @@ mod tests {
 
     #[test]
     fn test_full_pipeline_mock() {
-        let temp_dir = std::env::temp_dir().join(format!("optic_integration_test_{}", std::process::id()));
+        let temp_dir =
+            std::env::temp_dir().join(format!("optic_integration_test_{}", std::process::id()));
         let output_dir = temp_dir.join("output");
 
         let test = IntegrationTest::new(

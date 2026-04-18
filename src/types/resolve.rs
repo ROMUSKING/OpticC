@@ -2,11 +2,9 @@ use std::collections::HashMap;
 
 use crate::arena::{Arena, CAstNode, NodeOffset};
 
-use super::{
-    CType, ParamType, StructMember, TypeId, TypeSystem,
-};
 #[allow(unused_imports)]
 use super::TypeQualifiers;
+use super::{CType, ParamType, StructMember, TypeId, TypeSystem};
 
 #[derive(Debug)]
 pub enum TypeError {
@@ -375,10 +373,8 @@ impl<'a> TypeResolver<'a> {
             }
         }
 
-        if let Some(CType::Struct {
-            members: ms,
-            ..
-        }) = self.types.types.get_mut(struct_id.0 as usize)
+        if let Some(CType::Struct { members: ms, .. }) =
+            self.types.types.get_mut(struct_id.0 as usize)
         {
             *ms = members;
         }
@@ -426,10 +422,8 @@ impl<'a> TypeResolver<'a> {
             }
         }
 
-        if let Some(CType::Union {
-            members: ms,
-            ..
-        }) = self.types.types.get_mut(union_id.0 as usize)
+        if let Some(CType::Union { members: ms, .. }) =
+            self.types.types.get_mut(union_id.0 as usize)
         {
             *ms = members;
         }
@@ -497,12 +491,7 @@ impl<'a> TypeResolver<'a> {
         self.node_types.get(&offset).copied()
     }
 
-    pub fn check_binary_op(
-        &self,
-        op: u32,
-        lhs: TypeId,
-        rhs: TypeId,
-    ) -> Result<TypeId, TypeError> {
+    pub fn check_binary_op(&self, op: u32, lhs: TypeId, rhs: TypeId) -> Result<TypeId, TypeError> {
         let lhs_base = self.types.resolve_typedef(lhs);
         let rhs_base = self.types.resolve_typedef(rhs);
 
@@ -513,9 +502,12 @@ impl<'a> TypeResolver<'a> {
                 BinaryOp::Mul => self.check_arithmetic(lhs_base, rhs_base),
                 BinaryOp::Div => self.check_arithmetic(lhs_base, rhs_base),
                 BinaryOp::Mod => self.check_integer(lhs_base, rhs_base),
-                BinaryOp::Eq | BinaryOp::Ne | BinaryOp::Lt | BinaryOp::Le | BinaryOp::Gt | BinaryOp::Ge => {
-                    self.check_comparison(lhs_base, rhs_base)
-                }
+                BinaryOp::Eq
+                | BinaryOp::Ne
+                | BinaryOp::Lt
+                | BinaryOp::Le
+                | BinaryOp::Gt
+                | BinaryOp::Ge => self.check_comparison(lhs_base, rhs_base),
                 BinaryOp::And | BinaryOp::Or => self.check_logical(lhs_base, rhs_base),
                 BinaryOp::BitAnd | BinaryOp::BitOr | BinaryOp::BitXor => {
                     self.check_bitwise(lhs_base, rhs_base)
@@ -743,11 +735,7 @@ impl<'a> TypeResolver<'a> {
         if self.types.is_floating(lhs_base) || self.types.is_floating(rhs_base) {
             let lrank = self.types.integer_rank(lhs_base);
             let rrank = self.types.integer_rank(rhs_base);
-            return Ok(if lrank >= rrank {
-                lhs_base
-            } else {
-                rhs_base
-            });
+            return Ok(if lrank >= rrank { lhs_base } else { rhs_base });
         }
 
         let l_signed = self.types.is_signed(lhs_base);
@@ -756,11 +744,7 @@ impl<'a> TypeResolver<'a> {
         if l_signed == r_signed {
             let lrank = self.types.integer_rank(lhs_base);
             let rrank = self.types.integer_rank(rhs_base);
-            return Ok(if lrank >= rrank {
-                lhs_base
-            } else {
-                rhs_base
-            });
+            return Ok(if lrank >= rrank { lhs_base } else { rhs_base });
         }
 
         let unsigned_rank = if l_signed {
@@ -930,16 +914,16 @@ mod tests {
     fn test_binary_op_add_arithmetic() {
         let mut ts = TypeSystem::new();
         let mut resolver = TypeResolver::new(&mut ts);
-        let result = resolver.check_binary_op(1, TypeId::INT, TypeId::INT).unwrap();
+        let result = resolver
+            .check_binary_op(1, TypeId::INT, TypeId::INT)
+            .unwrap();
         assert_eq!(result, TypeId::INT);
     }
 
     #[test]
     fn test_binary_op_add_pointer_int() {
         let mut ts = TypeSystem::new();
-        let int_ptr = ts.add_type(CType::Pointer {
-            base: TypeId::INT,
-        });
+        let int_ptr = ts.add_type(CType::Pointer { base: TypeId::INT });
         let mut resolver = TypeResolver::new(&mut ts);
         let result = resolver.check_binary_op(1, int_ptr, TypeId::INT).unwrap();
         assert_eq!(result, int_ptr);
@@ -948,13 +932,9 @@ mod tests {
     #[test]
     fn test_binary_op_sub_pointer_pointer() {
         let mut ts = TypeSystem::new();
-        let int_ptr = ts.add_type(CType::Pointer {
-            base: TypeId::INT,
-        });
+        let int_ptr = ts.add_type(CType::Pointer { base: TypeId::INT });
         let mut resolver = TypeResolver::new(&mut ts);
-        let result = resolver
-            .check_binary_op(2, int_ptr, int_ptr)
-            .unwrap();
+        let result = resolver.check_binary_op(2, int_ptr, int_ptr).unwrap();
         assert_eq!(result, TypeId::LONG);
     }
 
@@ -962,7 +942,9 @@ mod tests {
     fn test_binary_op_mul() {
         let mut ts = TypeSystem::new();
         let mut resolver = TypeResolver::new(&mut ts);
-        let result = resolver.check_binary_op(3, TypeId::INT, TypeId::INT).unwrap();
+        let result = resolver
+            .check_binary_op(3, TypeId::INT, TypeId::INT)
+            .unwrap();
         assert_eq!(result, TypeId::INT);
     }
 
@@ -970,7 +952,9 @@ mod tests {
     fn test_binary_op_comparison() {
         let mut ts = TypeSystem::new();
         let mut resolver = TypeResolver::new(&mut ts);
-        let result = resolver.check_binary_op(8, TypeId::INT, TypeId::INT).unwrap();
+        let result = resolver
+            .check_binary_op(8, TypeId::INT, TypeId::INT)
+            .unwrap();
         assert_eq!(result, TypeId::INT);
     }
 
@@ -978,7 +962,9 @@ mod tests {
     fn test_binary_op_logical_and() {
         let mut ts = TypeSystem::new();
         let mut resolver = TypeResolver::new(&mut ts);
-        let result = resolver.check_binary_op(12, TypeId::INT, TypeId::INT).unwrap();
+        let result = resolver
+            .check_binary_op(12, TypeId::INT, TypeId::INT)
+            .unwrap();
         assert_eq!(result, TypeId::INT);
     }
 
@@ -1010,9 +996,7 @@ mod tests {
     #[test]
     fn test_unary_op_deref() {
         let mut ts = TypeSystem::new();
-        let int_ptr = ts.add_type(CType::Pointer {
-            base: TypeId::INT,
-        });
+        let int_ptr = ts.add_type(CType::Pointer { base: TypeId::INT });
         let mut resolver = TypeResolver::new(&mut ts);
         let result = resolver.check_unary_op(24, int_ptr).unwrap();
         assert_eq!(result, TypeId::INT);
@@ -1030,9 +1014,7 @@ mod tests {
     fn test_assignment_compatible() {
         let mut ts = TypeSystem::new();
         let resolver = TypeResolver::new(&mut ts);
-        let result = resolver
-            .check_assignment(TypeId::INT, TypeId::INT)
-            .unwrap();
+        let result = resolver.check_assignment(TypeId::INT, TypeId::INT).unwrap();
         assert_eq!(result, TypeId::INT);
     }
 
@@ -1049,12 +1031,8 @@ mod tests {
     #[test]
     fn test_assignment_pointer_compatible() {
         let mut ts = TypeSystem::new();
-        let int_ptr1 = ts.add_type(CType::Pointer {
-            base: TypeId::INT,
-        });
-        let int_ptr2 = ts.add_type(CType::Pointer {
-            base: TypeId::INT,
-        });
+        let int_ptr1 = ts.add_type(CType::Pointer { base: TypeId::INT });
+        let int_ptr2 = ts.add_type(CType::Pointer { base: TypeId::INT });
         let resolver = TypeResolver::new(&mut ts);
         let result = resolver.check_assignment(int_ptr1, int_ptr2).unwrap();
         assert_eq!(result, int_ptr1);
@@ -1076,7 +1054,9 @@ mod tests {
         let mut resolver = TypeResolver::new(&mut ts);
         let result = resolver.check_binary_op(1, TypeId::VOID, TypeId::VOID);
         assert!(result.is_err());
-        resolver.errors.push(TypeError::TypeMismatch(TypeId::VOID, TypeId::INT));
+        resolver
+            .errors
+            .push(TypeError::TypeMismatch(TypeId::VOID, TypeId::INT));
         assert!(!resolver.errors().is_empty());
     }
 
@@ -1152,7 +1132,9 @@ mod tests {
     fn test_binary_op_shift() {
         let mut ts = TypeSystem::new();
         let mut resolver = TypeResolver::new(&mut ts);
-        let result = resolver.check_binary_op(17, TypeId::INT, TypeId::INT).unwrap();
+        let result = resolver
+            .check_binary_op(17, TypeId::INT, TypeId::INT)
+            .unwrap();
         assert_eq!(result, TypeId::INT);
     }
 
@@ -1214,7 +1196,9 @@ mod tests {
     fn test_check_mod_integer_only() {
         let mut ts = TypeSystem::new();
         let mut resolver = TypeResolver::new(&mut ts);
-        let result = resolver.check_binary_op(5, TypeId::INT, TypeId::INT).unwrap();
+        let result = resolver
+            .check_binary_op(5, TypeId::INT, TypeId::INT)
+            .unwrap();
         assert_eq!(result, TypeId::INT);
         let result2 = resolver.check_binary_op(5, TypeId::FLOAT, TypeId::FLOAT);
         assert!(result2.is_err());

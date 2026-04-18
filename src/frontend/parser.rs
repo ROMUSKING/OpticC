@@ -75,8 +75,20 @@ impl Parser {
         self.parse_translation_unit()
     }
 
-    pub fn parse_tokens(&mut self, tokens: Vec<preprocessor::Token>) -> Result<NodeOffset, ParseError> {
-        self.tokens = tokens.into_iter().map(Token::from).collect();
+    pub fn parse_tokens(
+        &mut self,
+        tokens: Vec<preprocessor::Token>,
+    ) -> Result<NodeOffset, ParseError> {
+        self.tokens = tokens
+            .into_iter()
+            .filter(|t| {
+                !matches!(
+                    t.kind,
+                    preprocessor::TokenKind::Whitespace | preprocessor::TokenKind::Comment
+                )
+            })
+            .map(Token::from)
+            .collect();
         self.tokens.push(Token {
             kind: TokenKind::EOF,
             text: String::new(),
@@ -402,7 +414,9 @@ impl Parser {
     }
 
     pub fn current_token(&self) -> &Token {
-        self.tokens.get(self.current).unwrap_or_else(|| self.tokens.last().unwrap())
+        self.tokens
+            .get(self.current)
+            .unwrap_or_else(|| self.tokens.last().unwrap())
     }
 
     pub fn is_at_end(&self) -> bool {
@@ -434,7 +448,6 @@ impl Parser {
     }
 
     pub fn skip_punctuator(&mut self, text: &str) -> bool {
-        eprintln!("    skip_punctuator(\"{}\"): current={:?}", text, self.current_token());
         if self.current_token().kind == TokenKind::Punctuator && self.current_token().text == text {
             self.advance();
             true
@@ -450,9 +463,23 @@ impl Parser {
         }
         matches!(
             token.text.as_str(),
-            "void" | "char" | "int" | "float" | "double" | "short" | "long" | "signed" | "unsigned"
-                | "struct" | "union" | "enum" | "_Bool" | "_Complex" | "_Imaginary"
-                | "typeof" | "__typeof__"
+            "void"
+                | "char"
+                | "int"
+                | "float"
+                | "double"
+                | "short"
+                | "long"
+                | "signed"
+                | "unsigned"
+                | "struct"
+                | "union"
+                | "enum"
+                | "_Bool"
+                | "_Complex"
+                | "_Imaginary"
+                | "typeof"
+                | "__typeof__"
         )
     }
 
@@ -478,12 +505,10 @@ impl Parser {
         while self.current_token().kind != TokenKind::EOF {
             match self.parse_external_declaration() {
                 Ok(decl) => {
-                    eprintln!("parse_translation_unit: parsed decl={:?}", decl);
                     if first_decl == NodeOffset::NULL {
                         first_decl = decl;
                         last_decl = decl;
                     } else {
-                        eprintln!("parse_translation_unit: linking {:?}.next_sibling = {:?}", last_decl, decl);
                         if let Some(last) = self.arena.get_mut(last_decl) {
                             last.next_sibling = decl;
                         }
@@ -500,34 +525,27 @@ impl Parser {
     }
 
     fn parse_external_declaration(&mut self) -> Result<NodeOffset, ParseError> {
-        eprintln!("parse_external_declaration: starting, current={:?}", self.current_token());
-
-        if self.current_token().kind == TokenKind::Keyword && self.current_token().text == "__extension__" {
+        if self.current_token().kind == TokenKind::Keyword
+            && self.current_token().text == "__extension__"
+        {
             return self.parse_extension_wrapper();
         }
 
         let specifiers = self.parse_declaration_specifiers()?;
-        eprintln!("parse_external_declaration: after specifiers, current={:?}", self.current_token());
         let mut first_child = specifiers;
         let mut last_child = specifiers;
 
-        eprintln!("parse_external_declaration: checking is_declarator_start");
         if self.is_declarator_start() {
-            eprintln!("parse_external_declaration: calling parse_declarator");
             let declarator = self.parse_declarator()?;
-            eprintln!("parse_external_declaration: after declarator, current={:?}", self.current_token());
             self.link_siblings(&mut first_child, &mut last_child, declarator);
 
             if let Some(attr_result) = self.parse_attribute_after_declarator() {
                 let attr = attr_result?;
                 self.link_siblings(&mut first_child, &mut last_child, attr);
             }
-        } else {
-            eprintln!("parse_external_declaration: NOT a declarator start, skipping");
         }
 
-        while self.current_token().kind == TokenKind::Punctuator
-            && self.current_token().text == ","
+        while self.current_token().kind == TokenKind::Punctuator && self.current_token().text == ","
         {
             self.advance();
             let declarator = self.parse_declarator()?;
@@ -539,24 +557,19 @@ impl Parser {
             }
         }
 
-        eprintln!("parse_external_declaration: checking ; or {{, current={:?}", self.current_token());
         if self.skip_punctuator(";") {
-            eprintln!("  -> consumed ;, returning decl");
             return Ok(self.alloc_node(20, 0, NodeOffset::NULL, first_child, NodeOffset::NULL));
         }
 
-        eprintln!("  -> checking for {{, current={:?}", self.current_token());
-        let is_lbrace = self.current_token().kind == TokenKind::Punctuator && self.current_token().text == "{";
-        eprintln!("  -> is_lbrace={}", is_lbrace);
+        let is_lbrace =
+            self.current_token().kind == TokenKind::Punctuator && self.current_token().text == "{";
         if is_lbrace {
             self.advance();
-            eprintln!("parse_external_declaration: found {{, parsing compound");
             let compound = self.parse_compound_statement(None)?;
             self.link_siblings(&mut first_child, &mut last_child, compound);
             return Ok(self.alloc_node(23, 0, NodeOffset::NULL, first_child, NodeOffset::NULL));
         }
 
-        eprintln!("  -> no ; or {{, returning decl");
         Ok(self.alloc_node(20, 0, NodeOffset::NULL, first_child, NodeOffset::NULL))
     }
 
@@ -618,7 +631,13 @@ impl Parser {
             _ => 101,
         };
 
-        Ok(self.alloc_node(kind, 0, NodeOffset::NULL, NodeOffset::NULL, NodeOffset::NULL))
+        Ok(self.alloc_node(
+            kind,
+            0,
+            NodeOffset::NULL,
+            NodeOffset::NULL,
+            NodeOffset::NULL,
+        ))
     }
 
     fn parse_type_specifier(&mut self) -> Result<NodeOffset, ParseError> {
@@ -647,7 +666,13 @@ impl Parser {
             _ => 2,
         };
 
-        Ok(self.alloc_node(kind, 0, NodeOffset::NULL, NodeOffset::NULL, NodeOffset::NULL))
+        Ok(self.alloc_node(
+            kind,
+            0,
+            NodeOffset::NULL,
+            NodeOffset::NULL,
+            NodeOffset::NULL,
+        ))
     }
 
     fn parse_typeof_expr(&mut self) -> Result<NodeOffset, ParseError> {
@@ -665,29 +690,81 @@ impl Parser {
     }
 
     fn parse_struct_specifier(&mut self) -> Result<NodeOffset, ParseError> {
-        self.expect("{")?;
+        let tag_data = if self.current_token().kind == TokenKind::Identifier {
+            let name = self.current_token().text.clone();
+            self.advance();
+            self.arena.store_string(&name).unwrap_or(NodeOffset::NULL).0
+        } else {
+            0
+        };
+
+        if !self.skip_punctuator("{") {
+            return Ok(self.alloc_node(
+                4,
+                tag_data,
+                NodeOffset::NULL,
+                NodeOffset::NULL,
+                NodeOffset::NULL,
+            ));
+        }
+
         let mut first_member = NodeOffset::NULL;
         let mut last_member = NodeOffset::NULL;
 
         while !self.skip_punctuator("}") {
+            if self.is_at_end() {
+                break;
+            }
             let member_decl = self.parse_struct_declaration()?;
             self.link_siblings(&mut first_member, &mut last_member, member_decl);
         }
 
-        Ok(self.alloc_node(4, 0, NodeOffset::NULL, first_member, NodeOffset::NULL))
+        Ok(self.alloc_node(
+            4,
+            tag_data,
+            NodeOffset::NULL,
+            first_member,
+            NodeOffset::NULL,
+        ))
     }
 
     fn parse_union_specifier(&mut self) -> Result<NodeOffset, ParseError> {
-        self.expect("{")?;
+        let tag_data = if self.current_token().kind == TokenKind::Identifier {
+            let name = self.current_token().text.clone();
+            self.advance();
+            self.arena.store_string(&name).unwrap_or(NodeOffset::NULL).0
+        } else {
+            0
+        };
+
+        if !self.skip_punctuator("{") {
+            return Ok(self.alloc_node(
+                5,
+                tag_data,
+                NodeOffset::NULL,
+                NodeOffset::NULL,
+                NodeOffset::NULL,
+            ));
+        }
+
         let mut first_member = NodeOffset::NULL;
         let mut last_member = NodeOffset::NULL;
 
         while !self.skip_punctuator("}") {
+            if self.is_at_end() {
+                break;
+            }
             let member_decl = self.parse_struct_declaration()?;
             self.link_siblings(&mut first_member, &mut last_member, member_decl);
         }
 
-        Ok(self.alloc_node(5, 0, NodeOffset::NULL, first_member, NodeOffset::NULL))
+        Ok(self.alloc_node(
+            5,
+            tag_data,
+            NodeOffset::NULL,
+            first_member,
+            NodeOffset::NULL,
+        ))
     }
 
     fn parse_struct_declaration(&mut self) -> Result<NodeOffset, ParseError> {
@@ -696,6 +773,9 @@ impl Parser {
         let mut last_declarator = NodeOffset::NULL;
 
         while !self.skip_punctuator(";") {
+            if self.is_at_end() {
+                break;
+            }
             if self.current_token().kind == TokenKind::Punctuator
                 && self.current_token().text == ","
             {
@@ -706,18 +786,34 @@ impl Parser {
             self.link_siblings(&mut first_declarator, &mut last_declarator, declarator);
         }
 
-        Ok(self.alloc_node(
-            25,
-            0,
-            NodeOffset::NULL,
-            specifiers,
-            first_declarator,
-        ))
+        if first_declarator != NodeOffset::NULL {
+            let mut last_spec = specifiers;
+            loop {
+                if let Some(n) = self.arena.get(last_spec) {
+                    if n.next_sibling == NodeOffset::NULL {
+                        break;
+                    }
+                    last_spec = n.next_sibling;
+                } else {
+                    break;
+                }
+            }
+            if let Some(n) = self.arena.get_mut(last_spec) {
+                n.next_sibling = first_declarator;
+            }
+        }
+
+        Ok(self.alloc_node(25, 0, NodeOffset::NULL, specifiers, NodeOffset::NULL))
     }
 
     fn parse_enum_specifier(&mut self) -> Result<NodeOffset, ParseError> {
         let mut first_const = NodeOffset::NULL;
         let mut last_const = NodeOffset::NULL;
+
+        // Optionally consume an enum tag name
+        if self.current_token().kind == TokenKind::Identifier {
+            self.advance();
+        }
 
         if self.skip_punctuator("{") {
             while !self.skip_punctuator("}") {
@@ -734,15 +830,15 @@ impl Parser {
                     0
                 };
 
-                let const_node =
-                    self.alloc_node(26, value, NodeOffset::NULL, NodeOffset::NULL, NodeOffset::NULL);
-                let ident_node = self.alloc_node(
-                    60,
-                    0,
-                    const_node,
+                let const_node = self.alloc_node(
+                    26,
+                    value,
+                    NodeOffset::NULL,
                     NodeOffset::NULL,
                     NodeOffset::NULL,
                 );
+                let ident_node =
+                    self.alloc_node(60, 0, const_node, NodeOffset::NULL, NodeOffset::NULL);
                 if let Some(cn) = self.arena.get_mut(const_node) {
                     cn.first_child = ident_node;
                 }
@@ -770,7 +866,13 @@ impl Parser {
             _ => 90,
         };
 
-        Ok(self.alloc_node(kind, 0, NodeOffset::NULL, NodeOffset::NULL, NodeOffset::NULL))
+        Ok(self.alloc_node(
+            kind,
+            0,
+            NodeOffset::NULL,
+            NodeOffset::NULL,
+            NodeOffset::NULL,
+        ))
     }
 
     fn parse_function_specifier(&mut self) -> Result<NodeOffset, ParseError> {
@@ -784,11 +886,16 @@ impl Parser {
             _ => 93,
         };
 
-        Ok(self.alloc_node(kind, 0, NodeOffset::NULL, NodeOffset::NULL, NodeOffset::NULL))
+        Ok(self.alloc_node(
+            kind,
+            0,
+            NodeOffset::NULL,
+            NodeOffset::NULL,
+            NodeOffset::NULL,
+        ))
     }
 
     pub fn parse_declarator(&mut self) -> Result<NodeOffset, ParseError> {
-        eprintln!("  parse_declarator: starting, current={:?}", self.current_token());
         let mut pointer_node = NodeOffset::NULL;
         let mut last_pointer = NodeOffset::NULL;
 
@@ -822,7 +929,13 @@ impl Parser {
             let name = self.current_token().text.clone();
             self.advance();
             let string_offset = self.arena.store_string(&name).unwrap_or(NodeOffset::NULL);
-            declarator = self.alloc_node(60, string_offset.0, NodeOffset::NULL, NodeOffset::NULL, NodeOffset::NULL);
+            declarator = self.alloc_node(
+                60,
+                string_offset.0,
+                NodeOffset::NULL,
+                NodeOffset::NULL,
+                NodeOffset::NULL,
+            );
         } else if self.skip_punctuator("(") {
             let inner = self.parse_declarator()?;
             self.expect(")")?;
@@ -832,7 +945,12 @@ impl Parser {
         loop {
             if self.skip_punctuator("[") {
                 let size = if self.current_token().text != "]" {
-                    self.parse_constant_expression()?.0
+                    let size_expr = self.parse_constant_expression()?;
+                    self.arena
+                        .get(size_expr)
+                        .filter(|node| node.kind == 61)
+                        .map(|node| node.data)
+                        .unwrap_or(0)
                 } else {
                     0
                 };
@@ -842,11 +960,21 @@ impl Parser {
             } else if self.skip_punctuator("(") {
                 if self.current_token().text == ")" {
                     self.advance();
-                    declarator = self.alloc_node(9, 0, NodeOffset::NULL, declarator, NodeOffset::NULL);
+                    declarator =
+                        self.alloc_node(9, 0, NodeOffset::NULL, declarator, NodeOffset::NULL);
                 } else {
                     let params = self.parse_parameter_list()?;
                     self.expect(")")?;
-                    declarator = self.alloc_node(9, 0, NodeOffset::NULL, declarator, params);
+                    // Chain params as declarator(ident).next_sibling so that
+                    // link_siblings in parse_external_declaration cannot overwrite them
+                    // via kind=9.next_sibling.
+                    if params != NodeOffset::NULL && declarator != NodeOffset::NULL {
+                        if let Some(d) = self.arena.get_mut(declarator) {
+                            d.next_sibling = params;
+                        }
+                    }
+                    declarator =
+                        self.alloc_node(9, 0, NodeOffset::NULL, declarator, NodeOffset::NULL);
                 }
             } else {
                 break;
@@ -860,31 +988,24 @@ impl Parser {
         let mut first_param = NodeOffset::NULL;
         let mut last_param = NodeOffset::NULL;
 
-        eprintln!("parse_parameter_list: starting, current_token={:?}", self.current_token());
         if self.current_token().text == ")" {
-            eprintln!("parse_parameter_list: immediately returning (empty)");
             return Ok(first_param);
         }
 
         loop {
             if self.current_token().text == ")" {
-                eprintln!("parse_parameter_list: found ), breaking");
                 break;
             }
             if self.current_token().text == "{" {
-                eprintln!("parse_parameter_list: found {{, breaking without consuming");
                 break;
             }
-            eprintln!("parse_parameter_list: parsing param, current={:?}", self.current_token());
             let param = self.parse_parameter_declaration()?;
             self.link_siblings(&mut first_param, &mut last_param, param);
 
             if self.current_token().text == ")" {
-                eprintln!("parse_parameter_list: found ) after param, NOT consuming");
                 break;
             }
             if !self.skip_punctuator(",") {
-                eprintln!("parse_parameter_list: no comma, breaking");
                 break;
             }
             if self.current_token().text == "..." {
@@ -892,40 +1013,41 @@ impl Parser {
                 break;
             }
         }
-        eprintln!("parse_parameter_list: done, current={:?}", self.current_token());
 
         Ok(first_param)
     }
 
     fn parse_parameter_declaration(&mut self) -> Result<NodeOffset, ParseError> {
-        eprintln!("parse_parameter_declaration: starting, current={:?}", self.current_token());
         if self.is_type_specifier() {
             let specifiers = self.parse_declaration_specifiers()?;
-            eprintln!("parse_parameter_declaration: after specifiers, current={:?}", self.current_token());
             let declarator = if self.is_declarator_start() {
-                eprintln!("parse_parameter_declaration: calling parse_declarator, current={:?}", self.current_token());
-                let d = self.parse_declarator()?;
-                eprintln!("parse_parameter_declaration: after parse_declarator, current={:?}", self.current_token());
-                d
+                self.parse_declarator()?
             } else {
                 NodeOffset::NULL
             };
 
-            Ok(self.alloc_node(
-                24,
-                0,
-                NodeOffset::NULL,
-                specifiers,
-                declarator,
-            ))
+            // Chain declarator as last_spec.next_sibling so that link_siblings in
+            // parse_parameter_list cannot overwrite it via kind=24.next_sibling.
+            if declarator != NodeOffset::NULL && specifiers != NodeOffset::NULL {
+                let mut last_spec = specifiers;
+                loop {
+                    if let Some(n) = self.arena.get(last_spec) {
+                        if n.next_sibling == NodeOffset::NULL {
+                            break;
+                        }
+                        last_spec = n.next_sibling;
+                    } else {
+                        break;
+                    }
+                }
+                if let Some(n) = self.arena.get_mut(last_spec) {
+                    n.next_sibling = declarator;
+                }
+            }
+
+            Ok(self.alloc_node(24, 0, NodeOffset::NULL, specifiers, NodeOffset::NULL))
         } else {
-            Ok(self.alloc_node(
-                24,
-                0,
-                NodeOffset::NULL,
-                NodeOffset::NULL,
-                NodeOffset::NULL,
-            ))
+            Ok(self.alloc_node(24, 0, NodeOffset::NULL, NodeOffset::NULL, NodeOffset::NULL))
         }
     }
 
@@ -934,24 +1056,25 @@ impl Parser {
         let result = token.kind == TokenKind::Identifier
             || (token.kind == TokenKind::Punctuator && token.text == "(")
             || (token.kind == TokenKind::Punctuator && token.text == "*");
-        eprintln!("  is_declarator_start: token={:?} result={}", token, result);
         result
     }
 
-    fn parse_compound_statement(&mut self, parent: Option<NodeOffset>) -> Result<NodeOffset, ParseError> {
+    fn parse_compound_statement(
+        &mut self,
+        parent: Option<NodeOffset>,
+    ) -> Result<NodeOffset, ParseError> {
         let mut first_item = NodeOffset::NULL;
         let mut last_item = NodeOffset::NULL;
         let mut safety = 0;
 
-        eprintln!("parse_compound_statement: starting, current={:?}", self.current_token());
         while !self.skip_punctuator("}") {
             safety += 1;
-            eprintln!("  parse_compound_statement: loop, current={:?}", self.current_token());
             if self.is_at_end() || safety > 10000 {
                 break;
             }
             if self.skip_punctuator(";") {
-                let empty = self.alloc_node(48, 0, NodeOffset::NULL, NodeOffset::NULL, NodeOffset::NULL);
+                let empty =
+                    self.alloc_node(48, 0, NodeOffset::NULL, NodeOffset::NULL, NodeOffset::NULL);
                 self.link_siblings(&mut first_item, &mut last_item, empty);
                 continue;
             }
@@ -972,8 +1095,6 @@ impl Parser {
                 self.advance();
             }
         }
-        eprintln!("  parse_compound_statement: done skipping }}, current={:?}", self.current_token());
-
         Ok(self.alloc_node(40, 0, NodeOffset::NULL, first_item, NodeOffset::NULL))
     }
 
@@ -997,10 +1118,26 @@ impl Parser {
                         && (self.current_token().text == "." || self.current_token().text == "[")
                     {
                         let init_expr = self.parse_designated_init()?;
-                        init = self.alloc_node(73, 19, NodeOffset::NULL, declarator, init_expr);
+                        // Store init_expr as declarator.next_sibling so link_siblings
+                        // cannot overwrite it (link_siblings sets kind=73.next_sibling).
+                        if declarator != NodeOffset::NULL {
+                            if let Some(d) = self.arena.get_mut(declarator) {
+                                d.next_sibling = init_expr;
+                            }
+                        }
+                        init =
+                            self.alloc_node(73, 19, NodeOffset::NULL, declarator, NodeOffset::NULL);
                     } else {
                         let init_expr = self.parse_initializer()?;
-                        init = self.alloc_node(73, 19, NodeOffset::NULL, declarator, init_expr);
+                        // Store init_expr as declarator.next_sibling so link_siblings
+                        // cannot overwrite it (link_siblings sets kind=73.next_sibling).
+                        if declarator != NodeOffset::NULL {
+                            if let Some(d) = self.arena.get_mut(declarator) {
+                                d.next_sibling = init_expr;
+                            }
+                        }
+                        init =
+                            self.alloc_node(73, 19, NodeOffset::NULL, declarator, NodeOffset::NULL);
                     }
                 }
 
@@ -1016,7 +1153,24 @@ impl Parser {
             }
         }
 
-        Ok(self.alloc_node(21, 0, NodeOffset::NULL, specifiers, first_init))
+        if first_init != NodeOffset::NULL {
+            let mut last_spec = specifiers;
+            loop {
+                if let Some(n) = self.arena.get(last_spec) {
+                    if n.next_sibling == NodeOffset::NULL {
+                        break;
+                    }
+                    last_spec = n.next_sibling;
+                } else {
+                    break;
+                }
+            }
+            if let Some(n) = self.arena.get_mut(last_spec) {
+                n.next_sibling = first_init;
+            }
+        }
+
+        Ok(self.alloc_node(21, 0, NodeOffset::NULL, specifiers, NodeOffset::NULL))
     }
 
     pub fn parse_initializer(&mut self) -> Result<NodeOffset, ParseError> {
@@ -1065,12 +1219,24 @@ impl Parser {
                 "break" => {
                     self.advance();
                     self.skip_punctuator(";");
-                    return Ok(self.alloc_node(46, 0, NodeOffset::NULL, NodeOffset::NULL, NodeOffset::NULL));
+                    return Ok(self.alloc_node(
+                        46,
+                        0,
+                        NodeOffset::NULL,
+                        NodeOffset::NULL,
+                        NodeOffset::NULL,
+                    ));
                 }
                 "continue" => {
                     self.advance();
                     self.skip_punctuator(";");
-                    return Ok(self.alloc_node(47, 0, NodeOffset::NULL, NodeOffset::NULL, NodeOffset::NULL));
+                    return Ok(self.alloc_node(
+                        47,
+                        0,
+                        NodeOffset::NULL,
+                        NodeOffset::NULL,
+                        NodeOffset::NULL,
+                    ));
                 }
                 "switch" => return self.parse_switch_statement(),
                 "goto" => return self.parse_goto_statement(),
@@ -1094,8 +1260,21 @@ impl Parser {
             None
         };
 
-        let else_node = self.alloc_node(0, 0, NodeOffset::NULL, then_stmt, else_stmt.unwrap_or(NodeOffset::NULL));
-        Ok(self.alloc_node(41, 0, NodeOffset::NULL, condition, else_node))
+        // Layout (immune to link_siblings overwriting kind=41.next_sibling):
+        //   kind=41.first_child = cond_wrap(kind=0)
+        //     cond_wrap.first_child = condition_expr   (expr.next_sibling not touched)
+        //     cond_wrap.next_sibling = body_wrap(kind=0)
+        //       body_wrap.first_child = then_stmt
+        //       body_wrap.next_sibling = else_stmt
+        let body_wrap = self.alloc_node(
+            0,
+            0,
+            NodeOffset::NULL,
+            then_stmt,
+            else_stmt.unwrap_or(NodeOffset::NULL),
+        );
+        let cond_wrap = self.alloc_node(0, 0, NodeOffset::NULL, condition, body_wrap);
+        Ok(self.alloc_node(41, 0, NodeOffset::NULL, cond_wrap, NodeOffset::NULL))
     }
 
     fn parse_while_statement(&mut self) -> Result<NodeOffset, ParseError> {
@@ -1105,13 +1284,12 @@ impl Parser {
         self.expect(")")?;
         let body = self.parse_statement()?;
 
-        Ok(self.alloc_node(
-            42,
-            0,
-            NodeOffset::NULL,
-            condition,
-            body,
-        ))
+        // Layout (immune to link_siblings overwriting kind=42.next_sibling):
+        //   kind=42.first_child = cond_wrap(kind=0)
+        //     cond_wrap.first_child = condition_expr   (expr.next_sibling not touched)
+        //     cond_wrap.next_sibling = body
+        let cond_wrap = self.alloc_node(0, 0, NodeOffset::NULL, condition, body);
+        Ok(self.alloc_node(42, 0, NodeOffset::NULL, cond_wrap, NodeOffset::NULL))
     }
 
     fn parse_for_statement(&mut self) -> Result<NodeOffset, ParseError> {
@@ -1146,9 +1324,18 @@ impl Parser {
 
         let body = self.parse_statement()?;
 
-        let init_node = self.alloc_node(0, 0, NodeOffset::NULL, init, condition);
-        let increment_node = self.alloc_node(0, 0, NodeOffset::NULL, increment, body);
-        Ok(self.alloc_node(43, 0, NodeOffset::NULL, init_node, increment_node))
+        // Layout (immune to link_siblings overwriting kind=43.next_sibling):
+        //   kind=43.first_child = init_wrap(kind=0)
+        //     init_wrap.first_child = init
+        //     init_wrap.next_sibling = cond_wrap(kind=0)
+        //       cond_wrap.first_child = condition_expr
+        //       cond_wrap.next_sibling = incr_wrap(kind=0)
+        //         incr_wrap.first_child = increment
+        //         incr_wrap.next_sibling = body
+        let incr_wrap = self.alloc_node(0, 0, NodeOffset::NULL, increment, body);
+        let cond_wrap = self.alloc_node(0, 0, NodeOffset::NULL, condition, incr_wrap);
+        let init_wrap = self.alloc_node(0, 0, NodeOffset::NULL, init, cond_wrap);
+        Ok(self.alloc_node(43, 0, NodeOffset::NULL, init_wrap, NodeOffset::NULL))
     }
 
     fn parse_do_statement(&mut self) -> Result<NodeOffset, ParseError> {
@@ -1160,13 +1347,7 @@ impl Parser {
         self.expect(")")?;
         self.skip_punctuator(";");
 
-        Ok(self.alloc_node(
-            42,
-            1,
-            NodeOffset::NULL,
-            body,
-            condition,
-        ))
+        Ok(self.alloc_node(42, 1, NodeOffset::NULL, body, condition))
     }
 
     fn parse_switch_statement(&mut self) -> Result<NodeOffset, ParseError> {
@@ -1176,13 +1357,7 @@ impl Parser {
         self.expect(")")?;
         let body = self.parse_statement()?;
 
-        Ok(self.alloc_node(
-            50,
-            0,
-            NodeOffset::NULL,
-            condition,
-            body,
-        ))
+        Ok(self.alloc_node(50, 0, NodeOffset::NULL, condition, body))
     }
 
     fn parse_goto_statement(&mut self) -> Result<NodeOffset, ParseError> {
@@ -1316,9 +1491,14 @@ impl Parser {
             "|" => (3, 15),
             "^" => (4, 16),
             "&" => (5, 14),
-            "==" | "!=" => (6, 6),
-            "<" | ">" | "<=" | ">=" => (7, 8),
-            "<<" | ">>" => (8, 17),
+            "==" => (6, 6),
+            "!=" => (6, 7),
+            "<" => (7, 8),
+            ">" => (7, 9),
+            "<=" => (7, 10),
+            ">=" => (7, 11),
+            "<<" => (8, 17),
+            ">>" => (8, 18),
             "+" => (9, 1),
             "-" => (9, 2),
             "*" => (10, 3),
@@ -1432,19 +1612,40 @@ impl Parser {
             } else if self.skip_punctuator("(") {
                 let args = self.parse_argument_expression_list()?;
                 self.expect(")")?;
-                expr = self.alloc_node(67, 0, NodeOffset::NULL, expr, args);
+                if args != NodeOffset::NULL {
+                    if let Some(callee) = self.arena.get_mut(expr) {
+                        callee.next_sibling = args;
+                    }
+                }
+                expr = self.alloc_node(67, 0, NodeOffset::NULL, expr, NodeOffset::NULL);
             } else if self.skip_punctuator(".") {
                 if self.current_token().kind == TokenKind::Identifier {
                     let member = self.current_token().text.clone();
                     self.advance();
-                    let member_node = self.alloc_node(60, 0, NodeOffset::NULL, NodeOffset::NULL, NodeOffset::NULL);
+                    let member_offset =
+                        self.arena.store_string(&member).unwrap_or(NodeOffset::NULL);
+                    let member_node = self.alloc_node(
+                        60,
+                        member_offset.0,
+                        NodeOffset::NULL,
+                        NodeOffset::NULL,
+                        NodeOffset::NULL,
+                    );
                     expr = self.alloc_node(69, 0, NodeOffset::NULL, expr, member_node);
                 }
             } else if self.skip_punctuator("->") {
                 if self.current_token().kind == TokenKind::Identifier {
                     let member = self.current_token().text.clone();
                     self.advance();
-                    let member_node = self.alloc_node(60, 0, NodeOffset::NULL, NodeOffset::NULL, NodeOffset::NULL);
+                    let member_offset =
+                        self.arena.store_string(&member).unwrap_or(NodeOffset::NULL);
+                    let member_node = self.alloc_node(
+                        60,
+                        member_offset.0,
+                        NodeOffset::NULL,
+                        NodeOffset::NULL,
+                        NodeOffset::NULL,
+                    );
                     expr = self.alloc_node(69, 1, NodeOffset::NULL, expr, member_node);
                 }
             } else if self.skip_punctuator("++") {
@@ -1468,7 +1669,7 @@ impl Parser {
                 let arg = self.parse_assignment_expression()?;
                 self.link_siblings(&mut first_arg, &mut last_arg, arg);
 
-                if self.skip_punctuator(")") {
+                if self.current_token().text == ")" {
                     break;
                 }
                 if !self.skip_punctuator(",") {
@@ -1484,7 +1685,11 @@ impl Parser {
         let token = self.current_token();
 
         if token.kind == TokenKind::Punctuator && token.text == "(" {
-            if self.peek_token(1).map(|t| t.kind == TokenKind::Punctuator && t.text == "{").unwrap_or(false) {
+            if self
+                .peek_token(1)
+                .map(|t| t.kind == TokenKind::Punctuator && t.text == "{")
+                .unwrap_or(false)
+            {
                 return self.parse_statement_expr();
             }
         }
@@ -1504,7 +1709,11 @@ impl Parser {
         }
 
         if token.kind == TokenKind::Punctuator && token.text == "&" {
-            if self.peek_token(1).map(|t| t.kind == TokenKind::Punctuator && t.text == "&").unwrap_or(false) {
+            if self
+                .peek_token(1)
+                .map(|t| t.kind == TokenKind::Punctuator && t.text == "&")
+                .unwrap_or(false)
+            {
                 return self.parse_label_addr();
             }
         }
@@ -1517,12 +1726,24 @@ impl Parser {
                     return self.parse_builtin_call(&name);
                 }
                 let string_offset = self.arena.store_string(&name).unwrap_or(NodeOffset::NULL);
-                Ok(self.alloc_node(60, string_offset.0, NodeOffset::NULL, NodeOffset::NULL, NodeOffset::NULL))
+                Ok(self.alloc_node(
+                    60,
+                    string_offset.0,
+                    NodeOffset::NULL,
+                    NodeOffset::NULL,
+                    NodeOffset::NULL,
+                ))
             }
             TokenKind::IntConstant => {
                 let value = token.text.parse::<u32>().unwrap_or(0);
                 self.advance();
-                Ok(self.alloc_node(61, value, NodeOffset::NULL, NodeOffset::NULL, NodeOffset::NULL))
+                Ok(self.alloc_node(
+                    61,
+                    value,
+                    NodeOffset::NULL,
+                    NodeOffset::NULL,
+                    NodeOffset::NULL,
+                ))
             }
             TokenKind::CharConstant => {
                 self.advance();
@@ -1546,7 +1767,12 @@ impl Parser {
         self.parse_conditional_expression()
     }
 
-    pub fn link_siblings(&mut self, first: &mut NodeOffset, last: &mut NodeOffset, node: NodeOffset) {
+    pub fn link_siblings(
+        &mut self,
+        first: &mut NodeOffset,
+        last: &mut NodeOffset,
+        node: NodeOffset,
+    ) {
         if node == NodeOffset::NULL {
             return;
         }
@@ -1562,7 +1788,9 @@ impl Parser {
     }
 
     fn parse_attribute_after_declarator(&mut self) -> Option<Result<NodeOffset, ParseError>> {
-        if self.current_token().kind == TokenKind::Keyword && self.current_token().text == "__attribute__" {
+        if self.current_token().kind == TokenKind::Keyword
+            && self.current_token().text == "__attribute__"
+        {
             Some(self.parse_attribute_list())
         } else {
             None
@@ -1579,7 +1807,13 @@ impl Parser {
                 self.expect("=")?;
                 let value = self.parse_initializer()?;
 
-                return Ok(self.alloc_node(205, field_offset.0, NodeOffset::NULL, value, NodeOffset::NULL));
+                return Ok(self.alloc_node(
+                    205,
+                    field_offset.0,
+                    NodeOffset::NULL,
+                    value,
+                    NodeOffset::NULL,
+                ));
             }
         } else if self.skip_punctuator("[") {
             let index = self.parse_constant_expression()?;
@@ -1638,8 +1872,8 @@ mod integration_tests {
     use super::*;
     use crate::db::OpticDb;
     use crate::frontend::preprocessor::Preprocessor;
-    use tempfile::{TempDir, NamedTempFile};
     use std::fs;
+    use tempfile::{NamedTempFile, TempDir};
 
     fn create_test_env() -> (TempDir, String) {
         let temp_dir = TempDir::new().unwrap();
@@ -1685,7 +1919,11 @@ mod integration_tests {
     fn test_parse_file_with_ifdef_conditionals() {
         let (temp_dir, db_path) = create_test_env();
         let c_file = temp_dir.path().join("conditional.c");
-        fs::write(&c_file, "#define DEBUG\n#ifdef DEBUG\nint debug_val = 1;\n#endif").unwrap();
+        fs::write(
+            &c_file,
+            "#define DEBUG\n#ifdef DEBUG\nint debug_val = 1;\n#endif",
+        )
+        .unwrap();
 
         let db = OpticDb::new(&db_path).unwrap();
         let mut pp = Preprocessor::new(db);
@@ -1705,7 +1943,11 @@ mod integration_tests {
         fs::write(&header, "int global_var;").unwrap();
 
         let c_file = temp_dir.path().join("with_include.c");
-        fs::write(&c_file, "#include \"header.h\"\nint main() { return global_var; }").unwrap();
+        fs::write(
+            &c_file,
+            "#include \"header.h\"\nint main() { return global_var; }",
+        )
+        .unwrap();
 
         let db = OpticDb::new(&db_path).unwrap();
         let mut pp = Preprocessor::new(db);
@@ -1729,7 +1971,11 @@ mod integration_tests {
         fs::write(&outer, "#include \"inner.h\"\nint outer_val = 1;").unwrap();
 
         let c_file = temp_dir.path().join("nested.c");
-        fs::write(&c_file, "#include \"outer.h\"\nint main() { return inner_val + outer_val; }").unwrap();
+        fs::write(
+            &c_file,
+            "#include \"outer.h\"\nint main() { return inner_val + outer_val; }",
+        )
+        .unwrap();
 
         let db = OpticDb::new(&db_path).unwrap();
         let mut pp = Preprocessor::new(db);

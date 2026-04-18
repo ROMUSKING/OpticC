@@ -84,7 +84,9 @@ impl OpticDb {
         let db = Database::create(path).map_err(DbError::from)?;
         let write_txn = db.begin_write().map_err(DbError::from)?;
         {
-            let _ = write_txn.open_table(FILE_HASHES_TABLE).map_err(DbError::from)?;
+            let _ = write_txn
+                .open_table(FILE_HASHES_TABLE)
+                .map_err(DbError::from)?;
             let _ = write_txn.open_table(MACROS_TABLE).map_err(DbError::from)?;
         }
         write_txn.commit().map_err(DbError::from)?;
@@ -94,7 +96,9 @@ impl OpticDb {
     pub fn insert_file_hash(&self, hash: &[u8; 32], file_path: &str) -> Result<()> {
         let write_txn = self.db.begin_write().map_err(DbError::from)?;
         {
-            let mut table = write_txn.open_table(FILE_HASHES_TABLE).map_err(DbError::from)?;
+            let mut table = write_txn
+                .open_table(FILE_HASHES_TABLE)
+                .map_err(DbError::from)?;
             table.insert(hash, file_path).map_err(DbError::from)?;
         }
         write_txn.commit().map_err(DbError::from)?;
@@ -103,7 +107,9 @@ impl OpticDb {
 
     pub fn get_file_path_by_hash(&self, hash: &[u8; 32]) -> Result<Option<String>> {
         let read_txn = self.db.begin_read().map_err(DbError::from)?;
-        let table = read_txn.open_table(FILE_HASHES_TABLE).map_err(DbError::from)?;
+        let table = read_txn
+            .open_table(FILE_HASHES_TABLE)
+            .map_err(DbError::from)?;
         match table.get(hash).map_err(DbError::from)? {
             Some(access_guard) => Ok(Some(access_guard.value().to_string())),
             None => Ok(None),
@@ -112,7 +118,9 @@ impl OpticDb {
 
     pub fn contains_file_hash(&self, hash: &[u8; 32]) -> Result<bool> {
         let read_txn = self.db.begin_read().map_err(DbError::from)?;
-        let table = read_txn.open_table(FILE_HASHES_TABLE).map_err(DbError::from)?;
+        let table = read_txn
+            .open_table(FILE_HASHES_TABLE)
+            .map_err(DbError::from)?;
         Ok(table.get(hash).map_err(DbError::from)?.is_some())
     }
 
@@ -138,7 +146,9 @@ impl OpticDb {
     pub fn remove_file_hash(&self, hash: &[u8; 32]) -> Result<Option<String>> {
         let write_txn = self.db.begin_write().map_err(DbError::from)?;
         let old_value = {
-            let mut table = write_txn.open_table(FILE_HASHES_TABLE).map_err(DbError::from)?;
+            let mut table = write_txn
+                .open_table(FILE_HASHES_TABLE)
+                .map_err(DbError::from)?;
             let x = if let Some(g) = table.remove(hash).map_err(DbError::from)? {
                 Some(g.value().to_string())
             } else {
@@ -167,7 +177,9 @@ impl OpticDb {
 
     pub fn file_hash_count(&self) -> Result<u64> {
         let read_txn = self.db.begin_read().map_err(DbError::from)?;
-        let table = read_txn.open_table(FILE_HASHES_TABLE).map_err(DbError::from)?;
+        let table = read_txn
+            .open_table(FILE_HASHES_TABLE)
+            .map_err(DbError::from)?;
         Ok(table.len().map_err(DbError::from)?)
     }
 

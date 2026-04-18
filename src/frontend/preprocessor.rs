@@ -1,9 +1,12 @@
 use crate::db::OpticDb;
-use sha2::{Sha256, Digest};
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
+use std::env;
 use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::sync::OnceLock;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Token {
@@ -16,7 +19,13 @@ pub struct Token {
 
 impl Token {
     pub fn new(kind: TokenKind, text: String, line: u32, column: u32, file: String) -> Self {
-        Self { kind, text, line, column, file }
+        Self {
+            kind,
+            text,
+            line,
+            column,
+            file,
+        }
     }
 
     pub fn is_whitespace(&self) -> bool {
@@ -102,6 +111,7 @@ pub enum MacroDefinition {
     FunctionLike {
         params: Vec<String>,
         is_variadic: bool,
+        variadic_param: Option<String>,
         replacement: Vec<Token>,
     },
 }
@@ -147,11 +157,17 @@ pub struct Preprocessor {
     active_include_guards: Vec<IncludeGuard>,
 }
 
+struct PreprocessorBootstrap {
+    include_paths: Vec<PathBuf>,
+    macros: Vec<(String, MacroDefinition)>,
+}
+
 impl Preprocessor {
     pub fn new(db: OpticDb) -> Self {
+        let bootstrap = Self::bootstrap();
         let mut p = Self {
             db,
-            include_paths: Vec::new(),
+            include_paths: bootstrap.include_paths.clone(),
             macros: HashMap::new(),
             pragmas: Vec::new(),
             warnings: Vec::new(),
@@ -161,8 +177,107 @@ impl Preprocessor {
             include_guards: HashMap::new(),
             active_include_guards: Vec::new(),
         };
-        p.define_predefined_macros();
+        p.define_bootstrap_macros(bootstrap);
         p
+    }
+
+    fn bootstrap() -> &'static PreprocessorBootstrap {
+        static BOOTSTRAP: OnceLock<PreprocessorBootstrap> = OnceLock::new();
+        BOOTSTRAP.get_or_init(Self::build_bootstrap)
+    }
+
+    fn build_bootstrap() -> PreprocessorBootstrap {
+        let mut macros = Self::predefined_macro_definitions();
+        macros.extend(Self::compiler_predefined_macro_definitions());
+        PreprocessorBootstrap {
+            include_paths: Self::discover_default_include_paths(),
+            macros,
+        }
+    }
+
+    fn discover_default_include_paths() -> Vec<PathBuf> {
+        let mut include_paths = Vec::new();
+
+        for key in ["C_INCLUDE_PATH", "CPATH"] {
+            if let Some(value) = env::var_os(key) {
+                for path in env::split_paths(&value) {
+                    Self::push_unique_existing_path(&mut include_paths, path);
+                }
+            }
+        }
+
+        for compiler in ["gcc", "clang", "cc"] {
+            for path in Self::detect_compiler_include_paths(compiler) {
+                Self::push_unique_existing_path(&mut include_paths, path);
+            }
+            if !include_paths.is_empty() {
+                break;
+            }
+        }
+
+        if include_paths.is_empty() {
+            for path in Self::fallback_system_include_paths() {
+                Self::push_unique_existing_path(&mut include_paths, path);
+            }
+        }
+
+        include_paths
+    }
+
+    fn define_bootstrap_macros(&mut self, bootstrap: &PreprocessorBootstrap) {
+        for (name, definition) in &bootstrap.macros {
+            self.macros.insert(name.clone(), definition.clone());
+        }
+    }
+
+    fn detect_compiler_include_paths(compiler: &str) -> Vec<PathBuf> {
+        let output = match Command::new(compiler).args(["-E", "-Wp,-v", "-"]).output() {
+            Ok(output) => output,
+            Err(_) => return Vec::new(),
+        };
+
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let mut paths = Vec::new();
+        let mut in_search_list = false;
+
+        for line in stderr.lines() {
+            let trimmed = line.trim();
+            if trimmed == "#include <...> search starts here:" {
+                in_search_list = true;
+                continue;
+            }
+            if trimmed == "End of search list." {
+                break;
+            }
+            if in_search_list && !trimmed.is_empty() {
+                Self::push_unique_existing_path(&mut paths, PathBuf::from(trimmed));
+            }
+        }
+
+        paths
+    }
+
+    fn fallback_system_include_paths() -> Vec<PathBuf> {
+        let mut paths = Vec::new();
+        if let Ok(entries) = fs::read_dir("/usr/lib/gcc") {
+            for target in entries.flatten() {
+                if let Ok(versions) = fs::read_dir(target.path()) {
+                    for version in versions.flatten() {
+                        paths.push(version.path().join("include"));
+                    }
+                }
+            }
+        }
+        paths.push(PathBuf::from("/usr/local/include"));
+        paths.push(PathBuf::from("/usr/include/x86_64-linux-gnu"));
+        paths.push(PathBuf::from("/usr/include"));
+        paths
+    }
+
+    fn push_unique_existing_path(paths: &mut Vec<PathBuf>, path: PathBuf) {
+        if path.exists() && !paths.iter().any(|existing| existing == &path) {
+            paths.push(path);
+        }
     }
 
     pub fn add_include_path(&mut self, path: &str) {
@@ -173,7 +288,9 @@ impl Preprocessor {
         let tokens = self.tokenize_replacement(value);
         self.macros.insert(
             name.to_string(),
-            MacroDefinition::ObjectLike { replacement: tokens },
+            MacroDefinition::ObjectLike {
+                replacement: tokens,
+            },
         );
     }
 
@@ -187,7 +304,11 @@ impl Preprocessor {
         Ok(tokens)
     }
 
-    pub fn process_source(&mut self, source: &str, file_name: &str) -> Result<Vec<Token>, PreprocessorError> {
+    pub fn process_source(
+        &mut self,
+        source: &str,
+        file_name: &str,
+    ) -> Result<Vec<Token>, PreprocessorError> {
         self.current_file = file_name.to_string();
         self.include_stack.push(file_name.to_string());
         let tokens = self.resolve_includes(source, file_name, 1)?;
@@ -207,34 +328,108 @@ impl Preprocessor {
         &self.errors
     }
 
-    fn define_predefined_macros(&mut self) {
-        self.macros.insert(
-            "__STDC__".to_string(),
-            MacroDefinition::ObjectLike {
-                replacement: vec![Token::new(TokenKind::IntLiteral, "1".to_string(), 0, 0, String::new())],
-            },
-        );
-        self.macros.insert(
-            "__STDC_VERSION__".to_string(),
-            MacroDefinition::ObjectLike {
-                replacement: vec![Token::new(TokenKind::IntLiteral, "201112L".to_string(), 0, 0, String::new())],
-            },
-        );
-        self.macros.insert(
-            "__GNUC__".to_string(),
-            MacroDefinition::ObjectLike {
-                replacement: vec![Token::new(TokenKind::IntLiteral, "4".to_string(), 0, 0, String::new())],
-            },
-        );
-        self.macros.insert(
-            "__GNUC_MINOR__".to_string(),
-            MacroDefinition::ObjectLike {
-                replacement: vec![Token::new(TokenKind::IntLiteral, "2".to_string(), 0, 0, String::new())],
-            },
-        );
+    fn predefined_macro_definitions() -> Vec<(String, MacroDefinition)> {
+        let predefined_int_macros = [
+            ("__STDC__", "1".to_string()),
+            ("__STDC_VERSION__", "201112L".to_string()),
+            ("__STDC_HOSTED__", "1".to_string()),
+            ("__GNUC__", "4".to_string()),
+            ("__GNUC_MINOR__", "2".to_string()),
+            ("__GNUC_PATCHLEVEL__", "1".to_string()),
+            (
+                "__SIZEOF_SHORT__",
+                std::mem::size_of::<libc::c_short>().to_string(),
+            ),
+            (
+                "__SIZEOF_INT__",
+                std::mem::size_of::<libc::c_int>().to_string(),
+            ),
+            (
+                "__SIZEOF_LONG__",
+                std::mem::size_of::<libc::c_long>().to_string(),
+            ),
+            (
+                "__SIZEOF_LONG_LONG__",
+                std::mem::size_of::<libc::c_longlong>().to_string(),
+            ),
+            (
+                "__SIZEOF_POINTER__",
+                std::mem::size_of::<usize>().to_string(),
+            ),
+            (
+                "__SIZEOF_SIZE_T__",
+                std::mem::size_of::<libc::size_t>().to_string(),
+            ),
+            (
+                "__SIZEOF_PTRDIFF_T__",
+                std::mem::size_of::<libc::ptrdiff_t>().to_string(),
+            ),
+        ];
+
+        predefined_int_macros
+            .into_iter()
+            .map(|(name, value)| {
+                (
+                    name.to_string(),
+                    MacroDefinition::ObjectLike {
+                        replacement: vec![Token::new(
+                            TokenKind::IntLiteral,
+                            value,
+                            0,
+                            0,
+                            String::new(),
+                        )],
+                    },
+                )
+            })
+            .collect()
+    }
+
+    fn compiler_predefined_macro_definitions() -> Vec<(String, MacroDefinition)> {
+        for compiler in ["gcc", "clang", "cc"] {
+            let output = match Command::new(compiler).args(["-dM", "-E", "-"]).output() {
+                Ok(output) => output,
+                Err(_) => continue,
+            };
+            if !output.status.success() {
+                continue;
+            }
+
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let mut macros = Vec::new();
+            for line in stdout.lines() {
+                let Some(rest) = line.strip_prefix("#define ") else {
+                    continue;
+                };
+                let mut parts = rest.splitn(2, char::is_whitespace);
+                let Some(name) = parts.next() else {
+                    continue;
+                };
+                if name.is_empty() || name.contains('(') {
+                    continue;
+                }
+                let value = parts
+                    .next()
+                    .map(str::trim)
+                    .filter(|v| !v.is_empty())
+                    .unwrap_or("1");
+                macros.push((
+                    name.to_string(),
+                    MacroDefinition::ObjectLike {
+                        replacement: Self::tokenize_replacement_static(value),
+                    },
+                ));
+            }
+            return macros;
+        }
+        Vec::new()
     }
 
     fn tokenize_replacement(&self, text: &str) -> Vec<Token> {
+        Self::tokenize_replacement_static(text)
+    }
+
+    fn tokenize_replacement_static(text: &str) -> Vec<Token> {
         let mut tokens = Vec::new();
         let mut chars = text.chars().peekable();
 
@@ -300,7 +495,13 @@ impl Preprocessor {
                         }
                     }
                     if num.contains('.') || num.contains('e') || num.contains('E') {
-                        tokens.push(Token::new(TokenKind::FloatLiteral, num, 0, 0, String::new()));
+                        tokens.push(Token::new(
+                            TokenKind::FloatLiteral,
+                            num,
+                            0,
+                            0,
+                            String::new(),
+                        ));
                     } else {
                         tokens.push(Token::new(TokenKind::IntLiteral, num, 0, 0, String::new()));
                     }
@@ -325,14 +526,59 @@ impl Preprocessor {
                     chars.next();
                     if chars.peek() == Some(&'#') {
                         chars.next();
-                        tokens.push(Token::new(TokenKind::Punctuator, "##".to_string(), 0, 0, String::new()));
+                        tokens.push(Token::new(
+                            TokenKind::Punctuator,
+                            "##".to_string(),
+                            0,
+                            0,
+                            String::new(),
+                        ));
                     } else {
-                        tokens.push(Token::new(TokenKind::Punctuator, "#".to_string(), 0, 0, String::new()));
+                        tokens.push(Token::new(
+                            TokenKind::Punctuator,
+                            "#".to_string(),
+                            0,
+                            0,
+                            String::new(),
+                        ));
                     }
                 }
                 _ => {
                     chars.next();
-                    tokens.push(Token::new(TokenKind::Punctuator, ch.to_string(), 0, 0, String::new()));
+                    let mut punct = ch.to_string();
+                    if ch == '.' && chars.peek() == Some(&'.') {
+                        let mut ellipsis = chars.clone();
+                        ellipsis.next();
+                        if ellipsis.next() == Some('.') {
+                            chars.next();
+                            chars.next();
+                            punct = "...".to_string();
+                        }
+                    } else if let Some(next) = chars.peek().copied() {
+                        let two_char = format!("{}{}", ch, next);
+                        if matches!(two_char.as_str(), "<<" | ">>") {
+                            let mut shift_lookahead = chars.clone();
+                            shift_lookahead.next();
+                            if shift_lookahead.next() == Some('=') {
+                                chars.next();
+                                chars.next();
+                                punct = format!("{}=", two_char);
+                            } else {
+                                chars.next();
+                                punct = two_char;
+                            }
+                        } else if Self::is_two_char_punctuator(&two_char) {
+                            chars.next();
+                            punct = two_char;
+                        }
+                    }
+                    tokens.push(Token::new(
+                        TokenKind::Punctuator,
+                        punct,
+                        0,
+                        0,
+                        String::new(),
+                    ));
                 }
             }
         }
@@ -342,11 +588,68 @@ impl Preprocessor {
     fn is_keyword(text: &str) -> bool {
         matches!(
             text,
-            "auto" | "break" | "case" | "char" | "const" | "continue" | "default" | "do"
-                | "double" | "else" | "enum" | "extern" | "float" | "for" | "goto" | "if"
-                | "inline" | "int" | "long" | "register" | "restrict" | "return" | "short"
-                | "signed" | "sizeof" | "static" | "struct" | "switch" | "typedef" | "union"
-                | "unsigned" | "void" | "volatile" | "while" | "_Bool" | "_Complex" | "_Imaginary"
+            "auto"
+                | "break"
+                | "case"
+                | "char"
+                | "const"
+                | "continue"
+                | "default"
+                | "do"
+                | "double"
+                | "else"
+                | "enum"
+                | "extern"
+                | "float"
+                | "for"
+                | "goto"
+                | "if"
+                | "inline"
+                | "int"
+                | "long"
+                | "register"
+                | "restrict"
+                | "return"
+                | "short"
+                | "signed"
+                | "sizeof"
+                | "static"
+                | "struct"
+                | "switch"
+                | "typedef"
+                | "union"
+                | "unsigned"
+                | "void"
+                | "volatile"
+                | "while"
+                | "_Bool"
+                | "_Complex"
+                | "_Imaginary"
+        )
+    }
+
+    fn is_two_char_punctuator(text: &str) -> bool {
+        matches!(
+            text,
+            "==" | "!="
+                | "<="
+                | ">="
+                | "&&"
+                | "||"
+                | "<<"
+                | ">>"
+                | "++"
+                | "--"
+                | "->"
+                | "+="
+                | "-="
+                | "*="
+                | "/="
+                | "%="
+                | "&="
+                | "|="
+                | "^="
+                | "##"
         )
     }
 
@@ -357,6 +660,29 @@ impl Preprocessor {
         let mut col: u32 = 1;
 
         while let Some(&ch) = chars.peek() {
+            if ch == '\\' {
+                let mut lookahead = chars.clone();
+                lookahead.next();
+                match lookahead.next() {
+                    Some('\n') => {
+                        chars.next();
+                        chars.next();
+                        line += 1;
+                        col = 1;
+                        continue;
+                    }
+                    Some('\r') if lookahead.next() == Some('\n') => {
+                        chars.next();
+                        chars.next();
+                        chars.next();
+                        line += 1;
+                        col = 1;
+                        continue;
+                    }
+                    _ => {}
+                }
+            }
+
             match ch {
                 '\n' => {
                     chars.next();
@@ -548,9 +874,32 @@ impl Preprocessor {
                     let ch = chars.next().unwrap();
                     col += 1;
                     let mut text = ch.to_string();
+                    if ch == '.' && chars.peek() == Some(&'.') {
+                        let mut ellipsis = chars.clone();
+                        ellipsis.next();
+                        if ellipsis.next() == Some('.') {
+                            chars.next();
+                            chars.next();
+                            col += 2;
+                            text = "...".to_string();
+                        }
+                    }
                     if let Some(&next) = chars.peek() {
                         let two_char = format!("{}{}", ch, next);
-                        if matches!(two_char.as_str(), "==" | "!=" | "<=" | ">=" | "&&" | "||" | "<<" | ">>") {
+                        if matches!(two_char.as_str(), "<<" | ">>") {
+                            let mut shift_lookahead = chars.clone();
+                            shift_lookahead.next();
+                            if shift_lookahead.next() == Some('=') {
+                                chars.next();
+                                chars.next();
+                                col += 2;
+                                text = format!("{}=", two_char);
+                            } else {
+                                chars.next();
+                                col += 1;
+                                text = two_char;
+                            }
+                        } else if Self::is_two_char_punctuator(&two_char) {
                             chars.next();
                             col += 1;
                             text = two_char;
@@ -601,6 +950,26 @@ impl Preprocessor {
             .collect()
     }
 
+    fn tokens_to_pp_tokens(tokens: &[Token]) -> Vec<PpToken> {
+        tokens
+            .iter()
+            .map(|t| PpToken {
+                kind: match t.kind {
+                    TokenKind::Identifier | TokenKind::Keyword => PpTokenKind::Identifier,
+                    TokenKind::IntLiteral | TokenKind::FloatLiteral => PpTokenKind::Number,
+                    TokenKind::StringLiteral => PpTokenKind::StringLit,
+                    TokenKind::CharLiteral => PpTokenKind::CharLit,
+                    TokenKind::Punctuator | TokenKind::Preprocessor => PpTokenKind::Punctuator,
+                    TokenKind::Whitespace | TokenKind::Comment => PpTokenKind::Whitespace,
+                    TokenKind::EndOfFile => PpTokenKind::Newline,
+                },
+                text: t.text.clone(),
+                line: t.line,
+                column: t.column,
+            })
+            .collect()
+    }
+
     fn resolve_includes(
         &mut self,
         source: &str,
@@ -614,20 +983,22 @@ impl Preprocessor {
         let mut in_if_stack: Vec<bool> = Vec::new();
         let mut branch_taken: Vec<bool> = Vec::new();
 
-        let mut flush_pending = |pending: &mut Vec<PpToken>, result: &mut Vec<Token>, file: &str, pp: &Preprocessor| {
-            if pending.is_empty() {
-                return;
-            }
-            let tokens = Self::pp_tokens_to_tokens(pending, file);
-            let expanded = pp.expand_macro_tokens(&tokens, file);
-            result.extend(expanded);
-            pending.clear();
-        };
+        let mut flush_pending =
+            |pending: &mut Vec<PpToken>, result: &mut Vec<Token>, file: &str, pp: &Preprocessor| {
+                if pending.is_empty() {
+                    return;
+                }
+                let tokens = Self::pp_tokens_to_tokens(pending, file);
+                let expanded = pp.expand_macro_tokens(&tokens, file);
+                result.extend(expanded);
+                pending.clear();
+            };
 
         while i < pp_tokens.len() {
             if self.is_directive_start(&pp_tokens, i) {
                 flush_pending(&mut pending, &mut result, file, self);
-                let (directive, dir_line, _dir_col, after_name) = self.parse_directive_name(&pp_tokens, i);
+                let (directive, dir_line, _dir_col, after_name) =
+                    self.parse_directive_name(&pp_tokens, i);
                 match directive.as_str() {
                     "include" => {
                         if in_if_stack.iter().all(|&active| active) {
@@ -663,15 +1034,18 @@ impl Preprocessor {
                         }
                     }
                     "ifdef" => {
-                        let (name, end_idx) = self.parse_simple_directive_arg(&pp_tokens, after_name)?;
+                        let (name, end_idx) =
+                            self.parse_simple_directive_arg(&pp_tokens, after_name)?;
                         let active = in_if_stack.iter().all(|&a| a) && self.is_macro_defined(&name);
                         in_if_stack.push(active);
                         branch_taken.push(active);
                         i = end_idx;
                     }
                     "ifndef" => {
-                        let (name, end_idx) = self.parse_simple_directive_arg(&pp_tokens, after_name)?;
-                        let active = in_if_stack.iter().all(|&a| a) && !self.is_macro_defined(&name);
+                        let (name, end_idx) =
+                            self.parse_simple_directive_arg(&pp_tokens, after_name)?;
+                        let active =
+                            in_if_stack.iter().all(|&a| a) && !self.is_macro_defined(&name);
                         in_if_stack.push(active);
                         branch_taken.push(active);
                         if active {
@@ -685,7 +1059,8 @@ impl Preprocessor {
                     }
                     "if" => {
                         if in_if_stack.iter().all(|&a| a) {
-                            let (value, end_idx) = self.parse_if_expression(&pp_tokens, after_name, file)?;
+                            let (value, end_idx) =
+                                self.parse_if_expression(&pp_tokens, after_name, file)?;
                             in_if_stack.push(value != 0);
                             branch_taken.push(value != 0);
                             i = end_idx;
@@ -702,7 +1077,8 @@ impl Preprocessor {
                                 "#elif without #if".to_string(),
                             ));
                         }
-                        let parent_active = in_if_stack.iter().take(in_if_stack.len() - 1).all(|&a| a);
+                        let parent_active =
+                            in_if_stack.iter().take(in_if_stack.len() - 1).all(|&a| a);
                         let last_idx = in_if_stack.len() - 1;
                         if branch_taken[last_idx] {
                             in_if_stack[last_idx] = false;
@@ -727,7 +1103,8 @@ impl Preprocessor {
                                 "#else without #if".to_string(),
                             ));
                         }
-                        let parent_active = in_if_stack.iter().take(in_if_stack.len() - 1).all(|&a| a);
+                        let parent_active =
+                            in_if_stack.iter().take(in_if_stack.len() - 1).all(|&a| a);
                         let last_idx = in_if_stack.len() - 1;
                         if parent_active && !branch_taken[last_idx] {
                             in_if_stack[last_idx] = true;
@@ -840,7 +1217,12 @@ impl Preprocessor {
             j += 1;
         }
         if j < tokens.len() && tokens[j].kind == PpTokenKind::Identifier {
-            (tokens[j].text.clone(), tokens[j].line, tokens[j].column, j + 1)
+            (
+                tokens[j].text.clone(),
+                tokens[j].line,
+                tokens[j].column,
+                j + 1,
+            )
         } else {
             (String::new(), tokens[i].line, tokens[i].column, j)
         }
@@ -915,7 +1297,7 @@ impl Preprocessor {
         if let Some(parent) = Path::new(current_file).parent() {
             search_paths.push(parent.to_path_buf());
         }
-        search_paths.extend(self.include_paths.clone());
+        search_paths.extend(self.include_paths.iter().cloned());
 
         for search_path in &search_paths {
             let full_path = search_path.join(path);
@@ -927,8 +1309,9 @@ impl Preprocessor {
                     }
                 }
 
-                let content = fs::read_to_string(&full_path)
-                    .map_err(|e| PreprocessorError::IncludeError(path.to_string(), e.to_string()))?;
+                let content = fs::read_to_string(&full_path).map_err(|e| {
+                    PreprocessorError::IncludeError(path.to_string(), e.to_string())
+                })?;
 
                 let hash = self.compute_hash(&content);
                 if self.db.contains_file_hash(&hash).unwrap_or(false) {
@@ -980,7 +1363,8 @@ impl Preprocessor {
         let is_function_like = j < tokens.len() && tokens[j].text == "(";
 
         if is_function_like {
-            let (params, is_variadic, end_params) = self.parse_macro_params(tokens, j, file)?;
+            let (params, is_variadic, variadic_param, end_params) =
+                self.parse_macro_params(tokens, j, file)?;
             j = end_params;
             while j < tokens.len() && tokens[j].kind == PpTokenKind::Whitespace {
                 j += 1;
@@ -994,7 +1378,8 @@ impl Preprocessor {
                 replacement_end += 1;
             }
 
-            let replacement_tokens = Self::pp_tokens_to_tokens(&tokens[replacement_start..replacement_end], file);
+            let replacement_tokens =
+                Self::pp_tokens_to_tokens(&tokens[replacement_start..replacement_end], file);
             let replacement = self.expand_tokens_in_macro(&replacement_tokens, &params, file);
 
             self.macros.insert(
@@ -1002,6 +1387,7 @@ impl Preprocessor {
                 MacroDefinition::FunctionLike {
                     params,
                     is_variadic,
+                    variadic_param,
                     replacement,
                 },
             );
@@ -1015,13 +1401,12 @@ impl Preprocessor {
                 replacement_end += 1;
             }
 
-            let replacement_tokens = Self::pp_tokens_to_tokens(&tokens[replacement_start..replacement_end], file);
+            let replacement_tokens =
+                Self::pp_tokens_to_tokens(&tokens[replacement_start..replacement_end], file);
             let replacement = self.expand_tokens_in_macro(&replacement_tokens, &[], file);
 
-            self.macros.insert(
-                name,
-                MacroDefinition::ObjectLike { replacement },
-            );
+            self.macros
+                .insert(name, MacroDefinition::ObjectLike { replacement });
             Ok(replacement_end + 1)
         }
     }
@@ -1031,10 +1416,11 @@ impl Preprocessor {
         tokens: &[PpToken],
         start: usize,
         file: &str,
-    ) -> Result<(Vec<String>, bool, usize), PreprocessorError> {
+    ) -> Result<(Vec<String>, bool, Option<String>, usize), PreprocessorError> {
         let mut j = start + 1;
         let mut params = Vec::new();
         let mut is_variadic = false;
+        let mut variadic_param = None;
 
         while j < tokens.len() {
             while j < tokens.len() && tokens[j].kind == PpTokenKind::Whitespace {
@@ -1059,26 +1445,44 @@ impl Preprocessor {
                 break;
             }
             if tokens[j].kind == PpTokenKind::Identifier {
-                params.push(tokens[j].text.clone());
+                let param_name = tokens[j].text.clone();
                 j += 1;
+                while j < tokens.len() && tokens[j].kind == PpTokenKind::Whitespace {
+                    j += 1;
+                }
+                if j < tokens.len() && tokens[j].text == "..." {
+                    is_variadic = true;
+                    variadic_param = Some(param_name);
+                    j += 1;
+                    while j < tokens.len() && tokens[j].kind == PpTokenKind::Whitespace {
+                        j += 1;
+                    }
+                    if j < tokens.len() && tokens[j].text == ")" {
+                        j += 1;
+                    }
+                    break;
+                }
+                params.push(param_name);
             } else {
                 return Err(PreprocessorError::MacroError(format!(
                     "expected parameter name in macro definition in {}",
                     file
                 )));
             }
-            while j < tokens.len() && tokens[j].kind == PpTokenKind::Whitespace {
-                j += 1;
-            }
             if j < tokens.len() && tokens[j].text == "," {
                 j += 1;
             }
         }
 
-        Ok((params, is_variadic, j))
+        Ok((params, is_variadic, variadic_param, j))
     }
 
-    fn expand_tokens_in_macro(&self, tokens: &[Token], params: &[String], _file: &str) -> Vec<Token> {
+    fn expand_tokens_in_macro(
+        &self,
+        tokens: &[Token],
+        params: &[String],
+        _file: &str,
+    ) -> Vec<Token> {
         let mut result = Vec::new();
         let mut i = 0;
         while i < tokens.len() {
@@ -1127,7 +1531,11 @@ impl Preprocessor {
         result
     }
 
-    fn process_undef(&mut self, tokens: &[PpToken], start: usize) -> Result<usize, PreprocessorError> {
+    fn process_undef(
+        &mut self,
+        tokens: &[PpToken],
+        start: usize,
+    ) -> Result<usize, PreprocessorError> {
         let mut j = start;
         while j < tokens.len() && tokens[j].kind == PpTokenKind::Whitespace {
             j += 1;
@@ -1170,7 +1578,7 @@ impl Preprocessor {
         start: usize,
         file: &str,
     ) -> Result<(i64, usize), PreprocessorError> {
-        let (value, end) = self.parse_if_or(tokens, start, file)?;
+        let (value, end) = self.parse_if_conditional(tokens, start, file)?;
         let mut j = end;
         while j < tokens.len() && tokens[j].kind != PpTokenKind::Newline {
             j += 1;
@@ -1178,7 +1586,47 @@ impl Preprocessor {
         Ok((value, j + 1))
     }
 
-    fn parse_if_or(&self, tokens: &[PpToken], start: usize, file: &str) -> Result<(i64, usize), PreprocessorError> {
+    fn parse_if_conditional(
+        &self,
+        tokens: &[PpToken],
+        start: usize,
+        file: &str,
+    ) -> Result<(i64, usize), PreprocessorError> {
+        let (condition, mut j) = self.parse_if_or(tokens, start, file)?;
+        while j < tokens.len() && tokens[j].kind == PpTokenKind::Whitespace {
+            j += 1;
+        }
+        if j < tokens.len() && tokens[j].text == "?" {
+            let (then_value, next) = self.parse_if_conditional(tokens, j + 1, file)?;
+            let mut colon = next;
+            while colon < tokens.len() && tokens[colon].kind == PpTokenKind::Whitespace {
+                colon += 1;
+            }
+            if colon >= tokens.len() || tokens[colon].text != ":" {
+                return Err(PreprocessorError::ConditionalError(
+                    "expected : in #if ternary expression".to_string(),
+                ));
+            }
+            let (else_value, end) = self.parse_if_conditional(tokens, colon + 1, file)?;
+            Ok((
+                if condition != 0 {
+                    then_value
+                } else {
+                    else_value
+                },
+                end,
+            ))
+        } else {
+            Ok((condition, j))
+        }
+    }
+
+    fn parse_if_or(
+        &self,
+        tokens: &[PpToken],
+        start: usize,
+        file: &str,
+    ) -> Result<(i64, usize), PreprocessorError> {
         let (mut left, mut j) = self.parse_if_and(tokens, start, file)?;
         loop {
             while j < tokens.len() && tokens[j].kind == PpTokenKind::Whitespace {
@@ -1200,16 +1648,90 @@ impl Preprocessor {
         Ok((left, j))
     }
 
-    fn parse_if_and(&self, tokens: &[PpToken], start: usize, file: &str) -> Result<(i64, usize), PreprocessorError> {
-        let (mut left, mut j) = self.parse_if_equality(tokens, start, file)?;
+    fn parse_if_and(
+        &self,
+        tokens: &[PpToken],
+        start: usize,
+        file: &str,
+    ) -> Result<(i64, usize), PreprocessorError> {
+        let (mut left, mut j) = self.parse_if_bitor(tokens, start, file)?;
         loop {
             while j < tokens.len() && tokens[j].kind == PpTokenKind::Whitespace {
                 j += 1;
             }
             if j < tokens.len() && tokens[j].text == "&&" {
                 j += 1;
-                let (right, next) = self.parse_if_equality(tokens, j, file)?;
+                let (right, next) = self.parse_if_bitor(tokens, j, file)?;
                 left = if left != 0 && right != 0 { 1 } else { 0 };
+                j = next;
+            } else {
+                break;
+            }
+        }
+        Ok((left, j))
+    }
+
+    fn parse_if_bitor(
+        &self,
+        tokens: &[PpToken],
+        start: usize,
+        file: &str,
+    ) -> Result<(i64, usize), PreprocessorError> {
+        let (mut left, mut j) = self.parse_if_bitxor(tokens, start, file)?;
+        loop {
+            while j < tokens.len() && tokens[j].kind == PpTokenKind::Whitespace {
+                j += 1;
+            }
+            if j < tokens.len() && tokens[j].text == "|" {
+                j += 1;
+                let (right, next) = self.parse_if_bitxor(tokens, j, file)?;
+                left |= right;
+                j = next;
+            } else {
+                break;
+            }
+        }
+        Ok((left, j))
+    }
+
+    fn parse_if_bitxor(
+        &self,
+        tokens: &[PpToken],
+        start: usize,
+        file: &str,
+    ) -> Result<(i64, usize), PreprocessorError> {
+        let (mut left, mut j) = self.parse_if_bitand(tokens, start, file)?;
+        loop {
+            while j < tokens.len() && tokens[j].kind == PpTokenKind::Whitespace {
+                j += 1;
+            }
+            if j < tokens.len() && tokens[j].text == "^" {
+                j += 1;
+                let (right, next) = self.parse_if_bitand(tokens, j, file)?;
+                left ^= right;
+                j = next;
+            } else {
+                break;
+            }
+        }
+        Ok((left, j))
+    }
+
+    fn parse_if_bitand(
+        &self,
+        tokens: &[PpToken],
+        start: usize,
+        file: &str,
+    ) -> Result<(i64, usize), PreprocessorError> {
+        let (mut left, mut j) = self.parse_if_equality(tokens, start, file)?;
+        loop {
+            while j < tokens.len() && tokens[j].kind == PpTokenKind::Whitespace {
+                j += 1;
+            }
+            if j < tokens.len() && tokens[j].text == "&" {
+                j += 1;
+                let (right, next) = self.parse_if_equality(tokens, j, file)?;
+                left &= right;
                 j = next;
             } else {
                 break;
@@ -1236,9 +1758,17 @@ impl Preprocessor {
                 j += 1;
                 let (right, next) = self.parse_if_equality(tokens, j, file)?;
                 let result = if op_str == "==" {
-                    if left == right { 1 } else { 0 }
+                    if left == right {
+                        1
+                    } else {
+                        0
+                    }
                 } else {
-                    if left != right { 1 } else { 0 }
+                    if left != right {
+                        1
+                    } else {
+                        0
+                    }
                 };
                 return Ok((result, next));
             }
@@ -1252,7 +1782,7 @@ impl Preprocessor {
         start: usize,
         file: &str,
     ) -> Result<(i64, usize), PreprocessorError> {
-        let (left, mut j) = self.parse_if_additive(tokens, start, file)?;
+        let (left, mut j) = self.parse_if_shift(tokens, start, file)?;
         while j < tokens.len() && tokens[j].kind == PpTokenKind::Whitespace {
             j += 1;
         }
@@ -1261,15 +1791,67 @@ impl Preprocessor {
             if op == "<" || op == ">" || op == "<=" || op == ">=" {
                 let op_str = op.clone();
                 j += 1;
-                let (right, next) = self.parse_if_additive(tokens, j, file)?;
+                let (right, next) = self.parse_if_shift(tokens, j, file)?;
                 let result = match op_str.as_str() {
-                    "<" => if left < right { 1 } else { 0 },
-                    ">" => if left > right { 1 } else { 0 },
-                    "<=" => if left <= right { 1 } else { 0 },
-                    ">=" => if left >= right { 1 } else { 0 },
+                    "<" => {
+                        if left < right {
+                            1
+                        } else {
+                            0
+                        }
+                    }
+                    ">" => {
+                        if left > right {
+                            1
+                        } else {
+                            0
+                        }
+                    }
+                    "<=" => {
+                        if left <= right {
+                            1
+                        } else {
+                            0
+                        }
+                    }
+                    ">=" => {
+                        if left >= right {
+                            1
+                        } else {
+                            0
+                        }
+                    }
                     _ => 0,
                 };
                 return Ok((result, next));
+            }
+        }
+        Ok((left, j))
+    }
+
+    fn parse_if_shift(
+        &self,
+        tokens: &[PpToken],
+        start: usize,
+        file: &str,
+    ) -> Result<(i64, usize), PreprocessorError> {
+        let (mut left, mut j) = self.parse_if_additive(tokens, start, file)?;
+        loop {
+            while j < tokens.len() && tokens[j].kind == PpTokenKind::Whitespace {
+                j += 1;
+            }
+            if j < tokens.len() && (tokens[j].text == "<<" || tokens[j].text == ">>") {
+                let op = tokens[j].text.clone();
+                j += 1;
+                let (right, next) = self.parse_if_additive(tokens, j, file)?;
+                left = match op.as_str() {
+                    "<<" => left.wrapping_shl(right as u32),
+                    ">>" => left.wrapping_shr(right as u32),
+                    _ => left,
+                };
+                j = next;
+            } else {
+                break;
             }
         }
         Ok((left, j))
@@ -1314,7 +1896,9 @@ impl Preprocessor {
             while j < tokens.len() && tokens[j].kind == PpTokenKind::Whitespace {
                 j += 1;
             }
-            if j < tokens.len() && (tokens[j].text == "*" || tokens[j].text == "/" || tokens[j].text == "%") {
+            if j < tokens.len()
+                && (tokens[j].text == "*" || tokens[j].text == "/" || tokens[j].text == "%")
+            {
                 let op = tokens[j].text.clone();
                 j += 1;
                 let (right, next) = self.parse_if_unary(tokens, j, file)?;
@@ -1403,7 +1987,7 @@ impl Preprocessor {
 
         if tokens[j].text == "(" {
             j += 1;
-            let (value, end) = self.parse_if_or(tokens, j, file)?;
+            let (value, end) = self.parse_if_conditional(tokens, j, file)?;
             let mut k = end;
             while k < tokens.len() && tokens[k].kind == PpTokenKind::Whitespace {
                 k += 1;
@@ -1411,9 +1995,21 @@ impl Preprocessor {
             if k < tokens.len() && tokens[k].text == ")" {
                 Ok((value, k + 1))
             } else {
-                Err(PreprocessorError::ConditionalError(
-                    "expected ) in #if expression".to_string(),
-                ))
+                let (line, column, found) = if k < tokens.len() {
+                    (tokens[k].line, tokens[k].column, tokens[k].text.clone())
+                } else if end > 0 {
+                    (
+                        tokens[end - 1].line,
+                        tokens[end - 1].column,
+                        "<eol>".to_string(),
+                    )
+                } else {
+                    (0, 0, "<eof>".to_string())
+                };
+                Err(PreprocessorError::ConditionalError(format!(
+                    "expected ) in #if expression at {}:{} near {}",
+                    line, column, found
+                )))
             }
         } else if tokens[j].text == "defined" {
             self.parse_defined(tokens, j, file)
@@ -1426,31 +2022,47 @@ impl Preprocessor {
             if let Some(def) = self.macros.get(name) {
                 match def {
                     MacroDefinition::ObjectLike { replacement } => {
-                        if let Some(first) = replacement.iter().find(|t| !t.is_whitespace()) {
-                            if let Ok(val) = first.text.parse::<i64>() {
-                                return Ok((val, j + 1));
-                            }
-                        }
-                        Ok((1, j + 1))
+                        let expanded = self.expand_macro_tokens(replacement, file);
+                        Ok((self.eval_if_macro_tokens(&expanded, file)?, j + 1))
                     }
-                    MacroDefinition::FunctionLike { .. } => Ok((1, j + 1)),
+                    MacroDefinition::FunctionLike {
+                        params,
+                        is_variadic,
+                        variadic_param,
+                        replacement,
+                    } => {
+                        let mut k = j + 1;
+                        while k < tokens.len() && tokens[k].kind == PpTokenKind::Whitespace {
+                            k += 1;
+                        }
+                        if k < tokens.len() && tokens[k].text == "(" {
+                            let (args, end_idx) = self.collect_pp_macro_args(
+                                tokens,
+                                k,
+                                params.len(),
+                                *is_variadic,
+                                file,
+                            );
+                            let expanded = self.expand_function_macro_tokens(
+                                replacement,
+                                params,
+                                *is_variadic,
+                                variadic_param.as_deref(),
+                                &args,
+                                file,
+                            );
+                            let expanded = self.expand_macro_tokens(&expanded, file);
+                            Ok((self.eval_if_macro_tokens(&expanded, file)?, end_idx))
+                        } else {
+                            Ok((1, j + 1))
+                        }
+                    }
                 }
             } else {
                 Ok((0, j + 1))
             }
         } else if tokens[j].kind == PpTokenKind::CharLit {
-            let text = &tokens[j].text;
-            if text.len() >= 2 {
-                let inner = &text[1..text.len() - 1];
-                if !inner.is_empty() {
-                    let ch = inner.chars().next().unwrap_or('\0');
-                    Ok((ch as i64, j + 1))
-                } else {
-                    Ok((0, j + 1))
-                }
-            } else {
-                Ok((0, j + 1))
-            }
+            Ok((self.parse_char_literal(&tokens[j].text), j + 1))
         } else {
             Err(PreprocessorError::ConditionalError(format!(
                 "unexpected token in #if expression: {}",
@@ -1500,6 +2112,73 @@ impl Preprocessor {
         Ok((value, j))
     }
 
+    fn eval_if_macro_tokens(&self, tokens: &[Token], file: &str) -> Result<i64, PreprocessorError> {
+        let mut pp_tokens = Self::tokens_to_pp_tokens(tokens);
+        pp_tokens.retain(|t| {
+            t.kind != PpTokenKind::Whitespace || t.text.chars().all(|ch| ch != '\n' && ch != '\r')
+        });
+        if pp_tokens.iter().all(|t| t.kind == PpTokenKind::Whitespace) {
+            return Ok(0);
+        }
+        pp_tokens.push(PpToken {
+            kind: PpTokenKind::Newline,
+            text: "\n".to_string(),
+            line: 0,
+            column: 0,
+        });
+        let (value, _) = self.parse_if_or(&pp_tokens, 0, file)?;
+        Ok(value)
+    }
+
+    fn collect_pp_macro_args(
+        &self,
+        tokens: &[PpToken],
+        start: usize,
+        expected_params: usize,
+        is_variadic: bool,
+        file: &str,
+    ) -> (Vec<Vec<Token>>, usize) {
+        let mut args: Vec<Vec<Token>> = Vec::new();
+        let mut current_arg: Vec<PpToken> = Vec::new();
+        let mut paren_depth = 0;
+        let mut j = start;
+
+        if j < tokens.len() && tokens[j].text == "(" {
+            j += 1;
+        }
+
+        while j < tokens.len() {
+            let token = &tokens[j];
+
+            if token.text == "(" {
+                paren_depth += 1;
+                current_arg.push(token.clone());
+            } else if token.text == ")" && paren_depth == 0 {
+                if !current_arg.is_empty()
+                    || args.len() < expected_params
+                    || (is_variadic && args.is_empty())
+                {
+                    args.push(Self::pp_tokens_to_tokens(&current_arg, file));
+                }
+                j += 1;
+                break;
+            } else if token.text == "," && paren_depth == 0 {
+                args.push(Self::pp_tokens_to_tokens(&current_arg, file));
+                current_arg = Vec::new();
+            } else {
+                current_arg.push(token.clone());
+            }
+
+            if token.text == ")" && paren_depth > 0 {
+                paren_depth -= 1;
+            }
+
+            j += 1;
+        }
+
+        (args, j)
+    }
+
     fn parse_int_literal(&self, text: &str) -> i64 {
         let text = text.trim_end_matches(|c: char| c == 'u' || c == 'U' || c == 'l' || c == 'L');
 
@@ -1510,6 +2189,16 @@ impl Preprocessor {
         } else {
             text.parse::<i64>().unwrap_or(0)
         }
+    }
+
+    fn parse_char_literal(&self, text: &str) -> i64 {
+        if text.len() >= 2 {
+            let inner = &text[1..text.len() - 1];
+            if !inner.is_empty() {
+                return inner.chars().next().unwrap_or('\0') as i64;
+            }
+        }
+        0
     }
 
     fn parse_pragma_text(&self, tokens: &[PpToken], start: usize) -> (String, usize) {
@@ -1552,8 +2241,7 @@ impl Preprocessor {
         let guards: Vec<_> = self.active_include_guards.drain(..).collect();
         for guard in guards {
             if !guard.define_name.is_empty() && guard.ifndef_name == guard.define_name {
-                self.include_guards
-                    .insert(guard.ifndef_name.clone(), true);
+                self.include_guards.insert(guard.ifndef_name.clone(), true);
             }
         }
     }
@@ -1569,7 +2257,8 @@ impl Preprocessor {
 
         while i < pp_tokens.len() {
             if self.is_directive_start(pp_tokens, i) {
-                let (directive, _dir_line, _dir_col, after_name) = self.parse_directive_name(pp_tokens, i);
+                let (directive, _dir_line, _dir_col, after_name) =
+                    self.parse_directive_name(pp_tokens, i);
                 match directive.as_str() {
                     "define" => {
                         if in_if_stack.iter().all(|&active| active) {
@@ -1590,20 +2279,24 @@ impl Preprocessor {
                         }
                     }
                     "ifdef" => {
-                        let (name, end_idx) = self.parse_simple_directive_arg(pp_tokens, after_name)?;
+                        let (name, end_idx) =
+                            self.parse_simple_directive_arg(pp_tokens, after_name)?;
                         let active = in_if_stack.iter().all(|&a| a) && self.is_macro_defined(&name);
                         in_if_stack.push(active);
                         i = end_idx;
                     }
                     "ifndef" => {
-                        let (name, end_idx) = self.parse_simple_directive_arg(pp_tokens, after_name)?;
-                        let active = in_if_stack.iter().all(|&a| a) && !self.is_macro_defined(&name);
+                        let (name, end_idx) =
+                            self.parse_simple_directive_arg(pp_tokens, after_name)?;
+                        let active =
+                            in_if_stack.iter().all(|&a| a) && !self.is_macro_defined(&name);
                         in_if_stack.push(active);
                         i = end_idx;
                     }
                     "if" => {
                         if in_if_stack.iter().all(|&a| a) {
-                            let (value, end_idx) = self.parse_if_expression(pp_tokens, after_name, file)?;
+                            let (value, end_idx) =
+                                self.parse_if_expression(pp_tokens, after_name, file)?;
                             in_if_stack.push(value != 0);
                             i = end_idx;
                         } else {
@@ -1618,7 +2311,8 @@ impl Preprocessor {
                             i = end_idx;
                         } else {
                             let last_val = *in_if_stack.last().unwrap();
-                            let parent_active = in_if_stack.iter().take(in_if_stack.len() - 1).all(|&a| a);
+                            let parent_active =
+                                in_if_stack.iter().take(in_if_stack.len() - 1).all(|&a| a);
                             let last_idx = in_if_stack.len() - 1;
                             if last_val {
                                 in_if_stack[last_idx] = false;
@@ -1637,7 +2331,8 @@ impl Preprocessor {
                     }
                     "else" => {
                         if !in_if_stack.is_empty() {
-                            let parent_active = in_if_stack.iter().take(in_if_stack.len() - 1).all(|&a| a);
+                            let parent_active =
+                                in_if_stack.iter().take(in_if_stack.len() - 1).all(|&a| a);
                             let any_branch_taken = in_if_stack.iter().any(|&a| a);
                             if parent_active && !any_branch_taken {
                                 let last = in_if_stack.last_mut().unwrap();
@@ -1707,9 +2402,18 @@ impl Preprocessor {
     }
 
     fn expand_macro_tokens(&self, tokens: &[Token], file: &str) -> Vec<Token> {
+        let mut expanding = Vec::new();
+        self.expand_macro_tokens_with_stack(tokens, file, &mut expanding)
+    }
+
+    fn expand_macro_tokens_with_stack(
+        &self,
+        tokens: &[Token],
+        file: &str,
+        expanding: &mut Vec<String>,
+    ) -> Vec<Token> {
         let mut result = Vec::new();
         let mut i = 0;
-        let mut expanding: Vec<String> = Vec::new();
 
         while i < tokens.len() {
             let token = &tokens[i];
@@ -1757,11 +2461,17 @@ impl Preprocessor {
                     match def {
                         MacroDefinition::ObjectLike { replacement } => {
                             expanding.push(name.clone());
-                            let expanded = self.expand_macro_tokens(replacement, file);
+                            let expanded =
+                                self.expand_macro_tokens_with_stack(replacement, file, expanding);
                             expanding.pop();
                             result.extend(expanded);
                         }
-                        MacroDefinition::FunctionLike { params, is_variadic, replacement } => {
+                        MacroDefinition::FunctionLike {
+                            params,
+                            is_variadic,
+                            variadic_param,
+                            replacement,
+                        } => {
                             let mut j = i + 1;
                             while j < tokens.len() && tokens[j].is_whitespace() {
                                 j += 1;
@@ -1775,11 +2485,14 @@ impl Preprocessor {
                                     replacement,
                                     params,
                                     *is_variadic,
+                                    variadic_param.as_deref(),
                                     &args,
                                     file,
                                 );
                                 expanding.pop();
-                                result.extend(expanded);
+                                result.extend(
+                                    self.expand_macro_tokens_with_stack(&expanded, file, expanding),
+                                );
                                 continue;
                             } else {
                                 result.push(token.clone());
@@ -1851,6 +2564,7 @@ impl Preprocessor {
         replacement: &[Token],
         params: &[String],
         is_variadic: bool,
+        variadic_param: Option<&str>,
         args: &[Vec<Token>],
         file: &str,
     ) -> Vec<Token> {
@@ -1861,7 +2575,14 @@ impl Preprocessor {
             if replacement[i].text == "##" {
                 if !result.is_empty() && i + 1 < replacement.len() {
                     let left = result.pop().unwrap();
-                    let right_tokens = self.get_param_replacement(&replacement[i + 1], params, args, file);
+                    let right_tokens = self.get_param_replacement(
+                        &replacement[i + 1],
+                        params,
+                        is_variadic,
+                        variadic_param,
+                        args,
+                        file,
+                    );
                     if let Some(right) = right_tokens.first() {
                         let pasted = self.paste_tokens(&left, right);
                         result.push(pasted);
@@ -1891,19 +2612,35 @@ impl Preprocessor {
                         i += 2;
                         continue;
                     }
+                    if is_variadic && self.is_variadic_param(next, variadic_param) {
+                        let stringified = self.stringify_arg(&self.expand_variadic_args(
+                            args,
+                            params.len(),
+                            next,
+                            file,
+                        ));
+                        result.push(Token::new(
+                            TokenKind::StringLiteral,
+                            stringified,
+                            next.line,
+                            next.column,
+                            next.file.clone(),
+                        ));
+                        i += 2;
+                        continue;
+                    }
                 }
             }
 
             if replacement[i].kind == TokenKind::Identifier {
                 // Handle __VA_ARGS__ for variadic macros
-                if replacement[i].text == "__VA_ARGS__" && is_variadic && !args.is_empty() {
-                    // __VA_ARGS__ is replaced with all arguments beyond the named params
-                    let va_start = params.len();
-                    if va_start < args.len() {
-                        for arg in args.iter().skip(va_start) {
-                            result.extend(arg.clone());
-                        }
-                    }
+                if is_variadic && self.is_variadic_param(&replacement[i], variadic_param) {
+                    result.extend(self.expand_variadic_args(
+                        args,
+                        params.len(),
+                        &replacement[i],
+                        file,
+                    ));
                     i += 1;
                     continue;
                 }
@@ -1927,6 +2664,8 @@ impl Preprocessor {
         &self,
         token: &Token,
         params: &[String],
+        is_variadic: bool,
+        variadic_param: Option<&str>,
         args: &[Vec<Token>],
         _file: &str,
     ) -> Vec<Token> {
@@ -1936,20 +2675,61 @@ impl Preprocessor {
                     return args[param_idx].clone();
                 }
             }
+            if is_variadic && self.is_variadic_param(token, variadic_param) {
+                return self.expand_variadic_args(args, params.len(), token, _file);
+            }
         }
         vec![token.clone()]
     }
 
+    fn is_variadic_param(&self, token: &Token, variadic_param: Option<&str>) -> bool {
+        token.text == "__VA_ARGS__" || variadic_param.is_some_and(|name| token.text == name)
+    }
+
+    fn expand_variadic_args(
+        &self,
+        args: &[Vec<Token>],
+        va_start: usize,
+        token: &Token,
+        _file: &str,
+    ) -> Vec<Token> {
+        let mut expanded = Vec::new();
+        if va_start < args.len() {
+            for (idx, arg) in args.iter().skip(va_start).enumerate() {
+                if idx > 0 {
+                    expanded.push(Token::new(
+                        TokenKind::Punctuator,
+                        ",".to_string(),
+                        token.line,
+                        token.column,
+                        token.file.clone(),
+                    ));
+                }
+                expanded.extend(arg.clone());
+            }
+        }
+        expanded
+    }
+
     fn paste_tokens(&self, left: &Token, right: &Token) -> Token {
         let pasted = format!("{}{}", left.text, right.text);
-        let kind = if pasted.chars().next().map(|c| c.is_alphabetic() || c == '_').unwrap_or(false)
+        let kind = if pasted
+            .chars()
+            .next()
+            .map(|c| c.is_alphabetic() || c == '_')
+            .unwrap_or(false)
         {
             if Self::is_keyword(&pasted) {
                 TokenKind::Keyword
             } else {
                 TokenKind::Identifier
             }
-        } else if pasted.chars().next().map(|c| c.is_numeric()).unwrap_or(false) {
+        } else if pasted
+            .chars()
+            .next()
+            .map(|c| c.is_numeric())
+            .unwrap_or(false)
+        {
             if pasted.contains('.') || pasted.contains('e') || pasted.contains('E') {
                 TokenKind::FloatLiteral
             } else {
@@ -2052,11 +2832,66 @@ const char *s = STR(hello world);"#;
     }
 
     #[test]
+    fn test_variadic_macro_expansion_preserves_commas() {
+        let (mut pp, _temp_dir) = create_test_preprocessor();
+
+        let source = "#define TRACE(fmt, ...) log(fmt, __VA_ARGS__)\nTRACE(\"%d\", x, y);";
+        let tokens = pp.process_source(source, "test.c").unwrap();
+
+        let non_ws: Vec<&Token> = tokens.iter().filter(|t| !t.is_whitespace()).collect();
+        let texts: Vec<&str> = non_ws.iter().map(|t| t.text.as_str()).collect();
+        assert!(texts
+            .windows(8)
+            .any(|window| { window == ["log", "(", "\"%d\"", ",", "x", ",", "y", ")"] }));
+    }
+
+    #[test]
+    fn test_gnu_named_variadic_macro_expansion_preserves_commas() {
+        let (mut pp, _temp_dir) = create_test_preprocessor();
+
+        let source = "#define TRACE(args...) log(args)\nTRACE(x, y);";
+        let tokens = pp.process_source(source, "test.c").unwrap();
+
+        let non_ws: Vec<&Token> = tokens.iter().filter(|t| !t.is_whitespace()).collect();
+        let texts: Vec<&str> = non_ws.iter().map(|t| t.text.as_str()).collect();
+        assert!(texts
+            .windows(6)
+            .any(|window| window == ["log", "(", "x", ",", "y", ")"]));
+    }
+
+    #[test]
+    fn test_empty_sqlite_api_macro_drops_marker_tokens() {
+        let (mut pp, _temp_dir) = create_test_preprocessor();
+
+        let source = "#define SQLITE_API\nSQLITE_API int sqlite3_open(void);";
+        let tokens = pp.process_source(source, "test.c").unwrap();
+
+        let non_ws: Vec<&Token> = tokens.iter().filter(|t| !t.is_whitespace()).collect();
+        let texts: Vec<&str> = non_ws.iter().map(|t| t.text.as_str()).collect();
+        assert!(texts.contains(&"int"));
+        assert!(texts.contains(&"sqlite3_open"));
+        assert!(!texts.contains(&"SQLITE_API"));
+    }
+
+    #[test]
+    fn test_define_line_continuation() {
+        let (mut pp, _temp_dir) = create_test_preprocessor();
+
+        let source = "#define ADD(a, b) a + \\\n b\nint x = ADD(1, 2);";
+        let tokens = pp.process_source(source, "test.c").unwrap();
+
+        let non_ws: Vec<&Token> = tokens.iter().filter(|t| !t.is_whitespace()).collect();
+        let texts: Vec<&str> = non_ws.iter().map(|t| t.text.as_str()).collect();
+        assert!(texts.windows(3).any(|window| window == ["1", "+", "2"]));
+    }
+
+    #[test]
     fn test_ifdef_conditional() {
         let (mut pp, _temp_dir) = create_test_preprocessor();
         pp.define_macro("DEBUG", "1");
 
-        let source = "#ifdef DEBUG\nint debug_var = 1;\n#endif\n#ifndef DEBUG\nint no_debug = 0;\n#endif";
+        let source =
+            "#ifdef DEBUG\nint debug_var = 1;\n#endif\n#ifndef DEBUG\nint no_debug = 0;\n#endif";
         let tokens = pp.process_source(source, "test.c").unwrap();
 
         let non_ws: Vec<&Token> = tokens.iter().filter(|t| !t.is_whitespace()).collect();
@@ -2129,11 +2964,35 @@ const char *s = STR(hello world);"#;
     fn test_predefined_macros() {
         let (mut pp, _temp_dir) = create_test_preprocessor();
 
-        let source = "int a = __STDC__;";
+        let source = "int a = __STDC__; int b = __GNUC_PATCHLEVEL__; int c = __SIZEOF_POINTER__;";
         let tokens = pp.process_source(source, "test.c").unwrap();
 
         let non_ws: Vec<&Token> = tokens.iter().filter(|t| !t.is_whitespace()).collect();
+        let pointer_size = std::mem::size_of::<usize>().to_string();
         assert!(non_ws.iter().any(|t| t.text == "1"));
+        assert!(non_ws.iter().any(|t| t.text == pointer_size));
+    }
+
+    #[test]
+    fn test_predefined_macros_in_if_expressions() {
+        let (mut pp, _temp_dir) = create_test_preprocessor();
+
+        let source = "#if __STDC_VERSION__ >= 201112L && __GNUC_PATCHLEVEL__ >= 0\nint standards_ok = 1;\n#endif";
+        let tokens = pp.process_source(source, "test.c").unwrap();
+
+        let non_ws: Vec<&Token> = tokens.iter().filter(|t| !t.is_whitespace()).collect();
+        assert!(non_ws.iter().any(|t| t.text == "standards_ok"));
+    }
+
+    #[test]
+    fn test_sizeof_predefined_macros_in_if_expressions() {
+        let (mut pp, _temp_dir) = create_test_preprocessor();
+
+        let source = "#if __SIZEOF_POINTER__ >= 4 && __STDC_HOSTED__ == 1\nint abi_ok = 1;\n#endif";
+        let tokens = pp.process_source(source, "test.c").unwrap();
+
+        let non_ws: Vec<&Token> = tokens.iter().filter(|t| !t.is_whitespace()).collect();
+        assert!(non_ws.iter().any(|t| t.text == "abi_ok"));
     }
 
     #[test]
@@ -2193,6 +3052,19 @@ const char *s = STR(hello world);"#;
     }
 
     #[test]
+    fn test_system_include_resolution_for_stdarg() {
+        let (mut pp, _temp_dir) = create_test_preprocessor();
+
+        let tokens = pp
+            .process_source("#include <stdarg.h>\nint x = 1;", "test.c")
+            .unwrap();
+        let non_ws: Vec<&Token> = tokens.iter().filter(|t| !t.is_whitespace()).collect();
+
+        assert!(non_ws.iter().any(|t| t.text == "va_list"));
+        assert!(non_ws.iter().any(|t| t.text == "x"));
+    }
+
+    #[test]
     fn test_include_deduplication_via_redb() {
         let (mut pp, temp_dir) = create_test_preprocessor();
 
@@ -2236,6 +3108,61 @@ const char *s = STR(hello world);"#;
 
         let non_ws: Vec<&Token> = tokens.iter().filter(|t| !t.is_whitespace()).collect();
         assert!(non_ws.iter().any(|t| t.text == "math_works"));
+    }
+
+    #[test]
+    fn test_if_expression_bitwise_and() {
+        let (mut pp, _temp_dir) = create_test_preprocessor();
+
+        let source = "#if (6 & 2) == 2\nint bitand_works = 1;\n#endif";
+        let tokens = pp.process_source(source, "test.c").unwrap();
+
+        let non_ws: Vec<&Token> = tokens.iter().filter(|t| !t.is_whitespace()).collect();
+        assert!(non_ws.iter().any(|t| t.text == "bitand_works"));
+    }
+
+    #[test]
+    fn test_if_expression_shift() {
+        let (mut pp, _temp_dir) = create_test_preprocessor();
+
+        let source = "#if (1 << 5) == 32\nint shift_works = 1;\n#endif";
+        let tokens = pp.process_source(source, "test.c").unwrap();
+
+        let non_ws: Vec<&Token> = tokens.iter().filter(|t| !t.is_whitespace()).collect();
+        assert!(non_ws.iter().any(|t| t.text == "shift_works"));
+    }
+
+    #[test]
+    fn test_if_expression_function_like_macro() {
+        let (mut pp, _temp_dir) = create_test_preprocessor();
+
+        let source = "#define __has_extension(x) 0\n#define GCC_VERSION 5000000\n#if GCC_VERSION>=4007000 || __has_extension(c_atomic)\nint extension_works = 1;\n#endif";
+        let tokens = pp.process_source(source, "test.c").unwrap();
+
+        let non_ws: Vec<&Token> = tokens.iter().filter(|t| !t.is_whitespace()).collect();
+        assert!(non_ws.iter().any(|t| t.text == "extension_works"));
+    }
+
+    #[test]
+    fn test_if_expression_object_like_macro_expression() {
+        let (mut pp, _temp_dir) = create_test_preprocessor();
+
+        let source = "#define MASK (6 & 2)\n#if MASK == 2\nint mask_works = 1;\n#endif";
+        let tokens = pp.process_source(source, "test.c").unwrap();
+
+        let non_ws: Vec<&Token> = tokens.iter().filter(|t| !t.is_whitespace()).collect();
+        assert!(non_ws.iter().any(|t| t.text == "mask_works"));
+    }
+
+    #[test]
+    fn test_if_expression_ternary_operator() {
+        let (mut pp, _temp_dir) = create_test_preprocessor();
+
+        let source = "#define __USE_ISOC11 1\n#if defined __cplusplus ? __cplusplus >= 201402L : defined __USE_ISOC11\nint ternary_works = 1;\n#endif";
+        let tokens = pp.process_source(source, "test.c").unwrap();
+
+        let non_ws: Vec<&Token> = tokens.iter().filter(|t| !t.is_whitespace()).collect();
+        assert!(non_ws.iter().any(|t| t.text == "ternary_works"));
     }
 
     #[test]

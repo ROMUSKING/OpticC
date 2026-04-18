@@ -20,17 +20,24 @@ YOUR DIRECTIVES:
 - [x] Recursive-descent parser
 - [x] LLVM backend with typed lowering support
 - [x] Static analysis for provenance and taint tracking
-- [ ] VFS end-to-end mounting should be treated as optional until the module is re-enabled and rechecked in the current environment
+- [ ] VFS end-to-end mounting (optional, environment-sensitive)
 
-### Phase 2 (SQLite Compilation) — PARTIALLY VERIFIED
-- [x] Preprocessor, type system, typed backend, build system, and benchmark modules all exist in the tree
-- [ ] End-to-end SQLite shared-library generation still needs fresh verification in the current environment
-- [ ] SQLite downstream test coverage still needs confirmation
-- [ ] Benchmark comparisons should be regenerated from a fresh run when needed
+### Phase 2 (SQLite Compilation) — IN PROGRESS (2026-04-17)
+- [x] Preprocessor, type system, typed backend, build system, and benchmark modules exist in tree
+- [x] **PIPELINE FIXED**: parse_tokens() now filters whitespace tokens; backend produces correct LLVM IR
+- [x] **VERIFIED**: `test_samples/simple.c` (functions+params+calls) → valid IR
+- [x] **VERIFIED**: `test_samples/struct_test.c` (struct+field access) → valid IR
+- [x] **VERIFIED**: `test_samples/control_flow.c` (if/while/for) → valid IR
+- [x] All 292 passing tests still pass (1 pre-existing failure: `test_asm_volatile_flag_stored`)
+- [ ] **BLOCKER**: Multi-variable declarations (`int a=0, b=1`) only allocate first variable
+- [ ] **BLOCKER**: Assignment expressions in while loops don't update variables
+- [ ] **BLOCKER**: SQLite uses `#include <stdio.h>` — system headers not yet supported by preprocessor
+- [ ] End-to-end SQLite shared-library generation pending above blockers
+- [ ] Benchmark comparisons need regeneration
 
 ### Phase 3 (Linux Kernel) — FUTURE
-- [ ] Full GNU C extension support
-- [ ] Inline assembly with operands
+- [ ] Full GNU C extension support (`__attribute__`, `typeof`, statement expressions)
+- [ ] Inline assembly with operands and clobbers
 - [ ] Kbuild integration
 - [ ] 30M+ LOC scale handling
 
@@ -47,8 +54,11 @@ llvm-config --version || true
 ### Build Verification
 ```bash
 cargo build
-cargo test
-cargo run -- compile test_samples/simple.c -o test.ll
+cargo test   # expect 292 passed, 1 failed (test_asm_volatile_flag_stored - pre-existing)
+cargo run -- compile test_samples/simple.c -o /tmp/test.ll
+llc-18 /tmp/test.ll -o /dev/null  # must succeed
+cargo run -- compile test_samples/struct_test.c -o /tmp/st.ll
+llc-18 /tmp/st.ll -o /dev/null
 ```
 
 Always report the versions you actually observe in the current session instead of copying historical values.
@@ -64,55 +74,36 @@ SQLITE_C=$(find . -name sqlite3.c | head -n 1)
 clang -c "$SQLITE_C" -o sqlite3.o \
   -DSQLITE_THREADSAFE=0 -DSQLITE_OMIT_LOAD_EXTENSION
 # Expected: sqlite3.o generated without fatal errors
+
+# Try OpticC on it (currently fails at preprocessor stage):
+cargo run -- compile "$SQLITE_C"
 ```
 
-## LESSONS LEARNED (Post-Execution Addendum)
-- **SQLite download URL**: The SQLite amalgamation URL changes with each release. Prefer the current URL from the CLI defaults or verify the latest package before testing.
-- **Toolchain installation**: All required tools (gcc 11.4, clang 14, LLVM 14, rustc 1.95) install cleanly via apt-get + rustup. Total install time ~2 minutes in cloud agent.
-- **clang compiles sqlite3.c**: Full 255K LOC compiles with clang in seconds, producing 1.5MB object file. This validates the toolchain works with large C files.
-- **OpticC preprocessor limitation**: sqlite3.c uses complex macro patterns (SQLITE_API, SQLITE_EXTERN, variadic macros) that the OpticC preprocessor doesn't yet handle. Even 500-line subsets fail. Preprocessor enhancement needed for production C code.
-- **Build environment**: The Rust toolchain may not be available in all environments. Check for `cargo` availability before attempting builds. If unavailable, document this as an environment limitation.
-- **Cross-module bugs are common**: Don't assume code works just because individual modules compile. Cross-module API mismatches are the most common source of failures, so prefer full-workspace checks.
-- **VFS verification is environment-sensitive**: Shadow comment injection has been observed in prior runs, but re-check it before reporting success in a fresh environment.
-- **Large-scale analysis should be re-measured**: Avoid hard-coding previous LOC or vulnerability totals unless you reran the workload in the current session.
-- **Bug report format**: Use a concise structure with source, severity, status, issue, impact, fix applied, and recommendation sections.
-- **Integration report**: Generate an integration report when useful, but keep it grounded in fresh evidence from the current session.
+## KNOWN BLOCKERS FOR SQLITE (prioritized)
+
+1. **Multi-variable declarations** (`int a = 0, b = 1, c;`): Backend `lower_var_decl` only processes the first init-declarator. Must walk the full first_child chain for all kind=73 nodes. *Fix in: `src/backend/llvm.rs` `lower_var_decl`.*
+
+2. **Loop variable mutation** (assignment in while body): `a = b; b = c; i = i + 1` — `lower_assign_expr` for kind=73 doesn't store correctly when the LHS is a variable name. *Fix in: `src/backend/llvm.rs` `lower_assign_expr`.*
+
+3. **System header includes**: OpticC preprocessor does not resolve `#include <stdio.h>`, `#include <string.h>`, etc. Need either a sysroot path or a stub include directory. *Fix in: `src/frontend/preprocessor.rs` include resolution.*
+
+4. **Arrow operator** (`p->field`): kind=69 with data=1 needs `build_load` then `build_struct_gep`. Currently falls through to `Ok(None)`.
+
+5. **String literals**: `lower_string_const` uses `node.data` as a single byte. Should call `arena.get_string(NodeOffset(node.data))` and create a proper i8 array global.
+
+6. **Compound struct initializers**: `{10, 20}` — first_child=first_elem chain needs positional assignment to struct fields.
+
+## LESSONS LEARNED
+- **`parse_tokens()` MUST filter whitespace**: without this the backend sees empty input and generates empty IR. This was the primary pipeline bug fixed in session 2026-04-17.
+- **`sed -i` on eprintln! is DANGEROUS**: multi-line eprintln! macros get mangled. Use Python with exact string replacement instead.
+- **link_siblings can overwrite child references**: any time a node's next_sibling is set at allocation time (via `alloc_node(kind, data, parent, first_child, next_sibling)`), `link_siblings` will overwrite it. Always chain children via first_child chain instead.
+- **SQLite download URL**: Changes with each release. Verify the latest URL.
+- **clang compiles sqlite3.c**: Full 255K LOC compiles in seconds. OpticC preprocessor is the bottleneck.
+- **Cross-module bugs are common**: Full-workspace checks are needed; individual module compilation isn't enough.
 
 ## IMPLEMENTATION STATUS
 
 ### SQLite Integration Test Module (`src/integration/mod.rs`)
-- **Status**: COMPLETE
-- **Date**: 2026-04-17
-- **Agent**: Kilo
-
-### Components Implemented:
-1. **IntegrationTest struct** — test_dir, output_dir, sqlite_url, sqlite_version
-2. **IntegrationResult struct** — download_success, preprocess_success, compile_success, link_success, library_created, library_size_bytes, compile_time_ms, errors, warnings
-3. **IntegrationResultSerializable** — serde-compatible version for JSON export
-4. **download_sqlite()** — HTTP download with graceful environment limitation handling
-5. **extract_sqlite()** — zip extraction using `zip` crate v4.0
-6. **preprocess_sqlite()** — C preprocessor via gcc/clang with copy fallback
-7. **compile_sqlite()** — uses build system (Builder) with gcc/clang fallback
-8. **link_sqlite()** — shared library linking with copy fallback
-9. **run()** — full pipeline execution with mock fallbacks at each stage
-10. **generate_report()** — markdown report with JSON summary
-
-### CLI Integration:
-- Added `IntegrationTest` subcommand to `src/main.rs`
-- Arguments: `--test-dir`, `-o/--output-dir`, `--sqlite-url`
-- Outputs progress, results, and report path
-
-### Dependencies Added:
-- `zip = "4.0"` — zip archive handling
-- `ureq = "2.10"` (optional, behind `network` feature) — HTTP downloads
-
-### Test Coverage
-- In-tree tests use mock implementations so the module can still be exercised in sandboxed environments.
-- Coverage includes struct creation, URL validation, path handling, error reporting, report generation, serialization, and mocked pipeline stages.
-
-### Environment Handling:
-- Gracefully handles missing C compilers (gcc/clang)
-- Gracefully handles missing network access
-- Gracefully handles missing LLVM toolchain
-- All pipeline stages have mock fallbacks
-- Errors and warnings are collected and reported
+- **Status**: COMPLETE (mock implementations for sandboxed environments)
+- Components: download, extract, preprocess, compile, link, report generation
+- CLI: `cargo run -- IntegrationTest --test-dir <dir> -o <output>`

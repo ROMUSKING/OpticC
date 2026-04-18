@@ -92,13 +92,19 @@ impl<'a> MacroExpander<'a> {
             match token.kind {
                 TokenKind::Identifier => {
                     let identifier = self.extract_token_text(token, source);
-                    
+
                     if let Some(&next_kind) = tokens.get(i + 1).map(|t| &t.kind) {
-                        if next_kind == TokenKind::Whitespace || next_kind == TokenKind::Punctuator {
-                            let next_text = tokens.get(i + 1).map(|t| self.extract_token_text(t, source)).unwrap_or_default();
-                            
+                        if next_kind == TokenKind::Whitespace || next_kind == TokenKind::Punctuator
+                        {
+                            let next_text = tokens
+                                .get(i + 1)
+                                .map(|t| self.extract_token_text(t, source))
+                                .unwrap_or_default();
+
                             if next_text == "(" && self.is_macro_defined(&identifier) {
-                                if let Some(expanded_tokens) = self.expand_function_macro(&identifier, tokens, &mut i, source) {
+                                if let Some(expanded_tokens) =
+                                    self.expand_function_macro(&identifier, tokens, &mut i, source)
+                                {
                                     expanded.extend(expanded_tokens);
                                     continue;
                                 }
@@ -114,7 +120,9 @@ impl<'a> MacroExpander<'a> {
                     }
                 }
                 TokenKind::Hash if !self.is_stringification_or_paste(tokens, i) => {
-                    if let Some((stringified, new_i)) = self.handle_stringification(tokens, i, source) {
+                    if let Some((stringified, new_i)) =
+                        self.handle_stringification(tokens, i, source)
+                    {
                         expanded.push(stringified);
                         i = new_i;
                     } else {
@@ -184,7 +192,7 @@ impl<'a> MacroExpander<'a> {
             MacroDefinition::ObjectLike { replacement } => replacement.clone(),
             MacroDefinition::FunctionLike { .. } => return Vec::new(),
         };
-        
+
         self.active_macros.push(name.to_string());
         let expanded = self.substitute_tokens(&replacement, &[], source);
         self.active_macros.pop();
@@ -199,7 +207,7 @@ impl<'a> MacroExpander<'a> {
         source: &str,
     ) -> Option<Vec<Token>> {
         let definition = self.definitions.get(name)?.clone();
-        
+
         let params = match &definition {
             MacroDefinition::FunctionLike { params, .. } => params.clone(),
             MacroDefinition::ObjectLike { .. } => return None,
@@ -302,7 +310,11 @@ impl<'a> MacroExpander<'a> {
         source: &str,
     ) -> Vec<Token> {
         let (params, replacement) = match definition {
-            MacroDefinition::FunctionLike { params, replacement, .. } => (params, replacement),
+            MacroDefinition::FunctionLike {
+                params,
+                replacement,
+                ..
+            } => (params, replacement),
             MacroDefinition::ObjectLike { .. } => return Vec::new(),
         };
 
@@ -382,9 +394,19 @@ impl<'a> MacroExpander<'a> {
         let right_text = self.extract_token_text(&right, source);
         let pasted = format!("{}{}", left_text, right_text);
 
-        let kind = if pasted.chars().next().map(|c| c.is_alphabetic()).unwrap_or(false) {
+        let kind = if pasted
+            .chars()
+            .next()
+            .map(|c| c.is_alphabetic())
+            .unwrap_or(false)
+        {
             TokenKind::Identifier
-        } else if pasted.chars().next().map(|c| c.is_numeric()).unwrap_or(false) {
+        } else if pasted
+            .chars()
+            .next()
+            .map(|c| c.is_numeric())
+            .unwrap_or(false)
+        {
             TokenKind::Number
         } else {
             TokenKind::Punctuator
@@ -414,20 +436,23 @@ impl<'a> MacroExpander<'a> {
     }
 
     pub fn build_expanded_ast(&mut self, tokens: &[Token], source: &str) -> NodeOffset {
-        let root = self.arena.alloc(CAstNode {
-            kind: 0,
-            flags: NodeFlags::IS_VALID,
-            parent: NodeOffset::NULL,
-            first_child: NodeOffset::NULL,
-            last_child: NodeOffset::NULL,
-            next_sibling: NodeOffset::NULL,
-            prev_sibling: NodeOffset::NULL,
-            child_count: 0,
-            data: 0,
-            source: SourceLocation::unknown(),
-            payload_offset: NodeOffset::NULL,
-            payload_len: 0,
-        }).unwrap_or(NodeOffset::NULL);
+        let root = self
+            .arena
+            .alloc(CAstNode {
+                kind: 0,
+                flags: NodeFlags::IS_VALID,
+                parent: NodeOffset::NULL,
+                first_child: NodeOffset::NULL,
+                last_child: NodeOffset::NULL,
+                next_sibling: NodeOffset::NULL,
+                prev_sibling: NodeOffset::NULL,
+                child_count: 0,
+                data: 0,
+                source: SourceLocation::unknown(),
+                payload_offset: NodeOffset::NULL,
+                payload_len: 0,
+            })
+            .unwrap_or(NodeOffset::NULL);
 
         if root == NodeOffset::NULL {
             return root;
@@ -438,20 +463,23 @@ impl<'a> MacroExpander<'a> {
 
         for token in &expanded_tokens {
             let string_offset = self.intern_string(&self.extract_token_text(token, source));
-            let token_node = self.arena.alloc(CAstNode {
-                kind: token.kind as u16,
-                flags: NodeFlags::IS_VALID,
-                parent: root,
-                first_child: NodeOffset::NULL,
-                last_child: NodeOffset::NULL,
-                next_sibling: NodeOffset::NULL,
-                prev_sibling: NodeOffset::NULL,
-                child_count: 0,
-                data: string_offset,
-                source: SourceLocation::unknown(),
-                payload_offset: NodeOffset::NULL,
-                payload_len: 0,
-            }).unwrap_or(NodeOffset::NULL);
+            let token_node = self
+                .arena
+                .alloc(CAstNode {
+                    kind: token.kind as u16,
+                    flags: NodeFlags::IS_VALID,
+                    parent: root,
+                    first_child: NodeOffset::NULL,
+                    last_child: NodeOffset::NULL,
+                    next_sibling: NodeOffset::NULL,
+                    prev_sibling: NodeOffset::NULL,
+                    child_count: 0,
+                    data: string_offset,
+                    source: SourceLocation::unknown(),
+                    payload_offset: NodeOffset::NULL,
+                    payload_len: 0,
+                })
+                .unwrap_or(NodeOffset::NULL);
 
             if token_node != NodeOffset::NULL {
                 if last_child == NodeOffset::NULL {
@@ -479,20 +507,23 @@ impl<'a> MacroExpander<'a> {
     ) -> NodeOffset {
         let expanded_kind = 256;
 
-        let expanded_node = self.arena.alloc(CAstNode {
-            kind: expanded_kind,
-            flags: NodeFlags::IS_VALID | NodeFlags::HAS_ERROR,
-            parent: NodeOffset::NULL,
-            first_child: NodeOffset::NULL,
-            last_child: NodeOffset::NULL,
-            next_sibling: NodeOffset::NULL,
-            prev_sibling: NodeOffset::NULL,
-            child_count: 0,
-            data: 0,
-            source: SourceLocation::unknown(),
-            payload_offset: NodeOffset::NULL,
-            payload_len: 0,
-        }).unwrap_or(NodeOffset::NULL);
+        let expanded_node = self
+            .arena
+            .alloc(CAstNode {
+                kind: expanded_kind,
+                flags: NodeFlags::IS_VALID | NodeFlags::HAS_ERROR,
+                parent: NodeOffset::NULL,
+                first_child: NodeOffset::NULL,
+                last_child: NodeOffset::NULL,
+                next_sibling: NodeOffset::NULL,
+                prev_sibling: NodeOffset::NULL,
+                child_count: 0,
+                data: 0,
+                source: SourceLocation::unknown(),
+                payload_offset: NodeOffset::NULL,
+                payload_len: 0,
+            })
+            .unwrap_or(NodeOffset::NULL);
 
         if expanded_node == NodeOffset::NULL {
             return NodeOffset::NULL;
@@ -523,20 +554,23 @@ impl<'a> MacroExpander<'a> {
         let mut last_child = NodeOffset::NULL;
         for token in &expanded_tokens {
             let string_offset = self.intern_string(&self.extract_token_text(token, source));
-            let token_node = self.arena.alloc(CAstNode {
-                kind: token.kind as u16,
-                flags: NodeFlags::IS_VALID,
-                parent: expanded_node,
-                first_child: NodeOffset::NULL,
-                last_child: NodeOffset::NULL,
-                next_sibling: NodeOffset::NULL,
-                prev_sibling: NodeOffset::NULL,
-                child_count: 0,
-                data: string_offset,
-                source: SourceLocation::unknown(),
-                payload_offset: NodeOffset::NULL,
-                payload_len: 0,
-            }).unwrap_or(NodeOffset::NULL);
+            let token_node = self
+                .arena
+                .alloc(CAstNode {
+                    kind: token.kind as u16,
+                    flags: NodeFlags::IS_VALID,
+                    parent: expanded_node,
+                    first_child: NodeOffset::NULL,
+                    last_child: NodeOffset::NULL,
+                    next_sibling: NodeOffset::NULL,
+                    prev_sibling: NodeOffset::NULL,
+                    child_count: 0,
+                    data: string_offset,
+                    source: SourceLocation::unknown(),
+                    payload_offset: NodeOffset::NULL,
+                    payload_len: 0,
+                })
+                .unwrap_or(NodeOffset::NULL);
 
             if token_node != NodeOffset::NULL {
                 if last_child == NodeOffset::NULL {
@@ -565,7 +599,7 @@ impl<'a> MacroExpander<'a> {
         }
 
         let node = *self.arena.get(expanded_node)?;
-        
+
         if node.kind == 256 {
             Some(NodeOffset(node.data))
         } else {
@@ -664,7 +698,13 @@ impl Lexer {
                     let start = self.offset;
                     while self.offset < self.source.len() as u32 {
                         let c = self.current_char();
-                        if c.is_numeric() || c == '.' || c == 'e' || c == 'E' || c == 'x' || c == 'X' {
+                        if c.is_numeric()
+                            || c == '.'
+                            || c == 'e'
+                            || c == 'E'
+                            || c == 'x'
+                            || c == 'X'
+                        {
                             self.advance();
                         } else {
                             break;
@@ -679,7 +719,10 @@ impl Lexer {
                     });
                 }
                 _ => {
-                    let punctuators = ["==", "!=", "<=", ">=", "&&", "||", "<<", ">>", "->", "++", "--", "+=", "-=", "*=", "/=", "++", "--"];
+                    let punctuators = [
+                        "==", "!=", "<=", ">=", "&&", "||", "<<", ">>", "->", "++", "--", "+=",
+                        "-=", "*=", "/=", "++", "--",
+                    ];
                     let mut matched = false;
                     for punc in punctuators {
                         if self.source[self.offset as usize..].starts_with(punc) {
@@ -725,7 +768,10 @@ impl Lexer {
     }
 
     fn current_char(&self) -> char {
-        self.source.chars().nth(self.offset as usize).unwrap_or('\0')
+        self.source
+            .chars()
+            .nth(self.offset as usize)
+            .unwrap_or('\0')
     }
 
     fn peek_char(&self) -> Option<char> {

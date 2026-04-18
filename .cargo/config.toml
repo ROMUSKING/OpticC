@@ -1,8 +1,8 @@
 # Build configuration for OpticC
-# Points llvm-sys (used transitively by inkwell) at the system LLVM 14 installation.
-# The project declares inkwell with the "llvm14-0-prefer-dynamic" feature, so
-# LLVM_SYS_140_PREFIX must be set to the root of an LLVM-14 installation.
-# On this host LLVM 14 dev libraries live at /usr/lib/llvm-14.
+# Points llvm-sys (used transitively by inkwell) at the system LLVM 18 installation.
+# The project declares inkwell with the "llvm18-1-prefer-dynamic" feature, so
+# LLVM_SYS_181_PREFIX must be set to the root of an LLVM-18 installation.
+# On this host LLVM 18 dev libraries live at /usr/lib/llvm-18.
 
 [env]
-LLVM_SYS_140_PREFIX = "/usr/lib/llvm-14"
+LLVM_SYS_181_PREFIX = "/usr/lib/llvm-18"

@@ -1,5 +1,5 @@
 use crate::arena::{Arena, NodeOffset};
-use crate::frontend::parser::{Parser, ParseError, TokenKind};
+use crate::frontend::parser::{ParseError, Parser, TokenKind};
 
 pub const AST_ASM_STMT: u16 = 207;
 pub const ASM_OPERAND_OUTPUT: u16 = 208;
@@ -34,7 +34,9 @@ impl Parser {
     pub fn parse_asm_stmt(&mut self) -> Result<NodeOffset, ParseError> {
         self.advance();
 
-        let is_volatile = if self.current_token().text == "volatile" || self.current_token().text == "__volatile__" {
+        let is_volatile = if self.current_token().text == "volatile"
+            || self.current_token().text == "__volatile__"
+        {
             self.advance();
             true
         } else {
@@ -60,7 +62,10 @@ impl Parser {
         self.expect(")")?;
         self.skip_punctuator(";");
 
-        let template_offset = self.arena.store_string(&template).unwrap_or(NodeOffset::NULL);
+        let template_offset = self
+            .arena
+            .store_string(&template)
+            .unwrap_or(NodeOffset::NULL);
 
         let mut flags: u32 = 0;
         if is_volatile {
@@ -74,7 +79,10 @@ impl Parser {
         let mut last_child = NodeOffset::NULL;
 
         for output in &outputs {
-            let constraint_offset = self.arena.store_string(&output.constraint).unwrap_or(NodeOffset::NULL);
+            let constraint_offset = self
+                .arena
+                .store_string(&output.constraint)
+                .unwrap_or(NodeOffset::NULL);
             let operand_node = self.alloc_node(
                 ASM_OPERAND_OUTPUT,
                 constraint_offset.0,
@@ -86,7 +94,10 @@ impl Parser {
         }
 
         for input in &inputs {
-            let constraint_offset = self.arena.store_string(&input.constraint).unwrap_or(NodeOffset::NULL);
+            let constraint_offset = self
+                .arena
+                .store_string(&input.constraint)
+                .unwrap_or(NodeOffset::NULL);
             let operand_node = self.alloc_node(
                 ASM_OPERAND_INPUT,
                 constraint_offset.0,
@@ -132,7 +143,9 @@ impl Parser {
         Ok(asm_node)
     }
 
-    pub fn parse_asm_operands(&mut self) -> Result<(Vec<AsmOperand>, Vec<AsmOperand>, Vec<String>, Vec<String>), ParseError> {
+    pub fn parse_asm_operands(
+        &mut self,
+    ) -> Result<(Vec<AsmOperand>, Vec<AsmOperand>, Vec<String>, Vec<String>), ParseError> {
         let mut outputs: Vec<AsmOperand> = Vec::new();
         let mut inputs: Vec<AsmOperand> = Vec::new();
         let mut clobbers: Vec<String> = Vec::new();
@@ -141,11 +154,15 @@ impl Parser {
         let mut section: u8 = 0;
 
         loop {
-            if self.current_token().kind == TokenKind::Punctuator && self.current_token().text == ")" {
+            if self.current_token().kind == TokenKind::Punctuator
+                && self.current_token().text == ")"
+            {
                 break;
             }
 
-            if self.current_token().kind == TokenKind::Punctuator && self.current_token().text == ":" {
+            if self.current_token().kind == TokenKind::Punctuator
+                && self.current_token().text == ":"
+            {
                 self.advance();
                 section += 1;
 
@@ -185,7 +202,8 @@ impl Parser {
                 }
                 4 => {
                     if self.current_token().kind == TokenKind::Identifier
-                        || self.current_token().kind == TokenKind::Punctuator && self.current_token().text == "&&"
+                        || self.current_token().kind == TokenKind::Punctuator
+                            && self.current_token().text == "&&"
                     {
                         if self.current_token().text == "&&" {
                             self.advance();
@@ -202,7 +220,9 @@ impl Parser {
                 _ => break,
             }
 
-            if self.current_token().kind == TokenKind::Punctuator && self.current_token().text == "," {
+            if self.current_token().kind == TokenKind::Punctuator
+                && self.current_token().text == ","
+            {
                 self.advance();
             }
         }
@@ -230,9 +250,15 @@ impl Parser {
 
         let is_readwrite = constraint.starts_with('+');
         let clean_constraint = if is_output && !is_readwrite {
-            constraint.strip_prefix('=').unwrap_or(&constraint).to_string()
+            constraint
+                .strip_prefix('=')
+                .unwrap_or(&constraint)
+                .to_string()
         } else if is_readwrite {
-            constraint.strip_prefix('+').unwrap_or(&constraint).to_string()
+            constraint
+                .strip_prefix('+')
+                .unwrap_or(&constraint)
+                .to_string()
         } else {
             constraint.clone()
         };
@@ -246,7 +272,11 @@ impl Parser {
     }
 }
 
-pub fn build_constraints_string(outputs: &[AsmOperand], inputs: &[AsmOperand], clobbers: &[String]) -> String {
+pub fn build_constraints_string(
+    outputs: &[AsmOperand],
+    inputs: &[AsmOperand],
+    clobbers: &[String],
+) -> String {
     let mut parts: Vec<String> = Vec::new();
 
     for output in outputs {
@@ -329,7 +359,8 @@ mod tests {
     #[test]
     fn test_extended_asm_outputs_and_inputs() {
         let (_temp, mut parser) = create_parser();
-        let source = "int main() { int out; int in; asm(\"mov %1, %0\" : \"=r\"(out) : \"r\"(in)); }";
+        let source =
+            "int main() { int out; int in; asm(\"mov %1, %0\" : \"=r\"(out) : \"r\"(in)); }";
         let result = parser.parse(source);
         assert!(result.is_ok());
     }
@@ -393,7 +424,8 @@ mod tests {
     #[test]
     fn test_asm_multiple_inputs() {
         let (_temp, mut parser) = create_parser();
-        let source = "int main() { int a; int b; int c; asm(\"\" : : \"r\"(a), \"r\"(b), \"r\"(c)); }";
+        let source =
+            "int main() { int a; int b; int c; asm(\"\" : : \"r\"(a), \"r\"(b), \"r\"(c)); }";
         let result = parser.parse(source);
         assert!(result.is_ok());
     }
@@ -442,15 +474,13 @@ mod tests {
     fn test_asm_keyword_detection() {
         let (_temp, mut parser) = create_parser();
         let _ = parser.parse("int x;");
-        parser.tokens = vec![
-            crate::frontend::parser::Token {
-                kind: TokenKind::Keyword,
-                text: "asm".to_string(),
-                line: 1,
-                column: 1,
-                file: String::new(),
-            },
-        ];
+        parser.tokens = vec![crate::frontend::parser::Token {
+            kind: TokenKind::Keyword,
+            text: "asm".to_string(),
+            line: 1,
+            column: 1,
+            file: String::new(),
+        }];
         parser.current = 0;
         assert!(parser.is_asm_keyword());
     }
@@ -459,37 +489,31 @@ mod tests {
     fn test_asm_underscore_keyword_detection() {
         let (_temp, mut parser) = create_parser();
         let _ = parser.parse("int x;");
-        parser.tokens = vec![
-            crate::frontend::parser::Token {
-                kind: TokenKind::Keyword,
-                text: "__asm__".to_string(),
-                line: 1,
-                column: 1,
-                file: String::new(),
-            },
-        ];
+        parser.tokens = vec![crate::frontend::parser::Token {
+            kind: TokenKind::Keyword,
+            text: "__asm__".to_string(),
+            line: 1,
+            column: 1,
+            file: String::new(),
+        }];
         parser.current = 0;
         assert!(parser.is_asm_keyword());
     }
 
     #[test]
     fn test_build_constraints_string() {
-        let outputs = vec![
-            AsmOperand {
-                constraint: "r".to_string(),
-                expr_offset: NodeOffset::NULL,
-                is_output: true,
-                is_readwrite: false,
-            },
-        ];
-        let inputs = vec![
-            AsmOperand {
-                constraint: "r".to_string(),
-                expr_offset: NodeOffset::NULL,
-                is_output: false,
-                is_readwrite: false,
-            },
-        ];
+        let outputs = vec![AsmOperand {
+            constraint: "r".to_string(),
+            expr_offset: NodeOffset::NULL,
+            is_output: true,
+            is_readwrite: false,
+        }];
+        let inputs = vec![AsmOperand {
+            constraint: "r".to_string(),
+            expr_offset: NodeOffset::NULL,
+            is_output: false,
+            is_readwrite: false,
+        }];
         let clobbers = vec!["memory".to_string()];
 
         let constraints = build_constraints_string(&outputs, &inputs, &clobbers);
@@ -499,14 +523,12 @@ mod tests {
 
     #[test]
     fn test_build_constraints_readwrite() {
-        let outputs = vec![
-            AsmOperand {
-                constraint: "r".to_string(),
-                expr_offset: NodeOffset::NULL,
-                is_output: true,
-                is_readwrite: true,
-            },
-        ];
+        let outputs = vec![AsmOperand {
+            constraint: "r".to_string(),
+            expr_offset: NodeOffset::NULL,
+            is_output: true,
+            is_readwrite: true,
+        }];
         let inputs: Vec<AsmOperand> = Vec::new();
         let clobbers: Vec<String> = Vec::new();
 
