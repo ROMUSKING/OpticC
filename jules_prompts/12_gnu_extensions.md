@@ -64,11 +64,44 @@ OpticC already includes a GNU-extensions module. The current task is to improve 
 8. **Always run `cargo test` after changes**: Cross-module API mismatches are the most common bugs.
 9. **inkwell 0.9 API changes**: Pass manager API changed; set LLVM attributes directly on functions/values.
 
-## INTEGRATION POINTS
-- **Input**: Preprocessed token stream
-- **Output**: AST with GNU extension nodes
-- **Consumed by**: Type resolver (for typeof, builtins), LLVM backend (for attribute lowering)
-- **Uses**: Parser's AST node structure, type system
+## IMPLEMENTATION STATUS (Verified 2026-04-18)
+
+### Builtins — IMPLEMENTED (25+)
+- [x] `__builtin_expect(x, v)` → pass-through (return `x`)
+- [x] `__builtin_expect_with_probability(x, v, p)` → pass-through
+- [x] `__builtin_constant_p(x)` → return 0 (conservative)
+- [x] `__builtin_offsetof(type, member)` → constant-fold GEP
+- [x] `__builtin_unreachable()` → LLVM `unreachable`
+- [x] `__builtin_trap()` → LLVM `llvm.trap` intrinsic
+- [x] `__builtin_clz/clzl/clzll(x)` → LLVM `ctlz` intrinsic
+- [x] `__builtin_ctz/ctzl/ctzll(x)` → LLVM `cttz` intrinsic
+- [x] `__builtin_popcount/popcountl/popcountll(x)` → LLVM `ctpop` intrinsic
+- [x] `__builtin_bswap16/32/64(x)` → LLVM `bswap` intrinsic
+- [x] `__builtin_ffs/ffsl/ffsll(x)` → cttz + select pattern (0 → 0, else trailing_zeros + 1)
+- [x] `__builtin_abs/labs/llabs(x)` → sub + select pattern
+- [x] `__builtin_object_size(ptr, type)` → return -1 (unknown)
+- [x] `__builtin_frame_address(level)` / `__builtin_return_address(level)` → LLVM `frameaddress`/`returnaddress`
+- [x] `__builtin_prefetch(addr, ...)` → LLVM `llvm.prefetch` intrinsic
+- [x] `__builtin_assume_aligned(ptr, align)` → pass-through
+- [x] `__builtin_va_start(ap)` → LLVM `llvm.va_start`
+- [x] `__builtin_va_end(ap)` → LLVM `llvm.va_end`
+- [x] `__builtin_va_copy(dest, src)` → LLVM `llvm.va_copy`
+
+### Builtins — NOT YET IMPLEMENTED
+- [ ] `__builtin_types_compatible_p(type1, type2)` → needs type system integration
+- [ ] `__builtin_choose_expr(const_expr, expr1, expr2)` → compile-time selection
+- [ ] `__builtin_memcpy/memset/strlen` → LLVM memcpy/memset intrinsics
+- [ ] `__builtin_add_overflow/sub_overflow/mul_overflow` → LLVM overflow intrinsics
+
+### Other GNU Extensions
+- [x] `__attribute__((...))` — parsed and consumed (attributes stored for backend)
+- [x] `__extension__` — suppressed in both parse_statement and parse_external_declaration
+- [x] `__label__` — local label declarations parsed and skipped
+- [x] Statement expressions `({ ... })` — parser kind=202
+- [x] `typeof(expr)` — parser kind=201
+- [x] Label addresses `&&label` — parser kind=203
+- [x] Designated initializers `.field = value` — parser kind=205
+- [x] Variadic function signatures with `...` — tokenized and parsed correctly
 
 ## ACCEPTANCE CRITERIA
 1. Parser correctly handles `__attribute__((noreturn))` on function declarations

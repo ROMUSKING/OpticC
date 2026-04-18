@@ -20,8 +20,21 @@ Arena, DB, Lexer, Macro, Parser, LLVM backend, analysis, and VFS code are all pr
 | `14_build_system.md` | Jules-Build-System | 10, 11, 13 |
 | `15_benchmark.md` | Jules-Benchmark | 14 |
 
-### Phase 3: Linux Kernel Compilation (FUTURE)
-Expand GNU C fidelity, inline asm coverage, and external build integration for kernel-style code.
+### Phase 3: Linux Kernel Compilation (IN PROGRESS)
+**Milestones 1–3 completed (2026-04-18):**
+- ✅ Switch/case/default codegen with fall-through and break
+- ✅ Goto/label with forward-reference resolution
+- ✅ Break/continue in loops and switch
+- ✅ 25+ builtins (clz/ctz/popcount/bswap/ffs/abs/unreachable/trap/expect/constant_p/offsetof/etc.)
+- ✅ Variadic function support (va_start/va_end/va_copy)
+- ✅ Lexer 3-char punctuator fix (..., >>=, <<=)
+- ✅ Inline asm statement parsing from parse_statement()
+
+**Remaining for kernel compilation:**
+- Inline assembly codegen (parsing exists, codegen incomplete)
+- Computed goto (&&label, goto *ptr → indirectbr)
+- Multi-file compilation at kernel scale
+- Weak symbols, section/visibility attributes
 
 ### Phase 4: Production Compiler (FUTURE)
 Optimization passes, debug info, LTO, cross-compilation, and general polish.

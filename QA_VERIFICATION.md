@@ -1,14 +1,14 @@
 # Optic C-Compiler QA Verification Report
 
-**Generated:** 2026-04-15
+**Generated:** 2026-04-18
 **Project:** Optic C-Compiler
-**Status:** COMPLETE
+**Status:** PHASE 3 IN PROGRESS
 
 ---
 
 ## Executive Summary
 
-The Optic C-Compiler project has completed all major components including frontend (Arena, Lexer, Parser, Macro Expander), Analysis engine with full implementation, Backend LLVM with full IR lowering, and VFS Projection with FUSE filesystem and error injection.
+The Optic C-Compiler project has completed all major Phase 1 and Phase 2 components. Phase 3 (Linux Kernel Compilation) milestones 1–3 are now implemented: switch/case/goto/label/break/continue codegen, 25+ compiler builtins, and variadic function support. All 311 tests pass with 0 failures.
 
 ---
 
@@ -180,7 +180,7 @@ cat /tmp/optic_vfs/path/to/source.c
 cd optic_c && cargo build
 
 # Run all tests
-cargo test
+cargo test   # 311 passed, 0 failed
 
 # Run specific component tests
 cargo test --lib arena
@@ -190,3 +190,34 @@ cargo test --lib analysis
 cargo test --lib backend
 cargo test --lib vfs
 ```
+
+---
+
+## Phase 3: Linux Kernel Compilation Progress
+
+### Milestone 1: Switch + Goto Codegen ✅
+- [x] `lower_switch_stmt` with LLVM `build_switch`, case/default dispatch, fall-through
+- [x] `lower_goto_stmt` with forward-reference label resolution via `label_blocks` HashMap
+- [x] `lower_labeled_stmt` with BasicBlock positioning
+- [x] `lower_break_continue` with `break_stack` and `continue_stack`
+- [x] While/for loops push break/continue targets
+- [x] End-to-end tests: `test_switch_codegen`, `test_goto_label_codegen`, `test_break_in_switch`, `test_break_in_while`, `test_continue_in_for`
+
+### Milestone 2: Builtins ✅
+- [x] 25+ builtins implemented in `lower_builtin_call`
+- [x] LLVM intrinsics: ctlz, cttz, ctpop, bswap, trap, frameaddress, returnaddress, prefetch
+- [x] Pattern-based: ffs (cttz+select), abs (sub+select)
+- [x] Pass-through: expect, constant_p, assume_aligned, expect_with_probability
+- [x] Constant-fold: offsetof (GEP-based), object_size (-1)
+- [x] End-to-end tests: `test_builtin_expect`, `test_builtin_constant_p`
+
+### Milestone 3: Variadic Functions ✅
+- [x] Parser detects `...` in parameter lists (data=1 flag on kind=9)
+- [x] Backend passes is_variadic to `fn_type()` in both `lower_func_def` and `pre_register_func_def`
+- [x] `va_start`/`va_end`/`va_copy` intercepted as LLVM intrinsics (handles both `__builtin_va_*` and plain names)
+- [x] End-to-end test: `test_variadic_function`
+
+### Bug Fixes (2026-04-18)
+- [x] Fixed `test_asm_volatile_flag_stored`: asm/\__asm__/\__asm dispatched from `parse_statement()`
+- [x] Fixed flaky `test_preprocess_mock`: unique temp directories per integration test
+- [x] Fixed lexer 3-char punctuator tokenization: `...`, `>>=`, `<<=` now handled correctly

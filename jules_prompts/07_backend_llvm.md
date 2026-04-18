@@ -27,6 +27,11 @@ The LLVM backend now supports typed lowering for several core C types. Current w
 - [x] **Typed lowering**: Type-aware code generation for i8/i16/i32/i64/float/double.
 - [x] **External function declarations**: Auto-declare with variadic i32 signature when called but not defined.
 - [x] **`find_ident_name`**: Handles kind=73 init-declarator nodes — looks into first_child chain to find the variable name.
+- [x] **Switch/case codegen**: Full `lower_switch_stmt` with LLVM `build_switch`, case value → BasicBlock mapping, default block handling, and fall-through semantics. Tested with end-to-end test.
+- [x] **Goto/label codegen**: `lower_goto_stmt` and `lower_labeled_stmt` with forward-reference label resolution via `label_blocks` HashMap. Labels are resolved lazily — if the label hasn't been seen yet, a forward BasicBlock is created.
+- [x] **Break/continue**: `lower_break_continue` with `break_stack` and `continue_stack`. Pushed by while/for loops and switch statements. For-loop continue jumps to increment block.
+- [x] **25+ builtins**: `lower_builtin_call` handles __builtin_clz/ctz/popcount/bswap (LLVM ctlz/cttz/ctpop/bswap intrinsics), __builtin_ffs (cttz+select), __builtin_abs (sub+select), __builtin_unreachable/trap (LLVM unreachable/llvm.trap), __builtin_expect/constant_p/offsetof (pass-through/constant-fold), __builtin_object_size/frame_address/return_address/prefetch, __builtin_expect_with_probability/assume_aligned (pass-through).
+- [x] **Variadic functions**: Parser detects `...` in parameter lists, stores is_variadic flag (data=1 on kind=9 func declarator). Backend reads this in lower_func_def and pre_register_func_def, passes to fn_type(). `va_start`/`va_end`/`va_copy` intercepted in lower_call_expr, emitted as LLVM intrinsics.
 
 ### KEY AST LAYOUT (after parser fix, 2026-04-17)
 The parser now chains child nodes entirely via first_child chains, not via next_sibling of parent nodes:

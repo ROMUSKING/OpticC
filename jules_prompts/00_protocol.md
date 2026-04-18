@@ -45,7 +45,9 @@ OpticC already contains implementations for the core compiler pipeline plus the 
 ### Current Repository State
 - ✅ Core infrastructure exists: arena, DB, lexer, parser, backend, analysis, build, benchmark, integration
 - ✅ Advanced modules exist: preprocessor, type system, GNU extensions, inline asm
-- ⚠️ The remaining work is on correctness gaps, SQLite-scale preprocessing edge cases, and optional VFS re-enablement
+- ✅ Phase 3 milestones 1–3 implemented: switch/goto/break/continue, 25+ builtins, variadic functions
+- ✅ All 311 tests pass (0 failures) as of 2026-04-18
+- ⚠️ The remaining work is on correctness gaps, SQLite-scale preprocessing edge cases, inline asm codegen, and optional VFS re-enablement
 
 ### Immediate Priorities for Agents
 1. Verify the relevant module against the current code in `src/`
@@ -60,5 +62,15 @@ OpticC already contains implementations for the core compiler pipeline plus the 
 
 ### Long-Term Roadmap
 - **SQLite milestone**: improve complex macro handling and verify end-to-end library generation
-- **Kernel milestone**: expand GNU C coverage, inline asm fidelity, and build integration
+- **Kernel milestone**: expand inline asm codegen, computed goto, multi-file compilation, and build integration
 - **Production milestone**: optimization passes, debug info, cross-compilation, and polish
+
+### Recent Achievements (2026-04-18)
+- Switch/case codegen with fall-through, default, and break
+- Goto/label codegen with forward-reference label resolution
+- Break/continue in loops and switch
+- 25+ builtins via LLVM intrinsics and select patterns
+- Variadic function support (va_start/va_end/va_copy → LLVM intrinsics)
+- Parser's internal lexer now handles 3-char punctuators (..., >>=, <<=)
+- Inline asm statements now parsed from parse_statement()
+- All 311 tests pass (0 failures)
