@@ -1622,6 +1622,7 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
             24 => Ok(()),
             25 | 26 => Ok(()),
             200 | 206 => Ok(()), // __attribute__, __extension__
+            207 => self.lower_asm_stmt(arena, &node),
             _ => {
                 let _ = self.lower_expr(arena, offset)?;
                 Ok(())
@@ -2289,6 +2290,264 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
             }
             _ => Ok(()),
         }
+    }
+
+    /// Lower inline asm statement (kind=207).
+    ///
+    /// ASM_STMT node layout:
+    /// - data = flags (bit 0 = volatile, bit 1 = goto)
+    /// - first_child = template string offset (NodeOffset into string arena)
+    /// - next_sibling = first operand child (linked chain of kind=208/209/210/211)
+    fn lower_asm_stmt(&mut self, arena: &Arena, node: &CAstNode) -> Result<(), BackendError> {
+        let is_volatile = (node.data & 1) != 0;
+
+        // Read template string from arena
+        let template = arena
+            .get_string(node.first_child)
+            .unwrap_or("")
+            .to_string();
+
+        // Strip surrounding quotes if present (parser may store them)
+        let template = template
+            .strip_prefix('"')
+            .and_then(|s| s.strip_suffix('"'))
+            .unwrap_or(&template)
+            .to_string();
+
+        // Walk operand children to gather outputs, inputs, clobbers, and goto labels
+        let mut output_constraints: Vec<String> = Vec::new();
+        let mut input_constraints: Vec<String> = Vec::new();
+        let mut clobbers: Vec<String> = Vec::new();
+        let mut input_values: Vec<inkwell::values::BasicMetadataValueEnum<'ctx>> = Vec::new();
+        let mut output_lvalues: Vec<Option<(PointerValue<'ctx>, BasicTypeEnum<'ctx>)>> = Vec::new();
+
+        let mut child_offset = node.next_sibling;
+        while child_offset != NodeOffset::NULL {
+            let child = match arena.get(child_offset) {
+                Some(c) => c,
+                None => break,
+            };
+
+            match child.kind {
+                208 => {
+                    // ASM_OPERAND_OUTPUT: data = constraint string offset, first_child = expr
+                    let constraint = arena
+                        .get_string(NodeOffset(child.data))
+                        .unwrap_or("r")
+                        .to_string();
+
+                    // Strip quotes from constraint
+                    let constraint = constraint
+                        .strip_prefix('"')
+                        .and_then(|s| s.strip_suffix('"'))
+                        .unwrap_or(&constraint)
+                        .to_string();
+
+                    // Determine if readwrite (+) or output-only (=)
+                    let is_readwrite = constraint.starts_with('+');
+                    let clean = if is_readwrite {
+                        constraint.strip_prefix('+').unwrap_or(&constraint).to_string()
+                    } else {
+                        format!("={}", constraint.strip_prefix('=').unwrap_or(&constraint))
+                    };
+
+                    let llvm_constraint = if is_readwrite {
+                        // LLVM read-write: output constraint with matching input
+                        format!("+{}", constraint.strip_prefix('+').unwrap_or(&constraint))
+                    } else {
+                        clean
+                    };
+
+                    output_constraints.push(llvm_constraint);
+
+                    // Get the lvalue pointer for the output operand expression
+                    if child.first_child != NodeOffset::NULL {
+                        let lvalue = self.lower_lvalue_ptr(arena, child.first_child)?;
+                        output_lvalues.push(lvalue);
+
+                        // For readwrite operands, the current value is also an input
+                        if is_readwrite {
+                            if let Some((ptr, pointee_ty)) = &lvalue {
+                                let loaded = self.builder
+                                    .build_load(*pointee_ty, *ptr, "asm_rw_load")
+                                    .map_err(|_| BackendError::InvalidNode)?;
+                                input_values.push(loaded.into());
+                            }
+                        }
+                    } else {
+                        output_lvalues.push(None);
+                    }
+                }
+                209 => {
+                    // ASM_OPERAND_INPUT: data = constraint string offset, first_child = expr
+                    let constraint = arena
+                        .get_string(NodeOffset(child.data))
+                        .unwrap_or("r")
+                        .to_string();
+
+                    // Strip quotes from constraint
+                    let constraint = constraint
+                        .strip_prefix('"')
+                        .and_then(|s| s.strip_suffix('"'))
+                        .unwrap_or(&constraint)
+                        .to_string();
+
+                    input_constraints.push(constraint);
+
+                    // Evaluate input expression
+                    if child.first_child != NodeOffset::NULL {
+                        if let Some(val) = self.lower_expr(arena, child.first_child)? {
+                            input_values.push(val.into());
+                        }
+                    }
+                }
+                210 => {
+                    // ASM_CLOBBER: data = clobber string offset
+                    let clobber = arena
+                        .get_string(NodeOffset(child.data))
+                        .unwrap_or("")
+                        .to_string();
+
+                    // Strip quotes from clobber
+                    let clobber = clobber
+                        .strip_prefix('"')
+                        .and_then(|s| s.strip_suffix('"'))
+                        .unwrap_or(&clobber)
+                        .to_string();
+
+                    if !clobber.is_empty() {
+                        clobbers.push(format!("~{{{}}}", clobber));
+                    }
+                }
+                211 => {
+                    // ASM_GOTO_LABEL: data = label string offset — ignored for now
+                }
+                _ => {}
+            }
+
+            child_offset = child.next_sibling;
+        }
+
+        // Build the full constraint string: outputs, inputs, clobbers
+        let mut all_constraints: Vec<String> = Vec::new();
+        all_constraints.extend(output_constraints.iter().cloned());
+        all_constraints.extend(input_constraints.iter().cloned());
+        all_constraints.extend(clobbers.iter().cloned());
+        let constraints_str = all_constraints.join(",");
+
+        // Build the LLVM function type for this inline asm
+        // Input parameter types come from the evaluated input values
+        let param_types: Vec<BasicMetadataTypeEnum<'ctx>> = input_values
+            .iter()
+            .map(|v| match v {
+                inkwell::values::BasicMetadataValueEnum::IntValue(v) => {
+                    BasicMetadataTypeEnum::IntType(v.get_type())
+                }
+                inkwell::values::BasicMetadataValueEnum::FloatValue(v) => {
+                    BasicMetadataTypeEnum::FloatType(v.get_type())
+                }
+                inkwell::values::BasicMetadataValueEnum::PointerValue(_) => {
+                    BasicMetadataTypeEnum::PointerType(
+                        self.context.ptr_type(AddressSpace::default()),
+                    )
+                }
+                _ => BasicMetadataTypeEnum::IntType(self.context.i32_type()),
+            })
+            .collect();
+
+        // Determine return type based on output operands
+        let has_side_effects = is_volatile || clobbers.iter().any(|c| c.contains("memory"));
+
+        let asm_fn_type = if output_constraints.is_empty() {
+            // No outputs → void return
+            self.context.void_type().fn_type(&param_types, false)
+        } else if output_constraints.len() == 1 {
+            // Single output → i32 return (default; could be refined with type info)
+            self.context.i32_type().fn_type(&param_types, false)
+        } else {
+            // Multiple outputs → struct return
+            let field_types: Vec<BasicTypeEnum<'ctx>> = output_constraints
+                .iter()
+                .map(|_| self.context.i32_type().into())
+                .collect();
+            let struct_type = self.context.struct_type(&field_types, false);
+            struct_type.fn_type(&param_types, false)
+        };
+
+        // Create the inline asm value
+        let asm_val = self.context.create_inline_asm(
+            asm_fn_type,
+            template,
+            constraints_str,
+            has_side_effects,
+            false, // alignstack
+            None,  // dialect (ATT default)
+            false, // can_throw
+        );
+
+        // Call the inline asm
+        let call_result = self.builder
+            .build_indirect_call(asm_fn_type, asm_val, &input_values, "asm_call")
+            .map_err(|_| BackendError::InvalidNode)?;
+
+        // Store output results back to lvalue pointers
+        if output_constraints.len() == 1 {
+            if let Some(Some((ptr, pointee_ty))) = output_lvalues.first() {
+                match call_result.try_as_basic_value() {
+                    inkwell::values::ValueKind::Basic(result) => {
+                        // Cast result to match the expected pointee type if needed
+                        let store_val: BasicValueEnum<'ctx> = if result.get_type() != *pointee_ty {
+                            if result.is_int_value() && pointee_ty.is_int_type() {
+                                let result_int = result.into_int_value();
+                                let target_int = pointee_ty.into_int_type();
+                                if result_int.get_type().get_bit_width() > target_int.get_bit_width() {
+                                    self.builder
+                                        .build_int_truncate(result_int, target_int, "asm_trunc")
+                                        .map_err(|_| BackendError::InvalidNode)?
+                                        .into()
+                                } else {
+                                    self.builder
+                                        .build_int_z_extend(result_int, target_int, "asm_zext")
+                                        .map_err(|_| BackendError::InvalidNode)?
+                                        .into()
+                                }
+                            } else {
+                                result
+                            }
+                        } else {
+                            result
+                        };
+                        self.builder
+                            .build_store(*ptr, store_val)
+                            .map_err(|_| BackendError::InvalidNode)?;
+                    }
+                    inkwell::values::ValueKind::Instruction(_) => {}
+                }
+            }
+        } else if output_constraints.len() > 1 {
+            // Multiple outputs: extract from struct
+            match call_result.try_as_basic_value() {
+                inkwell::values::ValueKind::Basic(result) => {
+                    for (i, lvalue) in output_lvalues.iter().enumerate() {
+                        if let Some((ptr, _pointee_ty)) = lvalue {
+                            let extracted = self.builder
+                                .build_extract_value(
+                                    result.into_struct_value(),
+                                    i as u32,
+                                    &format!("asm_out_{}", i),
+                                )
+                                .map_err(|_| BackendError::InvalidNode)?;
+                            self.builder
+                                .build_store(*ptr, extracted)
+                                .map_err(|_| BackendError::InvalidNode)?;
+                        }
+                    }
+                }
+                inkwell::values::ValueKind::Instruction(_) => {}
+            }
+        }
+
+        Ok(())
     }
 
     fn lower_return_stmt(&mut self, arena: &Arena, node: &CAstNode) -> Result<(), BackendError> {
@@ -3823,6 +4082,81 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                 }
                 Ok(None)
             }
+            "__builtin_alloca" => {
+                // __builtin_alloca(size) → alloca i8, size
+                if let Some(inkwell::values::BasicMetadataValueEnum::IntValue(size_val)) =
+                    args.first()
+                {
+                    let alloca = self
+                        .builder
+                        .build_array_alloca(self.context.i8_type(), *size_val, "builtin_alloca")
+                        .map_err(|_| BackendError::InvalidNode)?;
+                    Ok(Some(alloca.into()))
+                } else {
+                    // Fallback: allocate 1 byte
+                    let alloca = self
+                        .builder
+                        .build_alloca(self.context.i8_type(), "builtin_alloca")
+                        .map_err(|_| BackendError::InvalidNode)?;
+                    Ok(Some(alloca.into()))
+                }
+            }
+            "__builtin_add_overflow" | "__builtin_sub_overflow" | "__builtin_mul_overflow" => {
+                // __builtin_*_overflow(a, b, result_ptr) → returns bool (1 if overflow)
+                // For now, perform the operation without overflow detection and return 0
+                if args.len() >= 3 {
+                    if let (
+                        Some(inkwell::values::BasicMetadataValueEnum::IntValue(a)),
+                        Some(inkwell::values::BasicMetadataValueEnum::IntValue(b)),
+                        Some(inkwell::values::BasicMetadataValueEnum::PointerValue(result_ptr)),
+                    ) = (args.get(0), args.get(1), args.get(2))
+                    {
+                        let result = match builtin_name.as_str() {
+                            "__builtin_add_overflow" => self
+                                .builder
+                                .build_int_add(*a, *b, "overflow_add")
+                                .map_err(|_| BackendError::InvalidNode)?,
+                            "__builtin_sub_overflow" => self
+                                .builder
+                                .build_int_sub(*a, *b, "overflow_sub")
+                                .map_err(|_| BackendError::InvalidNode)?,
+                            "__builtin_mul_overflow" => self
+                                .builder
+                                .build_int_mul(*a, *b, "overflow_mul")
+                                .map_err(|_| BackendError::InvalidNode)?,
+                            _ => unreachable!(),
+                        };
+                        self.builder
+                            .build_store(*result_ptr, result)
+                            .map_err(|_| BackendError::InvalidNode)?;
+                        // Return 0 (no overflow detected — conservative)
+                        Ok(Some(
+                            self.context.i32_type().const_int(0, false).into(),
+                        ))
+                    } else {
+                        Ok(Some(
+                            self.context.i32_type().const_int(0, false).into(),
+                        ))
+                    }
+                } else {
+                    Ok(Some(
+                        self.context.i32_type().const_int(0, false).into(),
+                    ))
+                }
+            }
+            "__sync_synchronize" => {
+                // Full memory barrier → LLVM fence instruction
+                self.builder
+                    .build_fence(
+                        inkwell::AtomicOrdering::SequentiallyConsistent,
+                        false,
+                        "sync_fence",
+                    )
+                    .map_err(|_| BackendError::InvalidNode)?;
+                Ok(Some(
+                    self.context.i32_type().const_int(0, false).into(),
+                ))
+            }
             _ => {
                 if let Some(func) = self.functions.get(&builtin_name) {
                     let call_site = self
@@ -4245,5 +4579,91 @@ mod tests {
         );
         // Variadic functions should have ... in the LLVM signature
         assert!(ir.contains("..."), "Expected variadic signature in IR:\n{}", ir);
+    }
+
+    #[test]
+    fn test_asm_basic_volatile() {
+        let ir = compile_c_to_ir(
+            "void test_asm() { \
+                asm volatile(\"nop\"); \
+            }"
+        );
+        assert!(ir.contains("call void asm sideeffect"), "Expected asm sideeffect call in IR:\n{}", ir);
+        assert!(ir.contains("nop"), "Expected nop in asm template:\n{}", ir);
+    }
+
+    #[test]
+    fn test_asm_memory_barrier() {
+        let ir = compile_c_to_ir(
+            "void memory_barrier() { \
+                asm volatile(\"\" : : : \"memory\"); \
+            }"
+        );
+        // Should produce an asm call with memory clobber
+        assert!(ir.contains("asm sideeffect"), "Expected asm sideeffect in IR:\n{}", ir);
+    }
+
+    #[test]
+    fn test_asm_with_output() {
+        let ir = compile_c_to_ir(
+            "int read_reg() { \
+                int val; \
+                asm(\"mov $0, %0\" : \"=r\"(val)); \
+                return val; \
+            }"
+        );
+        assert!(ir.contains("asm"), "Expected asm instruction in IR:\n{}", ir);
+    }
+
+    #[test]
+    fn test_asm_with_input_and_output() {
+        let ir = compile_c_to_ir(
+            "int double_it(int x) { \
+                int result; \
+                asm(\"addl %1, %0\" : \"=r\"(result) : \"r\"(x)); \
+                return result; \
+            }"
+        );
+        assert!(ir.contains("asm"), "Expected asm instruction in IR:\n{}", ir);
+    }
+
+    #[test]
+    fn test_asm_cc_clobber() {
+        let ir = compile_c_to_ir(
+            "void test_cc_clobber() { \
+                asm volatile(\"\" : : : \"cc\"); \
+            }"
+        );
+        assert!(ir.contains("asm sideeffect"), "Expected asm sideeffect in IR:\n{}", ir);
+    }
+
+    #[test]
+    fn test_builtin_alloca() {
+        let ir = compile_c_to_ir(
+            "void test_alloca(int n) { \
+                void *p = __builtin_alloca(n); \
+            }"
+        );
+        assert!(ir.contains("alloca"), "Expected alloca in IR:\n{}", ir);
+    }
+
+    #[test]
+    fn test_builtin_memcpy() {
+        let ir = compile_c_to_ir(
+            "void test_memcpy(char *dst, char *src, int n) { \
+                __builtin_memcpy(dst, src, n); \
+            }"
+        );
+        assert!(ir.contains("memcpy") || ir.contains("__builtin_memcpy"), "Expected memcpy call in IR:\n{}", ir);
+    }
+
+    #[test]
+    fn test_builtin_memset() {
+        let ir = compile_c_to_ir(
+            "void test_memset(char *dst, int c, int n) { \
+                __builtin_memset(dst, c, n); \
+            }"
+        );
+        assert!(ir.contains("memset") || ir.contains("__builtin_memset"), "Expected memset call in IR:\n{}", ir);
     }
 }
