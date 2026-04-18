@@ -25,6 +25,7 @@ pub struct LlvmBackend<'ctx, 'types> {
     struct_tag_fields: HashMap<String, Vec<String>>,
     /// Registered pointee struct types keyed by pointer-backed variable/parameter name.
     pointer_struct_types: HashMap<String, StructType<'ctx>>,
+    current_return_type: Option<BasicTypeEnum<'ctx>>,
 }
 
 #[derive(Clone, Copy)]
@@ -56,6 +57,7 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
             struct_tag_types: HashMap::new(),
             struct_tag_fields: HashMap::new(),
             pointer_struct_types: HashMap::new(),
+            current_return_type: None,
         }
     }
 
@@ -79,6 +81,7 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
             struct_tag_types: HashMap::new(),
             struct_tag_fields: HashMap::new(),
             pointer_struct_types: HashMap::new(),
+            current_return_type: None,
         }
     }
 
@@ -918,10 +921,29 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                             return_llvm_type = Some(self.node_kind_to_llvm_type(child.kind));
                         }
                     }
-                    9 => {
+                    7..=9 => {
+                        let Some(func_decl_offset) =
+                            self.find_function_declarator_offset(arena, child_offset)
+                        else {
+                            child_offset = child.next_sibling;
+                            continue;
+                        };
+                        let Some(func_decl) = arena.get(func_decl_offset) else {
+                            child_offset = child.next_sibling;
+                            continue;
+                        };
                         seen_func_declarator = true;
+                        if !is_void_ret {
+                            return_llvm_type = Some(self.declarator_llvm_type(
+                                arena,
+                                Some(child),
+                                return_llvm_type.unwrap_or_else(|| {
+                                    self.context.i32_type().as_basic_type_enum()
+                                }),
+                            ));
+                        }
                         // first_child = kind=60(name) -> kind=24(param1) -> ...
-                        if let Some(ident) = arena.get(child.first_child) {
+                        if let Some(ident) = arena.get(func_decl.first_child) {
                             if ident.kind == 60 {
                                 if let Some(name) = arena.get_string(NodeOffset(ident.data)) {
                                     func_name = name.to_string();
@@ -972,6 +994,7 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
         self.variables.clear();
         self.struct_fields.clear();
         self.pointer_struct_types.clear();
+        self.current_return_type = if is_void_ret { None } else { Some(ret_llvm) };
 
         for (i, ((pname, ptype), struct_info)) in param_names
             .iter()
@@ -1027,6 +1050,10 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                     self.builder
                         .build_return(None)
                         .map_err(|_| BackendError::InvalidNode)?;
+                } else if let BasicTypeEnum::PointerType(ptr_type) = ret_llvm {
+                    self.builder
+                        .build_return(Some(&ptr_type.const_null()))
+                        .map_err(|_| BackendError::InvalidNode)?;
                 } else {
                     let int_type = ret_llvm.into_int_type();
                     self.builder
@@ -1036,6 +1063,7 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
             }
         }
 
+        self.current_return_type = None;
         Ok(())
     }
 
@@ -1311,7 +1339,22 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
     fn lower_return_stmt(&mut self, arena: &Arena, node: &CAstNode) -> Result<(), BackendError> {
         if node.first_child != NodeOffset::NULL {
             if let Some(val) = self.lower_expr(arena, node.first_child)? {
-                if val.is_int_value() {
+                if let Some(BasicTypeEnum::PointerType(ptr_type)) = self.current_return_type {
+                    if val.is_pointer_value() {
+                        let ptr_val = val.into_pointer_value();
+                        self.builder
+                            .build_return(Some(&ptr_val))
+                            .map_err(|_| BackendError::InvalidNode)?;
+                    } else if val.is_int_value()
+                        && val.into_int_value().get_zero_extended_constant() == Some(0)
+                    {
+                        self.builder
+                            .build_return(Some(&ptr_type.const_null()))
+                            .map_err(|_| BackendError::InvalidNode)?;
+                    } else {
+                        return Err(BackendError::InvalidNode);
+                    }
+                } else if val.is_int_value() {
                     let int_val = val.into_int_value();
                     self.builder
                         .build_return(Some(&int_val))
@@ -1325,9 +1368,15 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                     return Ok(());
                 }
             } else {
-                self.builder
-                    .build_return(Some(&self.context.i32_type().const_int(0, false)))
-                    .map_err(|_| BackendError::InvalidNode)?;
+                if let Some(BasicTypeEnum::PointerType(ptr_type)) = self.current_return_type {
+                    self.builder
+                        .build_return(Some(&ptr_type.const_null()))
+                        .map_err(|_| BackendError::InvalidNode)?;
+                } else {
+                    self.builder
+                        .build_return(Some(&self.context.i32_type().const_int(0, false)))
+                        .map_err(|_| BackendError::InvalidNode)?;
+                }
             }
         } else {
             self.builder
@@ -2269,6 +2318,20 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
             }
         }
         None
+    }
+
+    fn find_function_declarator_offset(
+        &self,
+        arena: &Arena,
+        offset: NodeOffset,
+    ) -> Option<NodeOffset> {
+        let node = arena.get(offset)?;
+        match node.kind {
+            9 => Some(offset),
+            7 | 8 => self.find_function_declarator_offset(arena, node.first_child),
+            73 => self.find_function_declarator_offset(arena, node.first_child),
+            _ => None,
+        }
     }
 
     /// Find the identifier name starting from an already-obtained node (not from a parent).

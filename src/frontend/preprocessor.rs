@@ -111,6 +111,7 @@ pub enum MacroDefinition {
     FunctionLike {
         params: Vec<String>,
         is_variadic: bool,
+        variadic_param: Option<String>,
         replacement: Vec<Token>,
     },
 }
@@ -1362,7 +1363,8 @@ impl Preprocessor {
         let is_function_like = j < tokens.len() && tokens[j].text == "(";
 
         if is_function_like {
-            let (params, is_variadic, end_params) = self.parse_macro_params(tokens, j, file)?;
+            let (params, is_variadic, variadic_param, end_params) =
+                self.parse_macro_params(tokens, j, file)?;
             j = end_params;
             while j < tokens.len() && tokens[j].kind == PpTokenKind::Whitespace {
                 j += 1;
@@ -1385,6 +1387,7 @@ impl Preprocessor {
                 MacroDefinition::FunctionLike {
                     params,
                     is_variadic,
+                    variadic_param,
                     replacement,
                 },
             );
@@ -1413,10 +1416,11 @@ impl Preprocessor {
         tokens: &[PpToken],
         start: usize,
         file: &str,
-    ) -> Result<(Vec<String>, bool, usize), PreprocessorError> {
+    ) -> Result<(Vec<String>, bool, Option<String>, usize), PreprocessorError> {
         let mut j = start + 1;
         let mut params = Vec::new();
         let mut is_variadic = false;
+        let mut variadic_param = None;
 
         while j < tokens.len() {
             while j < tokens.len() && tokens[j].kind == PpTokenKind::Whitespace {
@@ -1441,23 +1445,36 @@ impl Preprocessor {
                 break;
             }
             if tokens[j].kind == PpTokenKind::Identifier {
-                params.push(tokens[j].text.clone());
+                let param_name = tokens[j].text.clone();
                 j += 1;
+                while j < tokens.len() && tokens[j].kind == PpTokenKind::Whitespace {
+                    j += 1;
+                }
+                if j < tokens.len() && tokens[j].text == "..." {
+                    is_variadic = true;
+                    variadic_param = Some(param_name);
+                    j += 1;
+                    while j < tokens.len() && tokens[j].kind == PpTokenKind::Whitespace {
+                        j += 1;
+                    }
+                    if j < tokens.len() && tokens[j].text == ")" {
+                        j += 1;
+                    }
+                    break;
+                }
+                params.push(param_name);
             } else {
                 return Err(PreprocessorError::MacroError(format!(
                     "expected parameter name in macro definition in {}",
                     file
                 )));
             }
-            while j < tokens.len() && tokens[j].kind == PpTokenKind::Whitespace {
-                j += 1;
-            }
             if j < tokens.len() && tokens[j].text == "," {
                 j += 1;
             }
         }
 
-        Ok((params, is_variadic, j))
+        Ok((params, is_variadic, variadic_param, j))
     }
 
     fn expand_tokens_in_macro(
@@ -2011,6 +2028,7 @@ impl Preprocessor {
                     MacroDefinition::FunctionLike {
                         params,
                         is_variadic,
+                        variadic_param,
                         replacement,
                     } => {
                         let mut k = j + 1;
@@ -2029,6 +2047,7 @@ impl Preprocessor {
                                 replacement,
                                 params,
                                 *is_variadic,
+                                variadic_param.as_deref(),
                                 &args,
                                 file,
                             );
@@ -2450,6 +2469,7 @@ impl Preprocessor {
                         MacroDefinition::FunctionLike {
                             params,
                             is_variadic,
+                            variadic_param,
                             replacement,
                         } => {
                             let mut j = i + 1;
@@ -2465,6 +2485,7 @@ impl Preprocessor {
                                     replacement,
                                     params,
                                     *is_variadic,
+                                    variadic_param.as_deref(),
                                     &args,
                                     file,
                                 );
@@ -2543,6 +2564,7 @@ impl Preprocessor {
         replacement: &[Token],
         params: &[String],
         is_variadic: bool,
+        variadic_param: Option<&str>,
         args: &[Vec<Token>],
         file: &str,
     ) -> Vec<Token> {
@@ -2553,8 +2575,14 @@ impl Preprocessor {
             if replacement[i].text == "##" {
                 if !result.is_empty() && i + 1 < replacement.len() {
                     let left = result.pop().unwrap();
-                    let right_tokens =
-                        self.get_param_replacement(&replacement[i + 1], params, args, file);
+                    let right_tokens = self.get_param_replacement(
+                        &replacement[i + 1],
+                        params,
+                        is_variadic,
+                        variadic_param,
+                        args,
+                        file,
+                    );
                     if let Some(right) = right_tokens.first() {
                         let pasted = self.paste_tokens(&left, right);
                         result.push(pasted);
@@ -2584,28 +2612,35 @@ impl Preprocessor {
                         i += 2;
                         continue;
                     }
+                    if is_variadic && self.is_variadic_param(next, variadic_param) {
+                        let stringified = self.stringify_arg(&self.expand_variadic_args(
+                            args,
+                            params.len(),
+                            next,
+                            file,
+                        ));
+                        result.push(Token::new(
+                            TokenKind::StringLiteral,
+                            stringified,
+                            next.line,
+                            next.column,
+                            next.file.clone(),
+                        ));
+                        i += 2;
+                        continue;
+                    }
                 }
             }
 
             if replacement[i].kind == TokenKind::Identifier {
                 // Handle __VA_ARGS__ for variadic macros
-                if replacement[i].text == "__VA_ARGS__" && is_variadic && !args.is_empty() {
-                    // __VA_ARGS__ is replaced with all arguments beyond the named params
-                    let va_start = params.len();
-                    if va_start < args.len() {
-                        for (idx, arg) in args.iter().skip(va_start).enumerate() {
-                            if idx > 0 {
-                                result.push(Token::new(
-                                    TokenKind::Punctuator,
-                                    ",".to_string(),
-                                    replacement[i].line,
-                                    replacement[i].column,
-                                    replacement[i].file.clone(),
-                                ));
-                            }
-                            result.extend(arg.clone());
-                        }
-                    }
+                if is_variadic && self.is_variadic_param(&replacement[i], variadic_param) {
+                    result.extend(self.expand_variadic_args(
+                        args,
+                        params.len(),
+                        &replacement[i],
+                        file,
+                    ));
                     i += 1;
                     continue;
                 }
@@ -2629,6 +2664,8 @@ impl Preprocessor {
         &self,
         token: &Token,
         params: &[String],
+        is_variadic: bool,
+        variadic_param: Option<&str>,
         args: &[Vec<Token>],
         _file: &str,
     ) -> Vec<Token> {
@@ -2638,8 +2675,40 @@ impl Preprocessor {
                     return args[param_idx].clone();
                 }
             }
+            if is_variadic && self.is_variadic_param(token, variadic_param) {
+                return self.expand_variadic_args(args, params.len(), token, _file);
+            }
         }
         vec![token.clone()]
+    }
+
+    fn is_variadic_param(&self, token: &Token, variadic_param: Option<&str>) -> bool {
+        token.text == "__VA_ARGS__" || variadic_param.is_some_and(|name| token.text == name)
+    }
+
+    fn expand_variadic_args(
+        &self,
+        args: &[Vec<Token>],
+        va_start: usize,
+        token: &Token,
+        _file: &str,
+    ) -> Vec<Token> {
+        let mut expanded = Vec::new();
+        if va_start < args.len() {
+            for (idx, arg) in args.iter().skip(va_start).enumerate() {
+                if idx > 0 {
+                    expanded.push(Token::new(
+                        TokenKind::Punctuator,
+                        ",".to_string(),
+                        token.line,
+                        token.column,
+                        token.file.clone(),
+                    ));
+                }
+                expanded.extend(arg.clone());
+            }
+        }
+        expanded
     }
 
     fn paste_tokens(&self, left: &Token, right: &Token) -> Token {
@@ -2774,6 +2843,34 @@ const char *s = STR(hello world);"#;
         assert!(texts
             .windows(8)
             .any(|window| { window == ["log", "(", "\"%d\"", ",", "x", ",", "y", ")"] }));
+    }
+
+    #[test]
+    fn test_gnu_named_variadic_macro_expansion_preserves_commas() {
+        let (mut pp, _temp_dir) = create_test_preprocessor();
+
+        let source = "#define TRACE(args...) log(args)\nTRACE(x, y);";
+        let tokens = pp.process_source(source, "test.c").unwrap();
+
+        let non_ws: Vec<&Token> = tokens.iter().filter(|t| !t.is_whitespace()).collect();
+        let texts: Vec<&str> = non_ws.iter().map(|t| t.text.as_str()).collect();
+        assert!(texts
+            .windows(6)
+            .any(|window| window == ["log", "(", "x", ",", "y", ")"]));
+    }
+
+    #[test]
+    fn test_empty_sqlite_api_macro_drops_marker_tokens() {
+        let (mut pp, _temp_dir) = create_test_preprocessor();
+
+        let source = "#define SQLITE_API\nSQLITE_API int sqlite3_open(void);";
+        let tokens = pp.process_source(source, "test.c").unwrap();
+
+        let non_ws: Vec<&Token> = tokens.iter().filter(|t| !t.is_whitespace()).collect();
+        let texts: Vec<&str> = non_ws.iter().map(|t| t.text.as_str()).collect();
+        assert!(texts.contains(&"int"));
+        assert!(texts.contains(&"sqlite3_open"));
+        assert!(!texts.contains(&"SQLITE_API"));
     }
 
     #[test]
