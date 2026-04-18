@@ -4118,4 +4118,132 @@ mod tests {
         assert_eq!(ty1, ty2);
         assert_eq!(backend.type_cache.len(), 1);
     }
+
+    /// Helper: parse C source and compile to LLVM IR, returning the IR string
+    fn compile_c_to_ir(source: &str) -> String {
+        use crate::frontend::parser::Parser;
+        use tempfile::NamedTempFile;
+
+        let temp_file = NamedTempFile::new().unwrap();
+        let arena = Arena::new(temp_file.path(), 65536).unwrap();
+        let mut parser = Parser::new(arena);
+        let root = parser.parse(source).expect("parse failed");
+
+        let context = Context::create();
+        let ts = TypeSystem::new();
+        let mut backend = LlvmBackend::with_types(&context, "test", &ts);
+        backend.compile(&parser.arena, root).expect("compile failed");
+        backend.dump_ir()
+    }
+
+    #[test]
+    fn test_switch_codegen() {
+        let ir = compile_c_to_ir(
+            "int classify(int x) { \
+                switch (x) { \
+                    case 0: return 10; \
+                    case 1: return 20; \
+                    default: return 30; \
+                } \
+                return 0; \
+            }"
+        );
+        // The IR should contain a switch instruction
+        assert!(ir.contains("switch"), "Expected switch instruction in IR:\n{}", ir);
+    }
+
+    #[test]
+    fn test_goto_label_codegen() {
+        let ir = compile_c_to_ir(
+            "int test_goto() { \
+                int x = 0; \
+                goto done; \
+                x = 1; \
+                done: \
+                return x; \
+            }"
+        );
+        // Should contain a branch to a label block
+        assert!(ir.contains("br label"), "Expected unconditional branch in IR:\n{}", ir);
+    }
+
+    #[test]
+    fn test_break_in_switch() {
+        let ir = compile_c_to_ir(
+            "int test_break(int x) { \
+                int result = 0; \
+                switch (x) { \
+                    case 1: result = 10; break; \
+                    case 2: result = 20; break; \
+                    default: result = 30; break; \
+                } \
+                return result; \
+            }"
+        );
+        assert!(ir.contains("switch"), "Expected switch in IR:\n{}", ir);
+    }
+
+    #[test]
+    fn test_break_in_while() {
+        let ir = compile_c_to_ir(
+            "int test_break_while() { \
+                int i = 0; \
+                while (i < 10) { \
+                    if (i == 5) break; \
+                    i = i + 1; \
+                } \
+                return i; \
+            }"
+        );
+        // Should have a branch to the end block (break)
+        assert!(ir.contains("br label"), "Expected branches in IR:\n{}", ir);
+    }
+
+    #[test]
+    fn test_continue_in_for() {
+        let ir = compile_c_to_ir(
+            "int test_continue() { \
+                int sum = 0; \
+                int i; \
+                for (i = 0; i < 10; i = i + 1) { \
+                    if (i == 3) continue; \
+                    sum = sum + i; \
+                } \
+                return sum; \
+            }"
+        );
+        assert!(ir.contains("br label"), "Expected branches in IR:\n{}", ir);
+    }
+
+    #[test]
+    fn test_builtin_expect() {
+        let ir = compile_c_to_ir(
+            "int test_expect(int x) { \
+                return __builtin_expect(x, 1); \
+            }"
+        );
+        // __builtin_expect just returns its first argument
+        assert!(ir.contains("define"), "Expected function definition in IR:\n{}", ir);
+    }
+
+    #[test]
+    fn test_builtin_constant_p() {
+        let ir = compile_c_to_ir(
+            "int test_constant_p(int x) { \
+                return __builtin_constant_p(x); \
+            }"
+        );
+        assert!(ir.contains("define"), "Expected function definition in IR:\n{}", ir);
+    }
+
+    #[test]
+    fn test_variadic_function() {
+        let ir = compile_c_to_ir(
+            "int my_printf(int fmt, ...) { \
+                return 0; \
+            }"
+        );
+        // Variadic functions should have ... in the LLVM signature
+        assert!(ir.contains("..."), "Expected variadic signature in IR:\n{}", ir);
+    }
 }

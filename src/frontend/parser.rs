@@ -256,7 +256,21 @@ impl Parser {
 
                     if let Some(&next) = chars.peek() {
                         let two_char = format!("{}{}", text, next);
-                        if Self::is_punctuator(&two_char) {
+                        // Check for three-character punctuators first (e.g., ..., >>=, <<=)
+                        let mut cloned = chars.clone();
+                        cloned.next(); // skip `next`
+                        if let Some(&next2) = cloned.peek() {
+                            let three_char = format!("{}{}{}", text, next, next2);
+                            if Self::is_punctuator(&three_char) {
+                                text.push(chars.next().unwrap());
+                                column += 1;
+                                text.push(chars.next().unwrap());
+                                column += 1;
+                            } else if Self::is_punctuator(&two_char) {
+                                text.push(chars.next().unwrap());
+                                column += 1;
+                            }
+                        } else if Self::is_punctuator(&two_char) {
                             text.push(chars.next().unwrap());
                             column += 1;
                         }
