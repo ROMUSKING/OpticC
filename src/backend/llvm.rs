@@ -794,6 +794,26 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
 
         let lhs_int = lhs_val.into_int_value();
         let rhs_int = rhs_val.into_int_value();
+        // Coerce both int operands to the same width (promote narrower to wider)
+        let (lhs_int, rhs_int) = {
+            let lw = lhs_int.get_type().get_bit_width();
+            let rw = rhs_int.get_type().get_bit_width();
+            if lw == rw {
+                (lhs_int, rhs_int)
+            } else if lw < rw {
+                let extended = self
+                    .builder
+                    .build_int_s_extend(lhs_int, rhs_int.get_type(), "assign_sext_lhs")
+                    .map_err(|_| BackendError::InvalidNode)?;
+                (extended, rhs_int)
+            } else {
+                let extended = self
+                    .builder
+                    .build_int_s_extend(rhs_int, lhs_int.get_type(), "assign_sext_rhs")
+                    .map_err(|_| BackendError::InvalidNode)?;
+                (lhs_int, extended)
+            }
+        };
         match op_code {
             1 => Ok(self
                 .builder
@@ -1077,13 +1097,80 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                     self.builder
                         .build_return(Some(&ptr_type.const_null()))
                         .map_err(|_| BackendError::InvalidNode)?;
-                } else {
+                } else if let BasicTypeEnum::FloatType(ft) = ret_llvm {
+                    self.builder
+                        .build_return(Some(&ft.const_float(0.0)))
+                        .map_err(|_| BackendError::InvalidNode)?;
+                } else if ret_llvm.is_int_type() {
                     let int_type = ret_llvm.into_int_type();
                     self.builder
                         .build_return(Some(&int_type.const_int(0, false)))
                         .map_err(|_| BackendError::InvalidNode)?;
+                } else if let BasicTypeEnum::StructType(st) = ret_llvm {
+                    let zero = st.const_zero();
+                    self.builder
+                        .build_return(Some(&zero))
+                        .map_err(|_| BackendError::InvalidNode)?;
+                } else if let BasicTypeEnum::ArrayType(at) = ret_llvm {
+                    let zero = at.const_zero();
+                    self.builder
+                        .build_return(Some(&zero))
+                        .map_err(|_| BackendError::InvalidNode)?;
+                } else {
+                    // Fallback: try int, ignore error if it doesn't work
+                    let _ = self.builder.build_return(Some(
+                        &self.context.i32_type().const_int(0, false),
+                    ));
                 }
             }
+        }
+
+        // Clean up empty/unreachable basic blocks to keep LLVM IR valid.
+        // Walk all blocks: if a block has no predecessors (and is not the entry block),
+        // and has no terminator, add an `unreachable` instruction.
+        // Also ensure every block has a terminator.
+        let mut block_opt = function.get_first_basic_block();
+        let entry_block = function.get_first_basic_block();
+        while let Some(bb) = block_opt {
+            let next = bb.get_next_basic_block();
+            if bb.get_terminator().is_none() {
+                self.builder.position_at_end(bb);
+                // Check if block is the entry or has uses (predecessors)
+                if Some(bb) == entry_block {
+                    // Entry block: add default return
+                    if is_void_ret {
+                        let _ = self.builder.build_return(None);
+                    } else if let BasicTypeEnum::PointerType(pt) = ret_llvm {
+                        let _ = self.builder.build_return(Some(&pt.const_null()));
+                    } else if let BasicTypeEnum::FloatType(ft) = ret_llvm {
+                        let _ = self.builder.build_return(Some(&ft.const_float(0.0)));
+                    } else if ret_llvm.is_int_type() {
+                        let _ = self
+                            .builder
+                            .build_return(Some(&ret_llvm.into_int_type().const_int(0, false)));
+                    } else {
+                        let _ = self.builder.build_unreachable();
+                    }
+                } else {
+                    let _ = self.builder.build_unreachable();
+                }
+            }
+            block_opt = next;
+        }
+
+        // Remove truly dead blocks (no predecessors, not entry, only have unreachable)
+        let mut block_opt = function.get_first_basic_block();
+        while let Some(bb) = block_opt {
+            let next = bb.get_next_basic_block();
+            if Some(bb) != entry_block
+                && bb.get_first_use().is_none()
+                && bb.get_first_instruction()
+                    .map(|i| i.get_opcode() == inkwell::values::InstructionOpcode::Unreachable)
+                    .unwrap_or(false)
+            {
+                unsafe { bb.delete().ok(); }
+            }
+            block_opt = next;
         }
 
         self.current_return_type = None;
@@ -1167,7 +1254,16 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
         val: BasicValueEnum<'ctx>,
     ) -> Result<inkwell::values::IntValue<'ctx>, BackendError> {
         if val.is_int_value() {
-            Ok(val.into_int_value())
+            let int_val = val.into_int_value();
+            // If already i1, no conversion needed
+            if int_val.get_type().get_bit_width() == 1 {
+                return Ok(int_val);
+            }
+            // Compare against zero to produce i1
+            let zero = int_val.get_type().const_zero();
+            self.builder
+                .build_int_compare(inkwell::IntPredicate::NE, int_val, zero, "tobool")
+                .map_err(|_| BackendError::InvalidNode)
         } else if val.is_pointer_value() {
             let ptr_val = val.into_pointer_value();
             let ptr_int = self
@@ -1180,7 +1276,7 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                 .map_err(|_| BackendError::InvalidNode)
         } else if val.is_float_value() {
             let float_val = val.into_float_value();
-            let zero = self.context.f64_type().const_float(0.0);
+            let zero = float_val.get_type().const_float(0.0);
             self.builder
                 .build_float_compare(
                     inkwell::FloatPredicate::ONE,
@@ -1409,6 +1505,18 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
     }
 
     fn lower_return_stmt(&mut self, arena: &Arena, node: &CAstNode) -> Result<(), BackendError> {
+        // If function is void, always emit ret void regardless of expression
+        if self.current_return_type.is_none() {
+            // Evaluate expression for side effects if present
+            if node.first_child != NodeOffset::NULL {
+                let _ = self.lower_expr(arena, node.first_child);
+            }
+            self.builder
+                .build_return(None)
+                .map_err(|_| BackendError::InvalidNode)?;
+            return Ok(());
+        }
+
         if node.first_child != NodeOffset::NULL {
             if let Some(val) = self.lower_expr(arena, node.first_child)? {
                 if let Some(BasicTypeEnum::PointerType(ptr_type)) = self.current_return_type {
@@ -1417,43 +1525,170 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                         self.builder
                             .build_return(Some(&ptr_val))
                             .map_err(|_| BackendError::InvalidNode)?;
-                    } else if val.is_int_value()
-                        && val.into_int_value().get_zero_extended_constant() == Some(0)
-                    {
+                    } else if val.is_int_value() {
+                        let int_val = val.into_int_value();
+                        if int_val.get_zero_extended_constant() == Some(0) {
+                            self.builder
+                                .build_return(Some(&ptr_type.const_null()))
+                                .map_err(|_| BackendError::InvalidNode)?;
+                        } else {
+                            // Non-zero int returned as pointer: inttoptr
+                            let cast = self
+                                .builder
+                                .build_int_to_ptr(int_val, ptr_type, "int2ptr_ret")
+                                .map_err(|_| BackendError::InvalidNode)?;
+                            self.builder
+                                .build_return(Some(&cast))
+                                .map_err(|_| BackendError::InvalidNode)?;
+                        }
+                    } else {
+                        // Unknown value type for pointer return - return null
                         self.builder
                             .build_return(Some(&ptr_type.const_null()))
                             .map_err(|_| BackendError::InvalidNode)?;
+                    }
+                } else if let Some(BasicTypeEnum::FloatType(_ft)) = self.current_return_type {
+                    if val.is_float_value() {
+                        self.builder
+                            .build_return(Some(&val.into_float_value()))
+                            .map_err(|_| BackendError::InvalidNode)?;
+                    } else if val.is_int_value() {
+                        // int returned as float: sitofp
+                        let int_val = val.into_int_value();
+                        let cast = self
+                            .builder
+                            .build_signed_int_to_float(int_val, _ft, "int2fp_ret")
+                            .map_err(|_| BackendError::InvalidNode)?;
+                        self.builder
+                            .build_return(Some(&cast))
+                            .map_err(|_| BackendError::InvalidNode)?;
                     } else {
-                        return Err(BackendError::InvalidNode);
+                        self.builder
+                            .build_return(Some(&_ft.const_float(0.0)))
+                            .map_err(|_| BackendError::InvalidNode)?;
                     }
                 } else if val.is_int_value() {
                     let int_val = val.into_int_value();
-                    self.builder
-                        .build_return(Some(&int_val))
-                        .map_err(|_| BackendError::InvalidNode)?;
+                    // Match the return type width
+                    if let Some(ret_ty) = self.current_return_type {
+                        if ret_ty.is_int_type() {
+                            let ret_int = ret_ty.into_int_type();
+                            let val_width = int_val.get_type().get_bit_width();
+                            let ret_width = ret_int.get_bit_width();
+                            if val_width < ret_width {
+                                let extended = self
+                                    .builder
+                                    .build_int_s_extend(int_val, ret_int, "sext_ret")
+                                    .map_err(|_| BackendError::InvalidNode)?;
+                                self.builder
+                                    .build_return(Some(&extended))
+                                    .map_err(|_| BackendError::InvalidNode)?;
+                            } else if val_width > ret_width {
+                                let truncated = self
+                                    .builder
+                                    .build_int_truncate(int_val, ret_int, "trunc_ret")
+                                    .map_err(|_| BackendError::InvalidNode)?;
+                                self.builder
+                                    .build_return(Some(&truncated))
+                                    .map_err(|_| BackendError::InvalidNode)?;
+                            } else {
+                                self.builder
+                                    .build_return(Some(&int_val))
+                                    .map_err(|_| BackendError::InvalidNode)?;
+                            }
+                        } else {
+                            self.builder
+                                .build_return(Some(&int_val))
+                                .map_err(|_| BackendError::InvalidNode)?;
+                        }
+                    } else {
+                        self.builder
+                            .build_return(Some(&int_val))
+                            .map_err(|_| BackendError::InvalidNode)?;
+                    }
                 } else if val.is_float_value() {
                     let float_val = val.into_float_value();
                     self.builder
                         .build_return(Some(&float_val))
                         .map_err(|_| BackendError::InvalidNode)?;
+                } else if val.is_pointer_value() {
+                    // Pointer returned in non-pointer function - ptrtoint
+                    if let Some(ret_ty) = self.current_return_type {
+                        if ret_ty.is_int_type() {
+                            let ptr_val = val.into_pointer_value();
+                            let cast = self
+                                .builder
+                                .build_ptr_to_int(ptr_val, ret_ty.into_int_type(), "ptr2int_ret")
+                                .map_err(|_| BackendError::InvalidNode)?;
+                            self.builder
+                                .build_return(Some(&cast))
+                                .map_err(|_| BackendError::InvalidNode)?;
+                        } else {
+                            return Ok(());
+                        }
+                    } else {
+                        return Ok(());
+                    }
                 } else {
                     return Ok(());
                 }
             } else {
-                if let Some(BasicTypeEnum::PointerType(ptr_type)) = self.current_return_type {
-                    self.builder
-                        .build_return(Some(&ptr_type.const_null()))
-                        .map_err(|_| BackendError::InvalidNode)?;
-                } else {
-                    self.builder
-                        .build_return(Some(&self.context.i32_type().const_int(0, false)))
-                        .map_err(|_| BackendError::InvalidNode)?;
+                // lower_expr returned None - return a default zero/null for the function return type
+                match self.current_return_type {
+                    None => {
+                        self.builder
+                            .build_return(None)
+                            .map_err(|_| BackendError::InvalidNode)?;
+                    }
+                    Some(BasicTypeEnum::PointerType(ptr_type)) => {
+                        self.builder
+                            .build_return(Some(&ptr_type.const_null()))
+                            .map_err(|_| BackendError::InvalidNode)?;
+                    }
+                    Some(BasicTypeEnum::FloatType(ft)) => {
+                        self.builder
+                            .build_return(Some(&ft.const_float(0.0)))
+                            .map_err(|_| BackendError::InvalidNode)?;
+                    }
+                    Some(ret_ty) if ret_ty.is_int_type() => {
+                        let int_type = ret_ty.into_int_type();
+                        self.builder
+                            .build_return(Some(&int_type.const_int(0, false)))
+                            .map_err(|_| BackendError::InvalidNode)?;
+                    }
+                    Some(_) => {
+                        self.builder
+                            .build_return(Some(&self.context.i32_type().const_int(0, false)))
+                            .map_err(|_| BackendError::InvalidNode)?;
+                    }
                 }
             }
         } else {
-            self.builder
-                .build_return(None)
-                .map_err(|_| BackendError::InvalidNode)?;
+            // Empty return statement: use `ret void` only if the function is void,
+            // otherwise return a zero/null default to keep LLVM IR valid.
+            match self.current_return_type {
+                None => {
+                    self.builder
+                        .build_return(None)
+                        .map_err(|_| BackendError::InvalidNode)?;
+                }
+                Some(BasicTypeEnum::PointerType(ptr_type)) => {
+                    self.builder
+                        .build_return(Some(&ptr_type.const_null()))
+                        .map_err(|_| BackendError::InvalidNode)?;
+                }
+                Some(BasicTypeEnum::FloatType(ft)) => {
+                    self.builder
+                        .build_return(Some(&ft.const_float(0.0)))
+                        .map_err(|_| BackendError::InvalidNode)?;
+                }
+                Some(ret_ty) => {
+                    let int_type = ret_ty.into_int_type();
+                    self.builder
+                        .build_return(Some(&int_type.const_int(0, false)))
+                        .map_err(|_| BackendError::InvalidNode)?;
+                }
+            }
         }
         Ok(())
     }
@@ -1763,6 +1998,27 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
         } else {
             let lhs_int = lhs_val.into_int_value();
             let rhs_int = rhs_val.into_int_value();
+
+            // Coerce both int operands to the same width (promote narrower to wider)
+            let (lhs_int, rhs_int) = {
+                let lw = lhs_int.get_type().get_bit_width();
+                let rw = rhs_int.get_type().get_bit_width();
+                if lw == rw {
+                    (lhs_int, rhs_int)
+                } else if lw < rw {
+                    let extended = self
+                        .builder
+                        .build_int_s_extend(lhs_int, rhs_int.get_type(), "sext_lhs")
+                        .map_err(|_| BackendError::InvalidNode)?;
+                    (extended, rhs_int)
+                } else {
+                    let extended = self
+                        .builder
+                        .build_int_s_extend(rhs_int, lhs_int.get_type(), "sext_rhs")
+                        .map_err(|_| BackendError::InvalidNode)?;
+                    (lhs_int, extended)
+                }
+            };
 
             match node.data {
                 1 => self
