@@ -1110,6 +1110,39 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
         }
     }
 
+    /// Coerce any BasicValueEnum to an i1 boolean for use in conditionals.
+    fn coerce_to_bool(
+        &self,
+        val: BasicValueEnum<'ctx>,
+    ) -> Result<inkwell::values::IntValue<'ctx>, BackendError> {
+        if val.is_int_value() {
+            Ok(val.into_int_value())
+        } else if val.is_pointer_value() {
+            let ptr_val = val.into_pointer_value();
+            let ptr_int = self
+                .builder
+                .build_ptr_to_int(ptr_val, self.context.i64_type(), "ptr2int_cond")
+                .map_err(|_| BackendError::InvalidNode)?;
+            let zero = self.context.i64_type().const_zero();
+            self.builder
+                .build_int_compare(inkwell::IntPredicate::NE, ptr_int, zero, "ptr_nonnull")
+                .map_err(|_| BackendError::InvalidNode)
+        } else if val.is_float_value() {
+            let float_val = val.into_float_value();
+            let zero = self.context.f64_type().const_float(0.0);
+            self.builder
+                .build_float_compare(
+                    inkwell::FloatPredicate::ONE,
+                    float_val,
+                    zero,
+                    "float_nz",
+                )
+                .map_err(|_| BackendError::InvalidNode)
+        } else {
+            Err(BackendError::InvalidNode)
+        }
+    }
+
     fn lower_if_stmt(&mut self, arena: &Arena, node: &CAstNode) -> Result<(), BackendError> {
         // kind=41: first_child=cond_wrap(kind=0)
         //   cond_wrap.first_child=condition_expr, cond_wrap.next_sibling=body_wrap(kind=0)
@@ -1139,11 +1172,7 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
             .lower_expr(arena, cond_offset)?
             .ok_or(BackendError::InvalidNode)?;
 
-        let cond_int = if cond_val.is_int_value() {
-            cond_val.into_int_value()
-        } else {
-            return Ok(());
-        };
+        let cond_int = self.coerce_to_bool(cond_val)?;
 
         let then_bb = self.context.append_basic_block(function, "then");
         let else_bb = self.context.append_basic_block(function, "else");
@@ -1218,11 +1247,7 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
         let cond_val = self
             .lower_expr(arena, cond_offset)?
             .ok_or(BackendError::InvalidNode)?;
-        let cond_int = if cond_val.is_int_value() {
-            cond_val.into_int_value()
-        } else {
-            return Ok(());
-        };
+        let cond_int = self.coerce_to_bool(cond_val)?;
         self.builder
             .build_conditional_branch(cond_int, body_bb, end_bb)
             .map_err(|_| BackendError::InvalidNode)?;
@@ -1294,11 +1319,7 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
         self.builder.position_at_end(cond_bb);
         if cond_offset != NodeOffset::NULL {
             if let Some(cond_val) = self.lower_expr(arena, cond_offset)? {
-                let cond_int = if cond_val.is_int_value() {
-                    cond_val.into_int_value()
-                } else {
-                    return Ok(());
-                };
+                let cond_int = self.coerce_to_bool(cond_val)?;
                 self.builder
                     .build_conditional_branch(cond_int, body_bb, end_bb)
                     .map_err(|_| BackendError::InvalidNode)?;
@@ -1537,8 +1558,87 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
             .ok_or(BackendError::InvalidNode)?;
 
         let use_float = lhs_val.is_float_value() || rhs_val.is_float_value();
+        let use_pointer = lhs_val.is_pointer_value() || rhs_val.is_pointer_value();
 
-        let result: BasicValueEnum = if use_float {
+        let result: BasicValueEnum = if use_pointer {
+            // Pointer comparisons: convert both sides to intptr for comparison
+            let ptr_int_type = self.context.i64_type();
+            let lhs_int = if lhs_val.is_pointer_value() {
+                self.builder
+                    .build_ptr_to_int(lhs_val.into_pointer_value(), ptr_int_type, "ptr2int_lhs")
+                    .map_err(|_| BackendError::InvalidNode)?
+            } else if lhs_val.is_int_value() {
+                let iv = lhs_val.into_int_value();
+                if iv.get_type().get_bit_width() != 64 {
+                    self.builder
+                        .build_int_z_extend(iv, ptr_int_type, "zext_lhs")
+                        .map_err(|_| BackendError::InvalidNode)?
+                } else {
+                    iv
+                }
+            } else {
+                return Err(BackendError::InvalidNode);
+            };
+            let rhs_int = if rhs_val.is_pointer_value() {
+                self.builder
+                    .build_ptr_to_int(rhs_val.into_pointer_value(), ptr_int_type, "ptr2int_rhs")
+                    .map_err(|_| BackendError::InvalidNode)?
+            } else if rhs_val.is_int_value() {
+                let iv = rhs_val.into_int_value();
+                if iv.get_type().get_bit_width() != 64 {
+                    self.builder
+                        .build_int_z_extend(iv, ptr_int_type, "zext_rhs")
+                        .map_err(|_| BackendError::InvalidNode)?
+                } else {
+                    iv
+                }
+            } else {
+                return Err(BackendError::InvalidNode);
+            };
+            match node.data {
+                1 => self
+                    .builder
+                    .build_int_add(lhs_int, rhs_int, "ptr_add")
+                    .map_err(|_| BackendError::InvalidNode)?
+                    .into(),
+                2 => self
+                    .builder
+                    .build_int_sub(lhs_int, rhs_int, "ptr_sub")
+                    .map_err(|_| BackendError::InvalidNode)?
+                    .into(),
+                6 => self
+                    .builder
+                    .build_int_compare(inkwell::IntPredicate::EQ, lhs_int, rhs_int, "ptr_eq")
+                    .map_err(|_| BackendError::InvalidNode)?
+                    .into(),
+                7 => self
+                    .builder
+                    .build_int_compare(inkwell::IntPredicate::NE, lhs_int, rhs_int, "ptr_ne")
+                    .map_err(|_| BackendError::InvalidNode)?
+                    .into(),
+                8 => self
+                    .builder
+                    .build_int_compare(inkwell::IntPredicate::ULT, lhs_int, rhs_int, "ptr_lt")
+                    .map_err(|_| BackendError::InvalidNode)?
+                    .into(),
+                9 => self
+                    .builder
+                    .build_int_compare(inkwell::IntPredicate::UGT, lhs_int, rhs_int, "ptr_gt")
+                    .map_err(|_| BackendError::InvalidNode)?
+                    .into(),
+                10 => self
+                    .builder
+                    .build_int_compare(inkwell::IntPredicate::ULE, lhs_int, rhs_int, "ptr_le")
+                    .map_err(|_| BackendError::InvalidNode)?
+                    .into(),
+                11 => self
+                    .builder
+                    .build_int_compare(inkwell::IntPredicate::UGE, lhs_int, rhs_int, "ptr_ge")
+                    .map_err(|_| BackendError::InvalidNode)?
+                    .into(),
+                _ => return Err(BackendError::InvalidOperator(node.data)),
+            }
+        } else if use_float {
             let lhs_float = if lhs_val.is_float_value() {
                 lhs_val.into_float_value()
             } else {
