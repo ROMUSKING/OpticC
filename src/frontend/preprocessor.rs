@@ -544,9 +544,36 @@ impl Preprocessor {
                 }
                 _ => {
                     chars.next();
+                    let mut punct = ch.to_string();
+                    if ch == '.' && chars.peek() == Some(&'.') {
+                        let mut ellipsis = chars.clone();
+                        ellipsis.next();
+                        if ellipsis.next() == Some('.') {
+                            chars.next();
+                            chars.next();
+                            punct = "...".to_string();
+                        }
+                    } else if let Some(next) = chars.peek().copied() {
+                        let two_char = format!("{}{}", ch, next);
+                        if matches!(two_char.as_str(), "<<" | ">>") {
+                            let mut shift_lookahead = chars.clone();
+                            shift_lookahead.next();
+                            if shift_lookahead.next() == Some('=') {
+                                chars.next();
+                                chars.next();
+                                punct = format!("{}=", two_char);
+                            } else {
+                                chars.next();
+                                punct = two_char;
+                            }
+                        } else if Self::is_two_char_punctuator(&two_char) {
+                            chars.next();
+                            punct = two_char;
+                        }
+                    }
                     tokens.push(Token::new(
                         TokenKind::Punctuator,
-                        ch.to_string(),
+                        punct,
                         0,
                         0,
                         String::new(),
@@ -597,6 +624,31 @@ impl Preprocessor {
                 | "_Bool"
                 | "_Complex"
                 | "_Imaginary"
+        )
+    }
+
+    fn is_two_char_punctuator(text: &str) -> bool {
+        matches!(
+            text,
+            "==" | "!="
+                | "<="
+                | ">="
+                | "&&"
+                | "||"
+                | "<<"
+                | ">>"
+                | "++"
+                | "--"
+                | "->"
+                | "+="
+                | "-="
+                | "*="
+                | "/="
+                | "%="
+                | "&="
+                | "|="
+                | "^="
+                | "##"
         )
     }
 
@@ -833,10 +885,20 @@ impl Preprocessor {
                     }
                     if let Some(&next) = chars.peek() {
                         let two_char = format!("{}{}", ch, next);
-                        if matches!(
-                            two_char.as_str(),
-                            "==" | "!=" | "<=" | ">=" | "&&" | "||" | "<<" | ">>"
-                        ) {
+                        if matches!(two_char.as_str(), "<<" | ">>") {
+                            let mut shift_lookahead = chars.clone();
+                            shift_lookahead.next();
+                            if shift_lookahead.next() == Some('=') {
+                                chars.next();
+                                chars.next();
+                                col += 2;
+                                text = format!("{}=", two_char);
+                            } else {
+                                chars.next();
+                                col += 1;
+                                text = two_char;
+                            }
+                        } else if Self::is_two_char_punctuator(&two_char) {
                             chars.next();
                             col += 1;
                             text = two_char;

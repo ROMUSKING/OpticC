@@ -1022,18 +1022,18 @@ int main() {
 const MICRO_SQLITE_STRUCT_STATE: &str = r#"
 #include <stdio.h>
 
-typedef struct ParseState {
+struct ParseState {
     int opcode;
     int flags;
     int steps;
     int acc;
-} ParseState;
+};
 
 #define OPFLAG_IN1 0x01
 #define OP_Column 2
 
 int main() {
-    ParseState st;
+    struct ParseState st;
     st.opcode = OP_Column;
     st.flags = OPFLAG_IN1;
     st.steps = 0;
