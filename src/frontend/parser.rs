@@ -1764,7 +1764,7 @@ impl Parser {
     }
 
     fn parse_binary_op(&mut self, precedence: u8) -> Result<NodeOffset, ParseError> {
-        let mut left = self.parse_unary_expression()?;
+        let mut left = self.parse_cast_expression()?;
 
         loop {
             let (op_prec, op_code) = self.get_binary_operator();
@@ -1886,11 +1886,28 @@ impl Parser {
 
     fn parse_cast_expression(&mut self) -> Result<NodeOffset, ParseError> {
         if self.skip_punctuator("(") {
-            if self.is_type_specifier() {
+            if self.is_type_specifier() || self.is_type_qualifier() {
                 let type_spec = self.parse_declaration_specifiers()?;
+                // Handle abstract declarator (pointer/array part of cast type)
+                let mut cast_type = type_spec;
+                if self.current_token().text == "*" {
+                    let ptr_decl = self.parse_declarator()?;
+                    if ptr_decl != NodeOffset::NULL {
+                        // Chain declarator onto the specifier chain
+                        let mut last = cast_type;
+                        loop {
+                            let ns = self.arena.get(last).map(|n| n.next_sibling).unwrap_or(NodeOffset::NULL);
+                            if ns == NodeOffset::NULL { break; }
+                            last = ns;
+                        }
+                        if let Some(n) = self.arena.get_mut(last) {
+                            n.next_sibling = ptr_decl;
+                        }
+                    }
+                }
                 if self.skip_punctuator(")") {
                     let expr = self.parse_cast_expression()?;
-                    return Ok(self.alloc_node(70, 0, NodeOffset::NULL, type_spec, expr));
+                    return Ok(self.alloc_node(70, 0, NodeOffset::NULL, cast_type, expr));
                 }
             }
 

@@ -225,6 +225,22 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
             }
         }
 
+        // === Pass 1: Pre-register all function definitions with correct signatures ===
+        // This prevents auto-declarations with wrong types when functions call
+        // each other before their definitions are reached.
+        let mut prescan_offset = offset;
+        while prescan_offset != NodeOffset::NULL {
+            if let Some(node) = arena.get(prescan_offset) {
+                if node.kind == 23 {
+                    let _ = self.pre_register_func_def(arena, node);
+                }
+                prescan_offset = node.next_sibling;
+            } else {
+                break;
+            }
+        }
+
+        // === Pass 2: Compile all declarations and function bodies ===
         let mut child_offset = offset;
         while child_offset != NodeOffset::NULL {
             if let Some(node) = arena.get(child_offset) {
@@ -980,6 +996,81 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
         names
     }
 
+    /// Pre-register a function definition so it can be called before its body is compiled.
+    /// This extracts the signature (name, return type, parameter types) without
+    /// compiling the body.
+    fn pre_register_func_def(&mut self, arena: &Arena, node: &CAstNode) -> Result<(), BackendError> {
+        let mut func_name = "func".to_string();
+        let mut param_types: Vec<BasicMetadataTypeEnum> = Vec::new();
+        let mut return_llvm_type: Option<BasicTypeEnum<'ctx>> = None;
+        let mut is_void_ret = false;
+
+        let mut child_offset = node.first_child;
+        while child_offset != NodeOffset::NULL {
+            if let Some(child) = arena.get(child_offset) {
+                match child.kind {
+                    1..=6 | 83 => {
+                        is_void_ret = child.kind == 1;
+                        if !is_void_ret {
+                            return_llvm_type = Some(self.node_kind_to_llvm_type(child.kind));
+                        }
+                    }
+                    7..=9 => {
+                        if let Some(func_decl_offset) =
+                            self.find_function_declarator_offset(arena, child_offset)
+                        {
+                            if let Some(func_decl) = arena.get(func_decl_offset) {
+                                if !is_void_ret {
+                                    return_llvm_type = Some(self.declarator_llvm_type(
+                                        arena,
+                                        Some(child),
+                                        return_llvm_type.unwrap_or_else(|| {
+                                            self.context.i32_type().as_basic_type_enum()
+                                        }),
+                                    ));
+                                }
+                                if let Some(ident) = arena.get(func_decl.first_child) {
+                                    if ident.kind == 60 {
+                                        if let Some(name) = arena.get_string(NodeOffset(ident.data)) {
+                                            func_name = name.to_string();
+                                        }
+                                    }
+                                    let mut param_off = ident.next_sibling;
+                                    while param_off != NodeOffset::NULL {
+                                        if let Some(param) = arena.get(param_off) {
+                                            if param.kind == 24 {
+                                                let (ptype, _, _) =
+                                                    self.extract_param_type_name(arena, param);
+                                                param_types.push(ptype.into());
+                                            }
+                                            param_off = param.next_sibling;
+                                        } else {
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+                child_offset = child.next_sibling;
+            } else {
+                break;
+            }
+        }
+
+        let ret_llvm = return_llvm_type.unwrap_or_else(|| self.context.i32_type().as_basic_type_enum());
+        let fn_type = if is_void_ret {
+            self.context.void_type().fn_type(&param_types, false)
+        } else {
+            ret_llvm.fn_type(&param_types, false)
+        };
+        let function = self.module.add_function(&func_name, fn_type, None);
+        self.functions.insert(func_name, function);
+        Ok(())
+    }
+
     fn lower_func_decl(&mut self, arena: &Arena, node: &CAstNode) -> Result<(), BackendError> {
         let name = self.find_ident_name(arena, node);
         let func_name = name.as_deref().unwrap_or("func");
@@ -1084,7 +1175,9 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
         } else {
             ret_llvm.fn_type(&param_types, false)
         };
-        let function = self.module.add_function(&func_name, fn_type, None);
+        // Use the pre-registered function if available, otherwise create new
+        let function = self.module.get_function(&func_name)
+            .unwrap_or_else(|| self.module.add_function(&func_name, fn_type, None));
         self.functions.insert(func_name.clone(), function);
 
         let entry = self.context.append_basic_block(function, "entry");
