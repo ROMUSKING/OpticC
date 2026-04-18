@@ -328,6 +328,7 @@ impl BenchmarkRunner {
             ("sqlite_flags", MICRO_SQLITE_FLAGS),
             ("sqlite_varint", MICRO_SQLITE_VARINT),
             ("sqlite_struct_state", MICRO_SQLITE_STRUCT_STATE),
+            ("sqlite_arrow_cursor", MICRO_SQLITE_ARROW_CURSOR),
         ];
 
         for (name, source) in benchmarks {
@@ -1053,6 +1054,30 @@ int main() {
 }
 "#;
 
+const MICRO_SQLITE_ARROW_CURSOR: &str = r#"
+#include <stdio.h>
+
+struct BtCursor {
+    int state;
+    int step;
+};
+
+int main() {
+    struct BtCursor cur;
+    struct BtCursor *pCur = &cur;
+    pCur->state = 4;
+    pCur->step = 1;
+
+    while (pCur->step < 6) {
+        pCur->state = pCur->state + pCur->step;
+        pCur->step++;
+    }
+
+    printf("%d\n", pCur->state + pCur->step);
+    return 0;
+}
+"#;
+
 const COREUTILS_HELLO: &str = r#"
 #include <stdio.h>
 
@@ -1550,6 +1575,7 @@ mod tests {
         assert!(!MICRO_SQLITE_FLAGS.is_empty());
         assert!(!MICRO_SQLITE_VARINT.is_empty());
         assert!(!MICRO_SQLITE_STRUCT_STATE.is_empty());
+        assert!(!MICRO_SQLITE_ARROW_CURSOR.is_empty());
 
         assert!(MICRO_LOOP_SUM.contains("for"));
         assert!(MICRO_FUNC_CALL.contains("add("));
@@ -1559,6 +1585,7 @@ mod tests {
         assert!(MICRO_SQLITE_FLAGS.contains("__builtin_expect"));
         assert!(MICRO_SQLITE_VARINT.contains("0x7f"));
         assert!(MICRO_SQLITE_STRUCT_STATE.contains("ParseState"));
+        assert!(MICRO_SQLITE_ARROW_CURSOR.contains("pCur->state"));
     }
 
     #[test]

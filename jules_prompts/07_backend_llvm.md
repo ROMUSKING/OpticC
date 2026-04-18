@@ -16,11 +16,12 @@ The LLVM backend now supports typed lowering for several core C types. Current w
 - **Inline asm (`13_inline_asm.md`)**: The backend must lower `asm volatile` to LLVM inline asm instructions.
 - **Build system (`14_build_system.md`)**: The backend must output `.o` files (via `llc`) for linking, not just `.ll` files.
 
-## CURRENT STATUS (Verified 2026-04-17)
+## CURRENT STATUS (Verified 2026-04-18)
 
 ### IMPLEMENTED AND VERIFIED WORKING
 - [x] **Function definitions with params**: `lower_func_def` correctly navigates the new AST layout (specifiers → kind=9 → kind=40 body). Params chained as ident.next_sibling inside kind=9. Produces correct alloca+store+load pattern for params. Verified with `test_samples/simple.c` producing `define i32 @add(i32 %0, i32 %1)`.
 - [x] **Struct field access**: `lower_member_access` handles kind=69 dot-access via struct GEP. `struct_fields` map populated from `struct_tag_fields`. Verified with `test_samples/struct_test.c`.
+- [x] **Pointer-backed struct access**: pointer declarators now allocate as LLVM pointers, unary `&` returns lvalue pointers, and `lower_member_access` / `lower_lvalue_ptr` handle identifier-backed `p->field` loads and stores for local variables and parameters. Verified with `/tmp/arrow_write_read.c` lowering to `alloca ptr`, `store ptr %n, ptr %p`, and struct GEP loads/stores.
 - [x] **Array index**: `lower_array_index` handles kind=68 subscript via GEP.
 - [x] **Control flow**: if/while/for lower correctly with proper basic blocks. Verified with `test_samples/control_flow.c`.
 - [x] **Typed lowering**: Type-aware code generation for i8/i16/i32/i64/float/double.
@@ -40,13 +41,14 @@ The parser now chains child nodes entirely via first_child chains, not via next_
 - [ ] **if-then missing return**: `if (n <= 1) return n;` — the return in the then-branch is generated but the `lower_if_stmt` doesn't handle early-return; after the then block the merge block is created regardless, causing incorrect phi/flow.
 - [ ] **Assignment expressions**: `a = b` inside expressions (not declarations) needs `lower_assign_expr` to handle both pointer-store and variable update paths correctly.
 - [ ] **Phi nodes for ternary**: Both branches evaluated; needs proper SSA phi nodes.
-- [ ] **Arrow operator (kind=69, data=1)**: `p->field` (pointer member access) needs separate GEP path via load+struct_gep.
+- [ ] **Nested member bases**: `lower_member_access` / `lower_lvalue_ptr` now handle identifier-backed `p->field`, but chained forms like `p->next->field` still need recursive base-expression support instead of assuming the base is a single identifier.
 - [ ] **String literals**: `lower_string_const` uses node.data as a single byte; needs arena string lookup for full string content.
 - [ ] **printf/variadic**: Auto-declaration with variadic signature is incorrect for most libc functions. Need proper declaration matching for common functions.
 
 ## KNOWN CAVEATS
 - **LLVM 18 target**: Targets `inkwell`'s `llvm18-1-prefer-dynamic` feature. `LLVM_SYS_181_PREFIX=/usr/lib/llvm-18` in `.cargo/config.toml`.
 - **Opaque pointers**: LLVM 18 uses opaque pointers. Loads must carry explicit pointee type.
+- **Pointer declarators**: current backend reconstructs pointer declarators from the parser AST and materializes them as opaque LLVM pointers via `Context::ptr_type`. This is enough for current SQLite-style micro benchmarks, but richer declarator forms still need dedicated handling.
 - **inkwell 0.9**: Pass manager API changed; `optimize()` is a no-op stub.
 - **Symbol table scope**: `self.variables.clear()` on each function entry. No nested block scope.
 - **Debug eprintln!s**: Parser and backend have many `eprintln!` calls. Do NOT use `sed -i 's/eprintln!.*//'` — it will break multi-line macros. Use a Python script with exact string replacement instead.
