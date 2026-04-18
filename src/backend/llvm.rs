@@ -609,7 +609,7 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
             }
         }) {
             Some(name) => name,
-            None => return Ok(None),
+            None => { eprintln!("[DEBUG ptr] base_name not found"); return Ok(None); },
         };
 
         let field_name = match arena.get(field_offset).and_then(|n| {
@@ -620,8 +620,12 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
             }
         }) {
             Some(name) => name,
-            None => return Ok(None),
+            None => { eprintln!("[DEBUG ptr] field_name not found"); return Ok(None); },
         };
+
+        eprintln!("[DEBUG ptr] base_name={:?}, field_name={:?}, node.data={}", base_name, field_name, node.data);
+        eprintln!("[DEBUG ptr] struct_fields keys: {:?}", self.struct_fields.keys().collect::<Vec<_>>());
+        eprintln!("[DEBUG ptr] pointer_struct_types keys: {:?}", self.pointer_struct_types.keys().collect::<Vec<_>>());
 
         let field_idx = self
             .struct_fields
@@ -629,8 +633,11 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
             .and_then(|fields| fields.iter().position(|f| f == &field_name))
             .unwrap_or(0) as u32;
 
+        eprintln!("[DEBUG ptr] field_idx={}", field_idx);
+
         if node.data == 1 {
             let Some(struct_type) = self.pointer_struct_types.get(&base_name).copied() else {
+                eprintln!("[DEBUG ptr] pointer_struct_types missing {:?}", base_name);
                 return Ok(None);
             };
             let base_ptr = match self.lower_expr(arena, base_offset)? {
@@ -1550,12 +1557,26 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
         let lhs_offset = node.first_child;
         let rhs_offset = node.next_sibling;
 
+        eprintln!("[DEBUG binop] data={}, lhs_offset={:?}, rhs_offset={:?}", node.data, lhs_offset, rhs_offset);
+        if let Some(ln) = arena.get(lhs_offset) {
+            eprintln!("[DEBUG binop]   lhs kind={}, data={}", ln.kind, ln.data);
+        } else {
+            eprintln!("[DEBUG binop]   lhs -> None!");
+        }
+        if let Some(rn) = arena.get(rhs_offset) {
+            eprintln!("[DEBUG binop]   rhs kind={}, data={}", rn.kind, rn.data);
+        } else {
+            eprintln!("[DEBUG binop]   rhs -> None!");
+        }
+
         let lhs_val = self
-            .lower_expr(arena, lhs_offset)?
-            .ok_or(BackendError::InvalidNode)?;
+            .lower_expr(arena, lhs_offset)?;
+        eprintln!("[DEBUG binop]   lhs_val = {:?}", lhs_val.as_ref().map(|v| v.get_type().to_string()));
+        let lhs_val = lhs_val.ok_or(BackendError::InvalidNode)?;
         let rhs_val = self
-            .lower_expr(arena, rhs_offset)?
-            .ok_or(BackendError::InvalidNode)?;
+            .lower_expr(arena, rhs_offset)?;
+        eprintln!("[DEBUG binop]   rhs_val = {:?}", rhs_val.as_ref().map(|v| v.get_type().to_string()));
+        let rhs_val = rhs_val.ok_or(BackendError::InvalidNode)?;
 
         let use_float = lhs_val.is_float_value() || rhs_val.is_float_value();
         let use_pointer = lhs_val.is_pointer_value() || rhs_val.is_pointer_value();
@@ -2036,6 +2057,27 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
         let base_offset = node.first_child;
         let field_node_offset = node.next_sibling;
 
+        eprintln!("[DEBUG member_access] data={}, first_child={:?}, next_sibling={:?}",
+            node.data, base_offset, field_node_offset);
+        if let Some(bn) = arena.get(base_offset) {
+            eprintln!("[DEBUG member_access]   base: kind={}, data={}", bn.kind, bn.data);
+            if bn.kind == 60 {
+                if let Some(s) = arena.get_string(NodeOffset(bn.data)) {
+                    eprintln!("[DEBUG member_access]   base name: {:?}", s);
+                }
+            }
+        }
+        if let Some(fn_) = arena.get(field_node_offset) {
+            eprintln!("[DEBUG member_access]   field_node: kind={}, data={}", fn_.kind, fn_.data);
+            if fn_.kind == 60 {
+                if let Some(s) = arena.get_string(NodeOffset(fn_.data)) {
+                    eprintln!("[DEBUG member_access]   field name: {:?}", s);
+                }
+            }
+        } else {
+            eprintln!("[DEBUG member_access]   field_node -> None for offset {:?}", field_node_offset);
+        }
+
         let base_name_str: Option<String> = arena.get(base_offset).and_then(|n| {
             if n.kind == 60 {
                 arena.get_string(NodeOffset(n.data)).map(|s| s.to_string())
@@ -2052,9 +2094,28 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
             }
         });
 
-        let field_name = match (base_name_str, field_name_str) {
-            (Some(_), Some(f)) => f,
-            _ => return Ok(None),
+        let field_name = match (base_name_str.as_ref(), field_name_str.as_ref()) {
+            (Some(_), Some(f)) => f.clone(),
+            _ => {
+                eprintln!("[DEBUG] lower_member_access: base_name={:?}, field_name={:?}, base_offset={:?}, field_node_offset={:?}",
+                    base_name_str, field_name_str, base_offset, field_node_offset);
+                if let Some(bn) = arena.get(base_offset) {
+                    eprintln!("[DEBUG]   base_node: kind={}, data={}, first_child={:?}, next_sibling={:?}",
+                        bn.kind, bn.data, bn.first_child, bn.next_sibling);
+                }
+                if let Some(fn_) = arena.get(field_node_offset) {
+                    eprintln!("[DEBUG]   field_node: kind={}, data={}, first_child={:?}, next_sibling={:?}",
+                        fn_.kind, fn_.data, fn_.first_child, fn_.next_sibling);
+                    if fn_.kind == 60 {
+                        if let Some(s) = arena.get_string(NodeOffset(fn_.data)) {
+                            eprintln!("[DEBUG]   field_node string: {:?}", s);
+                        }
+                    }
+                } else {
+                    eprintln!("[DEBUG]   field_node_offset {:?} -> None!", field_node_offset);
+                }
+                return Ok(None);
+            },
         };
 
         let Some((field_ptr, field_llvm_type)) = self.lower_member_access_ptr(arena, node)? else {
