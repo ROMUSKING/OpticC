@@ -9,6 +9,10 @@ use inkwell::basic_block::BasicBlock;
 use inkwell::AddressSpace;
 use std::collections::HashMap;
 
+/// Maximum number of switch entries to emit for a single `case LOW ... HIGH:` range.
+/// Prevents blowup for huge ranges like `case 0 ... 0xFFFFFFFF:`.
+const MAX_CASE_RANGE_EXPANSION: u64 = 256;
+
 pub struct LlvmBackend<'ctx, 'types> {
     context: &'ctx Context,
     module: Module<'ctx>,
@@ -2159,7 +2163,7 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                         let hi_const = hi_raw.get_zero_extended_constant().unwrap_or(0);
                         // Cap range to prevent huge switch tables (max 256 entries)
                         let count = if hi_const >= lo_const {
-                            (hi_const - lo_const + 1).min(256)
+                            (hi_const - lo_const + 1).min(MAX_CASE_RANGE_EXPANSION)
                         } else {
                             1
                         };

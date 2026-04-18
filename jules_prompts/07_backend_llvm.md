@@ -52,8 +52,8 @@ The parser now chains child nodes entirely via first_child chains, not via next_
 
 ### KERNEL-PATH NEXT STEPS (Phase 3, Milestones 4–7)
 - [x] **Inline asm codegen (M4)**: `lower_asm_stmt` implemented. Reads template from arena, builds constraint string from operand children, creates InlineAsm via `context.create_inline_asm()`, calls via `build_indirect_call()`, stores outputs to lvalue pointers. Handles volatile, memory/cc clobbers, readwrite operands.
-- [ ] **Computed goto (M5)**: Lower `&&label` to LLVM `blockaddress(@fn, %bb)`. Lower `goto *expr` to LLVM `indirectbr`. Both need the label_blocks map from goto/label codegen.
-- [ ] **Case ranges (M5)**: `case 1 ... 5:` → emit multiple switch cases or an icmp range-check branch.
+- [x] **Computed goto (M5)**: `lower_label_addr` produces LLVM blockaddress via `BasicBlock::get_address()`. `lower_goto_stmt` handles computed goto (`goto *expr`) via `build_indirect_branch`. All known label_blocks passed as possible destinations.
+- [x] **Case ranges (M5)**: `case 1 ... 5:` parsed as kind=54, expanded to multiple switch entries in `collect_switch_cases`. Capped at 256 entries per range.
 - [ ] **Attribute lowering (M6)**: `__attribute__((weak))` → LLVM `weak` linkage. `__attribute__((section("name")))` → LLVM `section`. `__attribute__((visibility("hidden")))` → LLVM `hidden` visibility. `__attribute__((aligned(N)))` → LLVM alignment metadata.
 - [ ] **Block scope (M6)**: Implement nested variable scoping instead of clearing `variables` per function. Required for kernel code with deeply nested blocks that shadow outer variables.
 - [ ] **Bitfield support**: Kernel structs use bitfields extensively. Need GEP + shift/mask patterns for bitfield access.

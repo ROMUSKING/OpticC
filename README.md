@@ -98,9 +98,9 @@ GNU C extensions, inline assembly, Kbuild integration, 30M+ LOC scale.
 - ✅ Memory and CC clobber handling
 - ✅ `__builtin_alloca`, `__builtin_add/sub/mul_overflow`, `__sync_synchronize`
 
-**Milestone 5 📋 — Computed Goto & Advanced Control Flow:**
-- 📋 `&&label` → LLVM `blockaddress`, `goto *expr` → LLVM `indirectbr`
-- 📋 Case ranges (`case 1 ... 5:`)
+**Milestone 5 ✅ — Computed Goto & Advanced Control Flow (completed 2026-04-18):**
+- ✅ `&&label` → LLVM `blockaddress`, `goto *expr` → LLVM `indirectbr`
+- ✅ Case ranges (`case 1 ... 5:`) → multiple switch entries
 
 **Milestone 6 📋 — System Headers & Multi-File Compilation:**
 - 📋 Preprocessor system include path resolution (`-I /usr/include`)

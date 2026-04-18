@@ -37,11 +37,13 @@ Arena, DB, Lexer, Macro, Parser, LLVM backend, analysis, and VFS code are all pr
 - [x] Test with kernel-style asm patterns (barriers, register moves)
 - [x] 5 end-to-end backend tests added
 
-**Milestone 5 — Computed Goto & Advanced Control Flow**:
-- [ ] Parse `&&label` (label-as-value, GCC extension) → AST node kind
-- [ ] Parse `goto *expr` (computed goto) → AST node kind
-- [ ] Backend: lower `&&label` to LLVM blockaddress, `goto *expr` to LLVM indirectbr
-- [ ] Case ranges: `case 1 ... 5:` → multiple switch cases or range check
+**Milestone 5 — Computed Goto & Advanced Control Flow** (✅ COMPLETED 2026-04-18):
+- [x] Parse `&&label` (label-as-value, GCC extension) → kind=203 AST node
+- [x] Parse `goto *expr` (computed goto) → kind=49 with data=0, first_child=expr
+- [x] Backend: lower `&&label` to LLVM blockaddress via BasicBlock::get_address()
+- [x] Backend: lower `goto *expr` to LLVM indirectbr with all known label_blocks as destinations
+- [x] Case ranges: `case 1 ... 5:` → kind=54 node, expanded to multiple switch entries
+- [x] 4 end-to-end tests added
 
 **Milestone 6 — System Header & Multi-File Compilation**:
 - [ ] Preprocessor: resolve `#include <stdio.h>` from system include paths (/usr/include)

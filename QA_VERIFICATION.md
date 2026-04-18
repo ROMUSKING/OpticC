@@ -180,7 +180,7 @@ cat /tmp/optic_vfs/path/to/source.c
 cd optic_c && cargo build
 
 # Run all tests
-cargo test   # 319 passed, 0 failed
+cargo test   # 323 passed, 0 failed
 
 # Run specific component tests
 cargo test --lib arena
@@ -231,11 +231,13 @@ cargo test --lib vfs
 - [x] Add `__builtin_alloca`, `__builtin_add/sub/mul_overflow`, `__sync_synchronize`
 - [x] 8 new end-to-end tests (5 asm, 3 builtins)
 
-### Milestone 5: Computed Goto & Advanced Control Flow 📋
-- [ ] Parse `&&label` (label-as-value) → new AST node kind
-- [ ] Parse `goto *expr` (computed goto) → new AST node kind
-- [ ] Backend: `&&label` → LLVM `blockaddress`, `goto *expr` → LLVM `indirectbr`
-- [ ] Case ranges (`case 1 ... 5:`)
+### Milestone 5: Computed Goto & Advanced Control Flow ✅ (completed 2026-04-18)
+- [x] Parse `&&label` (label-as-value) → kind=203 AST node (in gnu_extensions.rs)
+- [x] Parse `goto *expr` (computed goto) → kind=49 with data=0, first_child=expr
+- [x] Backend: `&&label` → LLVM `blockaddress` via `BasicBlock::get_address()`
+- [x] Backend: `goto *expr` → LLVM `indirectbr` with all known label_blocks as destinations
+- [x] Case ranges (`case 1 ... 5:`) → kind=54 node, expanded to multiple switch entries (max 256)
+- [x] 4 end-to-end tests (label_addr, computed_goto, case_range, case_range_single)
 
 ### Milestone 6: System Headers & Multi-File Compilation 📋
 - [ ] Preprocessor system include path resolution (-I, /usr/include)
