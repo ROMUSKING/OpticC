@@ -1210,7 +1210,7 @@ impl Parser {
     }
 
     fn parse_parameter_declaration(&mut self) -> Result<NodeOffset, ParseError> {
-        if self.is_type_specifier() {
+        if self.is_type_specifier() || self.is_type_qualifier() || self.is_storage_class_specifier() {
             let specifiers = self.parse_declaration_specifiers()?;
             let declarator = if self.is_declarator_start() {
                 self.parse_declarator()?
