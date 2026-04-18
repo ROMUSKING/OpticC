@@ -45,15 +45,15 @@ OpticC already contains implementations for the core compiler pipeline plus the 
 ### Current Repository State
 - ✅ Core infrastructure exists: arena, DB, lexer, parser, backend, analysis, build, benchmark, integration
 - ✅ Advanced modules exist: preprocessor, type system, GNU extensions, inline asm
-- ✅ Phase 3 milestones 1–3 implemented: switch/goto/break/continue, 25+ builtins, variadic functions
-- ✅ All 311 tests pass (0 failures) as of 2026-04-18
-- ⚠️ The remaining work is on correctness gaps, SQLite-scale preprocessing edge cases, inline asm codegen, and optional VFS re-enablement
+- ✅ Phase 3 milestones 1–6a implemented: switch/goto/break/continue, 30+ builtins, variadic, inline asm codegen, computed goto+case ranges, attribute lowering, platform macros, block scope
+- ✅ All 330 tests pass (0 failures) as of 2026-04-18
+- ⚠️ Remaining work: system header include paths, multi-TU compilation, bitfields, designated initializers, compound literals
 
 ### Immediate Priorities for Agents
-1. **Milestone 4 (Inline Asm Codegen)**: Lower parsed ASM_STMT to LLVM `call asm`. This is the highest-priority kernel blocker.
-2. **Backend correctness**: Fix multi-variable declarations, assignment expressions, and nested member access (see `07_backend_llvm.md` REMAINING BUGS).
-3. **Preprocessor system headers**: Add `-I` include path support so `#include <stdio.h>` resolves from `/usr/include`.
-4. **Computed goto**: Parse `&&label` / `goto *expr` and lower to LLVM blockaddress/indirectbr.
+1. **Milestone 6b (System Headers & Multi-File)**: Add `-I` include path support, multi-TU compilation, bitfields, designated initializers.
+2. **Backend correctness**: Fix multi-variable declarations, assignment expressions, nested member access, string literals (see `07_backend_llvm.md` REMAINING BUGS).
+3. **Intermediate validation**: Try compiling real C files (echo.c, cat.c from coreutils) to find gaps.
+4. **Milestone 7 (Kernel-Scale)**: Compile minimal kernel module after M6b completes.
 5. Verify changes with `cargo test` and CLI smoke tests before reporting.
 6. Record only confirmed status and remaining blockers in the appropriate prompt file.
 
@@ -87,8 +87,13 @@ Before attempting the kernel, validate against simpler real-world C projects:
 - Switch/case codegen with fall-through, default, and break
 - Goto/label codegen with forward-reference label resolution
 - Break/continue in loops and switch
-- 25+ builtins via LLVM intrinsics and select patterns
+- 30+ builtins via LLVM intrinsics and select patterns
 - Variadic function support (va_start/va_end/va_copy → LLVM intrinsics)
 - Parser's internal lexer now handles 3-char punctuators (..., >>=, <<=)
-- Inline asm statements now parsed from parse_statement()
-- All 311 tests pass (0 failures)
+- Inline asm codegen (lower_asm_stmt → LLVM `call asm`)
+- Computed goto (&&label → blockaddress, goto *expr → indirectbr)
+- Case ranges (case 1 ... 5: → multiple switch entries)
+- Attribute lowering: weak, section, visibility, aligned, noreturn, cold
+- Platform predefined macros fallback: __linux__, __x86_64__, __LP64__, __BYTE_ORDER__, etc.
+- Block-scope variable shadowing via scope stack
+- All 330 tests pass (0 failures)

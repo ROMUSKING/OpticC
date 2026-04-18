@@ -98,11 +98,13 @@ OpticC already includes a GNU-extensions module. The current task is to improve 
 - [ ] `__builtin_ia32_*` x86 intrinsics → LLVM x86 intrinsics (SSE/AVX)
 - [x] `__builtin_alloca` → LLVM array alloca (dynamic stack allocation)
 
-### Attributes — NOT YET LOWERED (Kernel Priority)
-- [ ] `__attribute__((section("name")))` → LLVM section metadata (kernel .init.text etc.)
-- [ ] `__attribute__((weak))` → LLVM weak linkage
-- [ ] `__attribute__((visibility("hidden")))` → LLVM hidden visibility
-- [ ] `__attribute__((aligned(N)))` → LLVM alignment on alloca/global
+### Attributes — LOWERING STATUS (Kernel Priority)
+- [x] `__attribute__((section("name")))` → LLVM section metadata (kernel .init.text etc.) — implemented via `apply_function_attributes`/`apply_global_attributes`
+- [x] `__attribute__((weak))` → LLVM ExternalWeak linkage — implemented
+- [x] `__attribute__((visibility("hidden")))` → LLVM Hidden visibility via `as_global_value()` — implemented
+- [x] `__attribute__((aligned(N)))` → LLVM alignment on globals — implemented
+- [x] `__attribute__((noreturn))` → LLVM noreturn function attribute — implemented
+- [x] `__attribute__((cold))` → LLVM cold function attribute — implemented
 - [ ] `__attribute__((packed))` → struct layout without padding
 - [ ] `__attribute__((constructor/destructor))` → LLVM ctors/dtors arrays
 - [ ] `__attribute__((format(printf, m, n)))` → type checking (optional, can ignore)

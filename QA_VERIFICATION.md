@@ -2,13 +2,13 @@
 
 **Generated:** 2026-04-18
 **Project:** Optic C-Compiler
-**Status:** PHASE 3 IN PROGRESS
+**Status:** PHASE 3 IN PROGRESS — M6a COMPLETE
 
 ---
 
 ## Executive Summary
 
-The Optic C-Compiler project has completed all major Phase 1 and Phase 2 components. Phase 3 (Linux Kernel Compilation) milestones 1–3 are now implemented: switch/case/goto/label/break/continue codegen, 25+ compiler builtins, and variadic function support. All 311 tests pass with 0 failures.
+The Optic C-Compiler project has completed all major Phase 1 and Phase 2 components. Phase 3 (Linux Kernel Compilation) milestones 1–6a are now implemented: switch/case/goto/label/break/continue codegen, 30+ compiler builtins, variadic function support, inline asm codegen, computed goto, case ranges, attribute lowering, platform macros, and block-scope variable shadowing. All 330 tests pass with 0 failures.
 
 ---
 
@@ -204,11 +204,14 @@ cargo test --lib vfs
 - [x] End-to-end tests: `test_switch_codegen`, `test_goto_label_codegen`, `test_break_in_switch`, `test_break_in_while`, `test_continue_in_for`
 
 ### Milestone 2: Builtins ✅
-- [x] 25+ builtins implemented in `lower_builtin_call`
+- [x] 30+ builtins implemented in `lower_builtin_call`
 - [x] LLVM intrinsics: ctlz, cttz, ctpop, bswap, trap, frameaddress, returnaddress, prefetch
 - [x] Pattern-based: ffs (cttz+select), abs (sub+select)
 - [x] Pass-through: expect, constant_p, assume_aligned, expect_with_probability
 - [x] Constant-fold: offsetof (GEP-based), object_size (-1)
+- [x] Memory: memcpy, memset, strlen via LLVM intrinsics
+- [x] Overflow: __builtin_add/sub/mul_overflow → LLVM sadd/ssub/smul.with.overflow
+- [x] Misc: alloca, __sync_synchronize (fence seq_cst)
 - [x] End-to-end tests: `test_builtin_expect`, `test_builtin_constant_p`
 
 ### Milestone 3: Variadic Functions ✅
@@ -239,12 +242,26 @@ cargo test --lib vfs
 - [x] Case ranges (`case 1 ... 5:`) → kind=54 node, expanded to multiple switch entries (max 256)
 - [x] 4 end-to-end tests (label_addr, computed_goto, case_range, case_range_single)
 
-### Milestone 6: System Headers & Multi-File Compilation 📋
+### Milestone 6a: Attribute Lowering & Block Scope ✅ (completed 2026-04-18)
+- [x] Attribute lowering: `weak` → LLVM ExternalWeak linkage
+- [x] Attribute lowering: `section` → LLVM section metadata
+- [x] Attribute lowering: `visibility` → LLVM Hidden/Protected visibility
+- [x] Attribute lowering: `aligned` → LLVM alignment on globals
+- [x] Attribute lowering: `noreturn`, `cold` → LLVM function attributes
+- [x] Platform predefined macros fallback: __linux__, __x86_64__, __LP64__, __BYTE_ORDER__, __CHAR_BIT__, __SIZE_TYPE__, etc.
+- [x] Block-scope variable shadowing: scope stack (`push_scope`/`pop_scope` in `lower_compound`)
+- [x] `insert_scoped_variable` used in `lower_var_decl` for proper shadowing
+- [x] 4 backend tests: weak, section, noreturn, cold
+- [x] 3 preprocessor tests: fallback macros defined, linux macros, x86_64 macros
+- [x] Total: 330 tests pass, 0 failures
+
+### Milestone 6b: System Headers & Multi-File Compilation 📋
 - [ ] Preprocessor system include path resolution (-I, /usr/include)
-- [ ] Platform-specific predefined macros (__linux__, __x86_64__, __SIZEOF_POINTER__)
+- [ ] Command-line -D defines for cross-compilation
 - [ ] Multi-translation-unit compilation
-- [ ] Weak symbols, section attributes, visibility attributes
-- [ ] Aligned/packed struct layout
+- [ ] Bitfield support in struct layout
+- [ ] Designated initializers (.field = value, [index] = value)
+- [ ] Compound literals ((struct foo){.x = 1})
 
 ### Milestone 7: Kernel-Scale Validation 📋
 - [ ] Compile minimal out-of-tree kernel module

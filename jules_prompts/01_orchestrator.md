@@ -21,41 +21,36 @@ Arena, DB, Lexer, Macro, Parser, LLVM backend, analysis, and VFS code are all pr
 | `15_benchmark.md` | Jules-Benchmark | 14 |
 
 ### Phase 3: Linux Kernel Compilation (IN PROGRESS)
-**Milestones 1–3 completed (2026-04-18):**
+**Milestones 1–5 completed (2026-04-18):**
 - ✅ Switch/case/default codegen with fall-through and break
 - ✅ Goto/label with forward-reference resolution
 - ✅ Break/continue in loops and switch
-- ✅ 25+ builtins (clz/ctz/popcount/bswap/ffs/abs/unreachable/trap/expect/constant_p/offsetof/etc.)
+- ✅ 30+ builtins (clz/ctz/popcount/bswap/ffs/abs/unreachable/trap/expect/constant_p/offsetof/alloca/overflow/memcpy/memset/strlen/etc.)
 - ✅ Variadic function support (va_start/va_end/va_copy)
 - ✅ Lexer 3-char punctuator fix (..., >>=, <<=)
-- ✅ Inline asm statement parsing from parse_statement()
+- ✅ Inline asm codegen (lower_asm_stmt → LLVM `call asm` with constraint strings)
+- ✅ Computed goto (&&label → blockaddress, goto *expr → indirectbr)
+- ✅ Case ranges (case 1 ... 5: → multiple switch entries, max 256)
 
-**Milestone 4 — Inline Assembly Codegen** (✅ COMPLETED 2026-04-18):
-- [x] Lower parsed ASM_STMT nodes to LLVM `call asm` via inkwell InlineAsm API
-- [x] Wire output/input operand constraints to LLVM constraint strings
-- [x] Handle `"memory"` and `"cc"` clobbers as LLVM side-effect markers
-- [x] Test with kernel-style asm patterns (barriers, register moves)
-- [x] 5 end-to-end backend tests added
+**Milestone 6a — Attribute Lowering & Scope** (✅ COMPLETED 2026-04-18):
+- [x] Attribute lowering: `weak`, `section`, `visibility`, `aligned`, `noreturn`, `cold` wired from parser→backend
+- [x] Platform predefined macros fallback: `__linux__`, `__x86_64__`, `__LP64__`, `__BYTE_ORDER__`, `__CHAR_BIT__`, `__SIZE_TYPE__`
+- [x] Block-scope variable shadowing: scope stack in `lower_compound` with `push_scope`/`pop_scope`
+- [x] 7 new tests (4 attribute backend, 3 platform macro preprocessor)
+- [x] 330 tests pass, 0 failures
 
-**Milestone 5 — Computed Goto & Advanced Control Flow** (✅ COMPLETED 2026-04-18):
-- [x] Parse `&&label` (label-as-value, GCC extension) → kind=203 AST node
-- [x] Parse `goto *expr` (computed goto) → kind=49 with data=0, first_child=expr
-- [x] Backend: lower `&&label` to LLVM blockaddress via BasicBlock::get_address()
-- [x] Backend: lower `goto *expr` to LLVM indirectbr with all known label_blocks as destinations
-- [x] Case ranges: `case 1 ... 5:` → kind=54 node, expanded to multiple switch entries
-- [x] 4 end-to-end tests added
-
-**Milestone 6 — System Header & Multi-File Compilation**:
-- [ ] Preprocessor: resolve `#include <stdio.h>` from system include paths (/usr/include)
-- [ ] Preprocessor: handle platform-specific predefined macros (__linux__, __x86_64__, etc.)
+**Milestone 6b — System Headers & Multi-File** (NEXT PRIORITY):
+- [ ] Preprocessor: resolve `#include <stdio.h>` from system include paths (`-I /usr/include`)
+- [ ] Preprocessor: handle `-D` command-line defines for cross-compilation
 - [ ] Build system: multi-translation-unit compilation with shared symbol tables
 - [ ] Linker integration: generate relocatable .o files via LLC, link with system ld
-- [ ] Weak symbols (`__attribute__((weak))`) and visibility (`__attribute__((visibility("hidden")))`)
+- [ ] Bitfield support in struct layout (shift/mask patterns)
+- [ ] Designated initializers (`.field = value`, `[index] = value`)
+- [ ] Compound literals (`(struct foo){.x = 1}`)
 
 **Milestone 7 — Kernel-Scale Validation**:
 - [ ] Compile a minimal out-of-tree kernel module (.ko) with OpticC
 - [ ] Compile coreutils or busybox as end-to-end C software validation
-- [ ] Section attributes (`__attribute__((section(".init.text")))`) for kernel layout
 - [ ] Kbuild integration: replace CC=gcc with CC=optic_c in Makefile
 
 ### Phase 4: Production Compiler (FUTURE)
@@ -65,8 +60,10 @@ Optimization passes, debug info, LTO, cross-compilation, and general polish.
 1. Read `00_protocol.md` for the current workflow rules.
 2. Inspect `README.md`, `QA_VERIFICATION.md`, `Cargo.toml`, and the relevant `src/` modules.
 3. Use the files in `jules_prompts/` as the shared agent memory for status, lessons learned, and blockers.
-4. Prioritize stabilization work: failing tests, stale assumptions, SQLite-scale edge cases, and integration gaps.
-5. Prefer independent fixes where possible, but verify dependencies before touching shared compiler stages.
+4. **Priority: Milestone 6b** — system header include paths, multi-TU compilation, bitfields, designated initializers.
+5. **Intermediate validation**: attempt to compile a small real-world C file (e.g., `echo.c` from coreutils) end-to-end.
+6. Verify changes with `cargo test` and CLI smoke tests before reporting.
+7. Record only confirmed status and remaining blockers in the appropriate prompt file.
 
 ## LESSONS LEARNED (Post-Execution Addendum)
 - **Prompt files are the live coordination layer**: this repo snapshot does not ship the old `.optic` spec/task directories, so status should be kept current in `jules_prompts/` instead.

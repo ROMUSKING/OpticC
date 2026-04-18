@@ -7,7 +7,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-2024-blue.svg)](https://www.rust-lang.org)
 [![LLVM](https://img.shields.io/badge/LLVM-18.1-blue.svg)](https://llvm.org)
-[![Tests](https://img.shields.io/badge/tests-311%20passing-brightgreen.svg)]()
+[![Tests](https://img.shields.io/badge/tests-330%20passing-brightgreen.svg)]()
 
 </div>
 
@@ -85,11 +85,11 @@ OpticC is a C frontend compiler that translates C99 source code to LLVM IR. It i
 ### Phase 3: Linux Kernel 📋
 GNU C extensions, inline assembly, Kbuild integration, 30M+ LOC scale.
 
-**Milestones 1–3 ✅ (completed 2026-04-18):**
+**Milestones 1–5 ✅ (completed 2026-04-18):**
 - ✅ Switch/case codegen with fall-through, break, and default
 - ✅ Goto/label codegen with forward-reference label resolution
 - ✅ Break/continue in loops and switch statements
-- ✅ 25+ builtins (clz/ctz/popcount/bswap/ffs/abs/unreachable/trap/expect/constant_p/offsetof/object_size/frame_address/prefetch)
+- ✅ 30+ builtins (clz/ctz/popcount/bswap/ffs/abs/unreachable/trap/expect/constant_p/offsetof/object_size/frame_address/prefetch/alloca/overflow/memcpy/memset/strlen)
 - ✅ Variadic function support (va_start/va_end/va_copy via LLVM intrinsics)
 
 **Milestone 4 ✅ — Inline Assembly Codegen (completed 2026-04-18):**
@@ -102,10 +102,15 @@ GNU C extensions, inline assembly, Kbuild integration, 30M+ LOC scale.
 - ✅ `&&label` → LLVM `blockaddress`, `goto *expr` → LLVM `indirectbr`
 - ✅ Case ranges (`case 1 ... 5:`) → multiple switch entries
 
-**Milestone 6 📋 — System Headers & Multi-File Compilation:**
+**Milestone 6a ✅ — Attribute Lowering & Scope (completed 2026-04-18):**
+- ✅ Attribute lowering: `weak`, `section`, `visibility`, `aligned`, `noreturn`, `cold`
+- ✅ Platform predefined macros fallback: `__linux__`, `__x86_64__`, `__LP64__`, `__BYTE_ORDER__`
+- ✅ Block-scope variable shadowing via scope stack
+
+**Milestone 6b 📋 — System Headers & Multi-File Compilation:**
 - 📋 Preprocessor system include path resolution (`-I /usr/include`)
 - 📋 Multi-translation-unit compilation with shared symbol tables
-- 📋 Weak symbols, section/visibility attributes, aligned/packed
+- 📋 Bitfield support, designated initializers, compound literals
 
 **Milestone 7 📋 — Kernel-Scale Validation:**
 - 📋 Compile minimal out-of-tree kernel module

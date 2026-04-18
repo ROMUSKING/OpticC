@@ -32,6 +32,9 @@ The LLVM backend now supports typed lowering for several core C types. Current w
 - [x] **Break/continue**: `lower_break_continue` with `break_stack` and `continue_stack`. Pushed by while/for loops and switch statements. For-loop continue jumps to increment block.
 - [x] **25+ builtins**: `lower_builtin_call` handles __builtin_clz/ctz/popcount/bswap (LLVM ctlz/cttz/ctpop/bswap intrinsics), __builtin_ffs (cttz+select), __builtin_abs (sub+select), __builtin_unreachable/trap (LLVM unreachable/llvm.trap), __builtin_expect/constant_p/offsetof (pass-through/constant-fold), __builtin_object_size/frame_address/return_address/prefetch, __builtin_expect_with_probability/assume_aligned (pass-through).
 - [x] **Variadic functions**: Parser detects `...` in parameter lists, stores is_variadic flag (data=1 on kind=9 func declarator). Backend reads this in lower_func_def and pre_register_func_def, passes to fn_type(). `va_start`/`va_end`/`va_copy` intercepted in lower_call_expr, emitted as LLVM intrinsics.
+- [x] **Attribute lowering**: `extract_attributes` walks kind=200 children. `apply_function_attributes` handles weak (ExternalWeak linkage), section, visibility (Hidden/Protected via as_global_value), noreturn, cold. `apply_global_attributes` handles weak, section, aligned, visibility. Applied in both `pre_register_func_def` and `lower_func_def`.
+- [x] **Block scope**: `scope_stack: Vec<HashMap<String, Option<VariableBinding>>>` field. `push_scope()`/`pop_scope()` bracket `lower_compound`. `insert_scoped_variable()` saves previous binding before overwriting, restores on pop.
+- [x] **Platform macros**: Preprocessor `platform_fallback_macros()` provides __linux__, __x86_64__, __LP64__, __BYTE_ORDER__, __CHAR_BIT__, __SIZE_TYPE__, etc. when no system compiler detected.
 
 ### KEY AST LAYOUT (after parser fix, 2026-04-17)
 The parser now chains child nodes entirely via first_child chains, not via next_sibling of parent nodes:
@@ -50,20 +53,22 @@ The parser now chains child nodes entirely via first_child chains, not via next_
 - [ ] **String literals**: `lower_string_const` uses node.data as a single byte; needs arena string lookup for full string content.
 - [ ] **printf/variadic**: Auto-declaration with variadic signature is incorrect for most libc functions. Need proper declaration matching for common functions.
 
-### KERNEL-PATH NEXT STEPS (Phase 3, Milestones 4–7)
+### KERNEL-PATH NEXT STEPS (Phase 3, Milestones 6b–7)
 - [x] **Inline asm codegen (M4)**: `lower_asm_stmt` implemented. Reads template from arena, builds constraint string from operand children, creates InlineAsm via `context.create_inline_asm()`, calls via `build_indirect_call()`, stores outputs to lvalue pointers. Handles volatile, memory/cc clobbers, readwrite operands.
 - [x] **Computed goto (M5)**: `lower_label_addr` produces LLVM blockaddress via `BasicBlock::get_address()`. `lower_goto_stmt` handles computed goto (`goto *expr`) via `build_indirect_branch`. All known label_blocks passed as possible destinations.
 - [x] **Case ranges (M5)**: `case 1 ... 5:` parsed as kind=54, expanded to multiple switch entries in `collect_switch_cases`. Capped at 256 entries per range.
-- [ ] **Attribute lowering (M6)**: `__attribute__((weak))` → LLVM `weak` linkage. `__attribute__((section("name")))` → LLVM `section`. `__attribute__((visibility("hidden")))` → LLVM `hidden` visibility. `__attribute__((aligned(N)))` → LLVM alignment metadata.
-- [ ] **Block scope (M6)**: Implement nested variable scoping instead of clearing `variables` per function. Required for kernel code with deeply nested blocks that shadow outer variables.
-- [ ] **Bitfield support**: Kernel structs use bitfields extensively. Need GEP + shift/mask patterns for bitfield access.
-- [ ] **Designated initializers**: `.field = value` and `[index] = value` in struct/array initializers.
-- [ ] **Compound literals**: `(struct foo){.x = 1}` → alloca + store pattern.
+- [x] **Attribute lowering (M6a)**: `extract_attributes` walks kind=200 AST children. `apply_function_attributes` handles weak/section/visibility/noreturn/cold. `apply_global_attributes` handles weak/section/aligned/visibility.
+- [x] **Block scope (M6a)**: `scope_stack` field on LlvmBackend. `push_scope()`/`pop_scope()` in `lower_compound`. `insert_scoped_variable()` saves/restores overwritten bindings.
+- [ ] **Bitfield support (M6b)**: Kernel structs use bitfields extensively. Need GEP + shift/mask patterns for bitfield access.
+- [ ] **Designated initializers (M6b)**: `.field = value` and `[index] = value` in struct/array initializers.
+- [ ] **Compound literals (M6b)**: `(struct foo){.x = 1}` → alloca + store pattern.
+- [ ] **Multi-TU compilation (M6b)**: shared symbol tables across translation units, extern declarations, tentative definitions.
+- [ ] **System include paths (M6b)**: `-I /usr/include` in preprocessor for `#include <stdio.h>` resolution.
 
 ## KNOWN CAVEATS
 - **LLVM 18 target**: Targets `inkwell`'s `llvm18-1-prefer-dynamic` feature. `LLVM_SYS_181_PREFIX=/usr/lib/llvm-18` in `.cargo/config.toml`.
 - **Opaque pointers**: LLVM 18 uses opaque pointers. Loads must carry explicit pointee type.
 - **Pointer declarators**: current backend reconstructs pointer declarators from the parser AST and materializes them as opaque LLVM pointers via `Context::ptr_type`. This is enough for current SQLite-style micro benchmarks, but richer declarator forms still need dedicated handling.
 - **inkwell 0.9**: Pass manager API changed; `optimize()` is a no-op stub.
-- **Symbol table scope**: `self.variables.clear()` on each function entry. No nested block scope.
+- **Symbol table scope**: Nested block scope implemented via `scope_stack`. Functions still clear variables on entry, but compound statements push/pop properly.
 - **Debug eprintln!s**: Parser and backend have many `eprintln!` calls. Do NOT use `sed -i 's/eprintln!.*//'` — it will break multi-line macros. Use a Python script with exact string replacement instead.
