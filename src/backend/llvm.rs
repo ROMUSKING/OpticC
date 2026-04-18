@@ -3431,8 +3431,285 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                 }))
             }
             "__builtin_va_arg" => Ok(Some(self.context.i32_type().const_int(0, false).into())),
+            "__builtin_va_start" | "__builtin_va_end" | "__builtin_va_copy" => {
+                // va_start/va_end/va_copy: side-effect-only, return nothing meaningful
+                Ok(Some(self.context.i32_type().const_int(0, false).into()))
+            }
             "__builtin_types_compatible_p" => {
                 Ok(Some(self.context.i32_type().const_int(1, false).into()))
+            }
+            "__builtin_unreachable" => {
+                self.builder
+                    .build_unreachable()
+                    .map_err(|_| BackendError::InvalidNode)?;
+                Ok(None)
+            }
+            "__builtin_trap" => {
+                // Emit a call to llvm.trap
+                let trap_fn_type = self.context.void_type().fn_type(&[], false);
+                let trap_fn = self
+                    .module
+                    .get_function("llvm.trap")
+                    .unwrap_or_else(|| self.module.add_function("llvm.trap", trap_fn_type, None));
+                self.builder
+                    .build_call(trap_fn, &[], "trap")
+                    .map_err(|_| BackendError::InvalidNode)?;
+                self.builder
+                    .build_unreachable()
+                    .map_err(|_| BackendError::InvalidNode)?;
+                Ok(None)
+            }
+            "__builtin_expect_with_probability" => {
+                // Same as __builtin_expect: return first argument
+                if let Some(arg) = args.first() {
+                    match arg {
+                        inkwell::values::BasicMetadataValueEnum::IntValue(v) => {
+                            Ok(Some((*v).into()))
+                        }
+                        inkwell::values::BasicMetadataValueEnum::PointerValue(v) => {
+                            Ok(Some((*v).into()))
+                        }
+                        inkwell::values::BasicMetadataValueEnum::FloatValue(v) => {
+                            Ok(Some((*v).into()))
+                        }
+                        _ => Ok(None),
+                    }
+                } else {
+                    Ok(None)
+                }
+            }
+            "__builtin_assume_aligned" => {
+                // Return first argument (the pointer)
+                if let Some(arg) = args.first() {
+                    match arg {
+                        inkwell::values::BasicMetadataValueEnum::PointerValue(v) => {
+                            Ok(Some((*v).into()))
+                        }
+                        inkwell::values::BasicMetadataValueEnum::IntValue(v) => {
+                            Ok(Some((*v).into()))
+                        }
+                        _ => Ok(None),
+                    }
+                } else {
+                    Ok(None)
+                }
+            }
+            "__builtin_clz" | "__builtin_clzl" | "__builtin_clzll" => {
+                // Count leading zeros → LLVM ctlz intrinsic
+                if let Some(inkwell::values::BasicMetadataValueEnum::IntValue(val)) =
+                    args.first()
+                {
+                    let bit_width = val.get_type().get_bit_width();
+                    let fn_name = format!("llvm.ctlz.i{}", bit_width);
+                    let fn_type = val.get_type().fn_type(
+                        &[val.get_type().into(), self.context.bool_type().into()],
+                        false,
+                    );
+                    let func = self
+                        .module
+                        .get_function(&fn_name)
+                        .unwrap_or_else(|| self.module.add_function(&fn_name, fn_type, None));
+                    // is_zero_poison = true (matching GCC: undefined for 0)
+                    let call = self
+                        .builder
+                        .build_call(
+                            func,
+                            &[
+                                (*val).into(),
+                                self.context.bool_type().const_int(1, false).into(),
+                            ],
+                            "clz",
+                        )
+                        .map_err(|_| BackendError::InvalidNode)?;
+                    Ok(Some(match call.try_as_basic_value() {
+                        inkwell::values::ValueKind::Basic(v) => v,
+                        _ => self.context.i32_type().const_int(0, false).into(),
+                    }))
+                } else {
+                    Ok(Some(self.context.i32_type().const_int(0, false).into()))
+                }
+            }
+            "__builtin_ctz" | "__builtin_ctzl" | "__builtin_ctzll" => {
+                // Count trailing zeros → LLVM cttz intrinsic
+                if let Some(inkwell::values::BasicMetadataValueEnum::IntValue(val)) =
+                    args.first()
+                {
+                    let bit_width = val.get_type().get_bit_width();
+                    let fn_name = format!("llvm.cttz.i{}", bit_width);
+                    let fn_type = val.get_type().fn_type(
+                        &[val.get_type().into(), self.context.bool_type().into()],
+                        false,
+                    );
+                    let func = self
+                        .module
+                        .get_function(&fn_name)
+                        .unwrap_or_else(|| self.module.add_function(&fn_name, fn_type, None));
+                    let call = self
+                        .builder
+                        .build_call(
+                            func,
+                            &[
+                                (*val).into(),
+                                self.context.bool_type().const_int(1, false).into(),
+                            ],
+                            "ctz",
+                        )
+                        .map_err(|_| BackendError::InvalidNode)?;
+                    Ok(Some(match call.try_as_basic_value() {
+                        inkwell::values::ValueKind::Basic(v) => v,
+                        _ => self.context.i32_type().const_int(0, false).into(),
+                    }))
+                } else {
+                    Ok(Some(self.context.i32_type().const_int(0, false).into()))
+                }
+            }
+            "__builtin_popcount" | "__builtin_popcountl" | "__builtin_popcountll" => {
+                // Population count → LLVM ctpop intrinsic
+                if let Some(inkwell::values::BasicMetadataValueEnum::IntValue(val)) =
+                    args.first()
+                {
+                    let bit_width = val.get_type().get_bit_width();
+                    let fn_name = format!("llvm.ctpop.i{}", bit_width);
+                    let fn_type = val.get_type().fn_type(&[val.get_type().into()], false);
+                    let func = self
+                        .module
+                        .get_function(&fn_name)
+                        .unwrap_or_else(|| self.module.add_function(&fn_name, fn_type, None));
+                    let call = self
+                        .builder
+                        .build_call(func, &[(*val).into()], "popcount")
+                        .map_err(|_| BackendError::InvalidNode)?;
+                    Ok(Some(match call.try_as_basic_value() {
+                        inkwell::values::ValueKind::Basic(v) => v,
+                        _ => self.context.i32_type().const_int(0, false).into(),
+                    }))
+                } else {
+                    Ok(Some(self.context.i32_type().const_int(0, false).into()))
+                }
+            }
+            "__builtin_bswap16" | "__builtin_bswap32" | "__builtin_bswap64" => {
+                // Byte swap → LLVM bswap intrinsic
+                if let Some(inkwell::values::BasicMetadataValueEnum::IntValue(val)) =
+                    args.first()
+                {
+                    let bit_width = val.get_type().get_bit_width();
+                    let fn_name = format!("llvm.bswap.i{}", bit_width);
+                    let fn_type = val.get_type().fn_type(&[val.get_type().into()], false);
+                    let func = self
+                        .module
+                        .get_function(&fn_name)
+                        .unwrap_or_else(|| self.module.add_function(&fn_name, fn_type, None));
+                    let call = self
+                        .builder
+                        .build_call(func, &[(*val).into()], "bswap")
+                        .map_err(|_| BackendError::InvalidNode)?;
+                    Ok(Some(match call.try_as_basic_value() {
+                        inkwell::values::ValueKind::Basic(v) => v,
+                        _ => self.context.i32_type().const_int(0, false).into(),
+                    }))
+                } else {
+                    Ok(Some(self.context.i32_type().const_int(0, false).into()))
+                }
+            }
+            "__builtin_ffs" | "__builtin_ffsl" | "__builtin_ffsll" => {
+                // Find first set bit (1-indexed, 0 if input is 0)
+                // ffs(x) = x == 0 ? 0 : ctz(x) + 1
+                if let Some(inkwell::values::BasicMetadataValueEnum::IntValue(val)) =
+                    args.first()
+                {
+                    let bit_width = val.get_type().get_bit_width();
+                    let fn_name = format!("llvm.cttz.i{}", bit_width);
+                    let fn_type = val.get_type().fn_type(
+                        &[val.get_type().into(), self.context.bool_type().into()],
+                        false,
+                    );
+                    let func = self
+                        .module
+                        .get_function(&fn_name)
+                        .unwrap_or_else(|| self.module.add_function(&fn_name, fn_type, None));
+                    let ctz = self
+                        .builder
+                        .build_call(
+                            func,
+                            &[
+                                (*val).into(),
+                                self.context.bool_type().const_int(0, false).into(),
+                            ],
+                            "ctz_ffs",
+                        )
+                        .map_err(|_| BackendError::InvalidNode)?;
+                    let ctz_val = match ctz.try_as_basic_value() {
+                        inkwell::values::ValueKind::Basic(v) => v.into_int_value(),
+                        _ => val.get_type().const_int(0, false),
+                    };
+                    let one = val.get_type().const_int(1, false);
+                    let ctz_plus_1 = self
+                        .builder
+                        .build_int_add(ctz_val, one, "ffs_add")
+                        .map_err(|_| BackendError::InvalidNode)?;
+                    let zero = val.get_type().const_zero();
+                    let is_zero = self
+                        .builder
+                        .build_int_compare(inkwell::IntPredicate::EQ, *val, zero, "ffs_iszero")
+                        .map_err(|_| BackendError::InvalidNode)?;
+                    let result = self
+                        .builder
+                        .build_select(is_zero, zero, ctz_plus_1, "ffs")
+                        .map_err(|_| BackendError::InvalidNode)?;
+                    Ok(Some(result))
+                } else {
+                    Ok(Some(self.context.i32_type().const_int(0, false).into()))
+                }
+            }
+            "__builtin_abs" | "__builtin_labs" | "__builtin_llabs" => {
+                // Absolute value of integer
+                if let Some(inkwell::values::BasicMetadataValueEnum::IntValue(val)) =
+                    args.first()
+                {
+                    let zero = val.get_type().const_zero();
+                    let neg = self
+                        .builder
+                        .build_int_sub(zero, *val, "abs_neg")
+                        .map_err(|_| BackendError::InvalidNode)?;
+                    let is_neg = self
+                        .builder
+                        .build_int_compare(inkwell::IntPredicate::SLT, *val, zero, "abs_cmp")
+                        .map_err(|_| BackendError::InvalidNode)?;
+                    let result = self
+                        .builder
+                        .build_select(is_neg, neg, *val, "abs")
+                        .map_err(|_| BackendError::InvalidNode)?;
+                    Ok(Some(result))
+                } else {
+                    Ok(Some(self.context.i32_type().const_int(0, false).into()))
+                }
+            }
+            "__builtin_object_size" => {
+                // Conservative: return (size_t)-1 for type 0/1, 0 for type 2/3
+                let type_arg = args.get(1).and_then(|a| match a {
+                    inkwell::values::BasicMetadataValueEnum::IntValue(v) => {
+                        v.get_zero_extended_constant()
+                    }
+                    _ => None,
+                });
+                let val = match type_arg {
+                    Some(0) | Some(1) | None => u64::MAX,
+                    _ => 0,
+                };
+                Ok(Some(self.context.i64_type().const_int(val, false).into()))
+            }
+            "__builtin_frame_address" | "__builtin_return_address" => {
+                // Return null pointer (conservative)
+                Ok(Some(
+                    self.context
+                        .ptr_type(AddressSpace::default())
+                        .const_null()
+                        .into(),
+                ))
+            }
+            "__builtin_prefetch" => {
+                // Prefetch is a hint, emit nothing
+                Ok(Some(self.context.i32_type().const_int(0, false).into()))
             }
             "__builtin_choose_expr" => {
                 if args.len() >= 3 {
