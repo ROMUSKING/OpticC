@@ -1511,6 +1511,59 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
         node: &CAstNode,
     ) -> Result<Option<BasicValueEnum<'ctx>>, BackendError> {
         let child_offset = node.first_child;
+        if matches!(node.data, 6 | 7) {
+            let Some((ptr, pointee_type)) = self.lower_lvalue_ptr(arena, child_offset)? else {
+                return Err(BackendError::InvalidNode);
+            };
+
+            let current = self
+                .builder
+                .build_load(pointee_type, ptr, "incdec.load")
+                .map_err(|_| BackendError::InvalidNode)?;
+
+            let updated: BasicValueEnum = match current {
+                BasicValueEnum::IntValue(int_value) => {
+                    let one = int_value.get_type().const_int(1, false);
+                    match node.data {
+                        6 => self
+                            .builder
+                            .build_int_add(int_value, one, "inc")
+                            .map_err(|_| BackendError::InvalidNode)?
+                            .into(),
+                        7 => self
+                            .builder
+                            .build_int_sub(int_value, one, "dec")
+                            .map_err(|_| BackendError::InvalidNode)?
+                            .into(),
+                        _ => unreachable!(),
+                    }
+                }
+                BasicValueEnum::FloatValue(float_value) => {
+                    let one = float_value.get_type().const_float(1.0);
+                    match node.data {
+                        6 => self
+                            .builder
+                            .build_float_add(float_value, one, "finc")
+                            .map_err(|_| BackendError::InvalidNode)?
+                            .into(),
+                        7 => self
+                            .builder
+                            .build_float_sub(float_value, one, "fdec")
+                            .map_err(|_| BackendError::InvalidNode)?
+                            .into(),
+                        _ => unreachable!(),
+                    }
+                }
+                _ => return Err(BackendError::InvalidNode),
+            };
+
+            self.builder
+                .build_store(ptr, updated)
+                .map_err(|_| BackendError::InvalidNode)?;
+
+            return Ok(Some(updated));
+        }
+
         let operand = self
             .lower_expr(arena, child_offset)?
             .ok_or(BackendError::InvalidNode)?;

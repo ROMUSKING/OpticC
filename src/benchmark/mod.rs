@@ -324,6 +324,10 @@ impl BenchmarkRunner {
             ("function_call", MICRO_FUNC_CALL),
             ("arithmetic", MICRO_ARITHMETIC),
             ("pointer_ops", MICRO_POINTER_OPS),
+            ("postinc_loop", MICRO_POSTINC_LOOP),
+            ("sqlite_flags", MICRO_SQLITE_FLAGS),
+            ("sqlite_varint", MICRO_SQLITE_VARINT),
+            ("sqlite_struct_state", MICRO_SQLITE_STRUCT_STATE),
         ];
 
         for (name, source) in benchmarks {
@@ -933,6 +937,122 @@ int main() {
 }
 "#;
 
+const MICRO_POSTINC_LOOP: &str = r#"
+#include <stdio.h>
+
+int main() {
+    int i = 0;
+    int sum = 0;
+    while (i < 64) {
+        sum += i;
+        i++;
+    }
+    printf("%d\n", sum);
+    return 0;
+}
+"#;
+
+const MICRO_SQLITE_FLAGS: &str = r#"
+#include <stdio.h>
+
+typedef unsigned char u8;
+typedef unsigned int u32;
+
+#define MEM_Int 0x0001
+#define MEM_Str 0x0002
+#define MEM_Null 0x0004
+#define ALWAYS(X) __builtin_expect(!!(X), 1)
+#define FLAG_SET(V, F) (((V) & (F)) != 0)
+
+static int classify_flags(u32 flags) {
+    if (ALWAYS(FLAG_SET(flags, MEM_Int))) {
+        return 3;
+    }
+    if (FLAG_SET(flags, MEM_Str)) {
+        return 2;
+    }
+    if (FLAG_SET(flags, MEM_Null)) {
+        return 1;
+    }
+    return 0;
+}
+
+int main() {
+    u32 flags[4] = { MEM_Int, MEM_Str, MEM_Int | MEM_Str, MEM_Null };
+    int i = 0;
+    int score = 0;
+    while (i < 4) {
+        score += classify_flags(flags[i]);
+        i = i + 1;
+    }
+    printf("%d\n", score);
+    return 0;
+}
+"#;
+
+const MICRO_SQLITE_VARINT: &str = r#"
+#include <stdio.h>
+
+typedef unsigned char u8;
+typedef unsigned int u32;
+
+static u32 decode_varint32(const u8 *data) {
+    u32 value = 0;
+    int i = 0;
+    int keep_reading = 1;
+    while (i < 4) {
+        if (keep_reading) {
+            value = (value << 7) | (u32)(data[i] & 0x7f);
+            if ((data[i] & 0x80) == 0) {
+                keep_reading = 0;
+            }
+        }
+        i = i + 1;
+    }
+    return value;
+}
+
+int main() {
+    u8 bytes[4] = { 0x81, 0x82, 0x03, 0x00 };
+    printf("%u\n", decode_varint32(bytes));
+    return 0;
+}
+"#;
+
+const MICRO_SQLITE_STRUCT_STATE: &str = r#"
+#include <stdio.h>
+
+typedef struct ParseState {
+    int opcode;
+    int flags;
+    int steps;
+    int acc;
+} ParseState;
+
+#define OPFLAG_IN1 0x01
+#define OP_Column 2
+
+int main() {
+    ParseState st;
+    st.opcode = OP_Column;
+    st.flags = OPFLAG_IN1;
+    st.steps = 0;
+    st.acc = 0;
+
+    while (st.steps < 8) {
+        if ((st.flags & OPFLAG_IN1) != 0) {
+            st.acc = st.acc + st.opcode;
+        } else {
+            st.acc = st.acc - 1;
+        }
+        st.steps = st.steps + 1;
+    }
+
+    printf("%d\n", st.acc + st.steps);
+    return 0;
+}
+"#;
+
 const COREUTILS_HELLO: &str = r#"
 #include <stdio.h>
 
@@ -1426,11 +1546,19 @@ mod tests {
         assert!(!MICRO_FUNC_CALL.is_empty());
         assert!(!MICRO_ARITHMETIC.is_empty());
         assert!(!MICRO_POINTER_OPS.is_empty());
+        assert!(!MICRO_POSTINC_LOOP.is_empty());
+        assert!(!MICRO_SQLITE_FLAGS.is_empty());
+        assert!(!MICRO_SQLITE_VARINT.is_empty());
+        assert!(!MICRO_SQLITE_STRUCT_STATE.is_empty());
 
         assert!(MICRO_LOOP_SUM.contains("for"));
         assert!(MICRO_FUNC_CALL.contains("add("));
         assert!(MICRO_ARITHMETIC.contains("*"));
         assert!(MICRO_POINTER_OPS.contains("*p"));
+        assert!(MICRO_POSTINC_LOOP.contains("i++"));
+        assert!(MICRO_SQLITE_FLAGS.contains("__builtin_expect"));
+        assert!(MICRO_SQLITE_VARINT.contains("0x7f"));
+        assert!(MICRO_SQLITE_STRUCT_STATE.contains("ParseState"));
     }
 
     #[test]
