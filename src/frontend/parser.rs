@@ -5,6 +5,8 @@ pub struct Parser {
     pub arena: Arena,
     pub tokens: Vec<Token>,
     pub current: usize,
+    /// Track typedef names so they can be recognized as type specifiers.
+    pub typedef_names: std::collections::HashSet<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -66,6 +68,7 @@ impl Parser {
             arena,
             tokens: Vec::new(),
             current: 0,
+            typedef_names: std::collections::HashSet::new(),
         }
     }
 
@@ -477,7 +480,7 @@ impl Parser {
         if token.kind != TokenKind::Keyword && token.kind != TokenKind::Identifier {
             return false;
         }
-        matches!(
+        if matches!(
             token.text.as_str(),
             "void"
                 | "char"
@@ -498,7 +501,14 @@ impl Parser {
                 | "__typeof__"
                 | "__signed__"
                 | "__signed"
-        )
+        ) {
+            return true;
+        }
+        // Check if identifier is a known typedef name
+        if token.kind == TokenKind::Identifier && self.typedef_names.contains(&token.text) {
+            return true;
+        }
+        false
     }
 
     fn is_gnu_signed_keyword(&self) -> bool {
@@ -570,12 +580,34 @@ impl Parser {
             self.advance();
         }
 
+        // Check if this is a typedef before parsing specifiers
+        let is_typedef = self.current_token().text == "typedef";
+
         let specifiers = self.parse_declaration_specifiers()?;
         let mut first_child = specifiers;
+        // Walk to the end of the specifier chain so link_siblings doesn't orphan
+        // intermediate specifier nodes (e.g., `void` in `static void foo()`).
         let mut last_child = specifiers;
+        if last_child != NodeOffset::NULL {
+            loop {
+                let ns = self.arena.get(last_child).map(|n| n.next_sibling).unwrap_or(NodeOffset::NULL);
+                if ns == NodeOffset::NULL {
+                    break;
+                }
+                last_child = ns;
+            }
+        }
 
         if self.is_declarator_start() {
             let declarator = self.parse_declarator()?;
+
+            // If this is a typedef, register the declared name
+            if is_typedef && declarator != NodeOffset::NULL {
+                if let Some(name) = self.find_declarator_name(declarator) {
+                    self.typedef_names.insert(name);
+                }
+            }
+
             self.link_siblings(&mut first_child, &mut last_child, declarator);
 
             // Handle __asm__("...") after declarator (GCC redirect)
@@ -1143,6 +1175,15 @@ impl Parser {
             return Ok(first_param);
         }
 
+        // Handle (void) — means no parameters
+        if self.current_token().text == "void" {
+            let next_pos = self.current + 1;
+            if next_pos < self.tokens.len() && self.tokens[next_pos].text == ")" {
+                self.advance(); // skip "void"
+                return Ok(first_param);
+            }
+        }
+
         loop {
             if self.current_token().text == ")" {
                 break;
@@ -1202,6 +1243,28 @@ impl Parser {
         }
     }
 
+    /// Walk a declarator AST node to find the identifier name (kind=60).
+    fn find_declarator_name(&self, offset: NodeOffset) -> Option<String> {
+        let node = self.arena.get(offset)?;
+        // If this is an identifier node
+        if node.kind == 60 {
+            return self.arena.get_string(NodeOffset(node.data)).map(|s| s.to_string());
+        }
+        // Recurse into first_child (for pointer/array/function declarators)
+        if node.first_child != NodeOffset::NULL {
+            if let Some(name) = self.find_declarator_name(node.first_child) {
+                return Some(name);
+            }
+        }
+        // Try next_sibling
+        if node.next_sibling != NodeOffset::NULL {
+            if let Some(name) = self.find_declarator_name(node.next_sibling) {
+                return Some(name);
+            }
+        }
+        None
+    }
+
     pub fn is_declarator_start(&self) -> bool {
         let token = self.current_token();
         let result = token.kind == TokenKind::Identifier
@@ -1250,6 +1313,9 @@ impl Parser {
     }
 
     pub fn parse_declaration(&mut self) -> Result<NodeOffset, ParseError> {
+        // Check if this is a typedef declaration
+        let is_typedef = self.current_token().text == "typedef";
+
         let specifiers = self.parse_declaration_specifiers()?;
         let mut first_init = NodeOffset::NULL;
         let mut last_init = NodeOffset::NULL;
@@ -1258,6 +1324,13 @@ impl Parser {
             loop {
                 let declarator = self.parse_declarator()?;
                 let mut init = declarator;
+
+                // If this is a typedef declaration, extract and register the name
+                if is_typedef && declarator != NodeOffset::NULL {
+                    if let Some(name) = self.find_declarator_name(declarator) {
+                        self.typedef_names.insert(name);
+                    }
+                }
 
                 // Handle __asm__("...") after declarator
                 self.skip_asm_label();

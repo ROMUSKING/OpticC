@@ -792,6 +792,26 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
             };
         }
 
+        // Handle pointer operands by converting them to integers first
+        let lhs_val = if lhs_val.is_pointer_value() {
+            self.builder
+                .build_ptr_to_int(lhs_val.into_pointer_value(), self.context.i64_type(), "assign_ptr2int_lhs")
+                .map_err(|_| BackendError::InvalidNode)?
+                .into()
+        } else {
+            lhs_val
+        };
+        let rhs_val = if rhs_val.is_pointer_value() {
+            self.builder
+                .build_ptr_to_int(rhs_val.into_pointer_value(), self.context.i64_type(), "assign_ptr2int_rhs")
+                .map_err(|_| BackendError::InvalidNode)?
+                .into()
+        } else {
+            rhs_val
+        };
+        if !lhs_val.is_int_value() || !rhs_val.is_int_value() {
+            return Err(BackendError::InvalidNode);
+        }
         let lhs_int = lhs_val.into_int_value();
         let rhs_int = rhs_val.into_int_value();
         // Coerce both int operands to the same width (promote narrower to wider)
@@ -1608,9 +1628,27 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                     }
                 } else if val.is_float_value() {
                     let float_val = val.into_float_value();
-                    self.builder
-                        .build_return(Some(&float_val))
-                        .map_err(|_| BackendError::InvalidNode)?;
+                    // Check if function returns a non-float type and convert
+                    if let Some(ret_ty) = self.current_return_type {
+                        if ret_ty.is_int_type() {
+                            let ret_int = ret_ty.into_int_type();
+                            let cast = self
+                                .builder
+                                .build_float_to_signed_int(float_val, ret_int, "fp2int_ret")
+                                .map_err(|_| BackendError::InvalidNode)?;
+                            self.builder
+                                .build_return(Some(&cast))
+                                .map_err(|_| BackendError::InvalidNode)?;
+                        } else {
+                            self.builder
+                                .build_return(Some(&float_val))
+                                .map_err(|_| BackendError::InvalidNode)?;
+                        }
+                    } else {
+                        self.builder
+                            .build_return(Some(&float_val))
+                            .map_err(|_| BackendError::InvalidNode)?;
+                    }
                 } else if val.is_pointer_value() {
                     // Pointer returned in non-pointer function - ptrtoint
                     if let Some(ret_ty) = self.current_return_type {
@@ -2209,9 +2247,20 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
             2 => {
                 if operand.is_int_value() {
                     let int_op = operand.into_int_value();
-                    let zero = self.context.i32_type().const_int(0, false);
+                    let zero = int_op.get_type().const_zero();
                     self.builder
                         .build_int_compare(inkwell::IntPredicate::EQ, int_op, zero, "lnot")
+                        .map_err(|_| BackendError::InvalidNode)?
+                        .into()
+                } else if operand.is_pointer_value() {
+                    let ptr_op = operand.into_pointer_value();
+                    let ptr_int = self
+                        .builder
+                        .build_ptr_to_int(ptr_op, self.context.i64_type(), "ptr2int_lnot")
+                        .map_err(|_| BackendError::InvalidNode)?;
+                    let zero = self.context.i64_type().const_zero();
+                    self.builder
+                        .build_int_compare(inkwell::IntPredicate::EQ, ptr_int, zero, "lnot")
                         .map_err(|_| BackendError::InvalidNode)?
                         .into()
                 } else {
