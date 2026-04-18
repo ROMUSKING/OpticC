@@ -38,6 +38,9 @@ pub struct LlvmBackend<'ctx, 'types> {
     break_stack: Vec<BasicBlock<'ctx>>,
     /// Stack of continue targets (innermost last) for loops.
     continue_stack: Vec<BasicBlock<'ctx>>,
+    /// Scope stack for block-scoped variable shadowing. Each entry saves variable
+    /// bindings that were overwritten when entering a new block scope.
+    scope_stack: Vec<HashMap<String, Option<VariableBinding<'ctx>>>>,
 }
 
 #[derive(Clone, Copy)]
@@ -74,6 +77,7 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
             label_blocks: HashMap::new(),
             break_stack: Vec::new(),
             continue_stack: Vec::new(),
+            scope_stack: Vec::new(),
         }
     }
 
@@ -102,11 +106,43 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
             label_blocks: HashMap::new(),
             break_stack: Vec::new(),
             continue_stack: Vec::new(),
+            scope_stack: Vec::new(),
         }
     }
 
     pub fn set_vectorization_hints(&mut self, hints: VectorizationHints) {
         self.vectorization_hints = hints;
+    }
+
+    /// Enter a new block scope. Any variables declared inside this scope will
+    /// shadow outer definitions; when the scope is popped the originals are restored.
+    fn push_scope(&mut self) {
+        self.scope_stack.push(HashMap::new());
+    }
+
+    /// Leave a block scope, restoring any variables that were shadowed.
+    fn pop_scope(&mut self) {
+        if let Some(saved) = self.scope_stack.pop() {
+            for (name, prev_binding) in saved {
+                if let Some(binding) = prev_binding {
+                    self.variables.insert(name, binding);
+                } else {
+                    self.variables.remove(&name);
+                }
+            }
+        }
+    }
+
+    /// Insert a variable into the current scope, saving the previous binding
+    /// on the scope stack so it can be restored on pop_scope.
+    fn insert_scoped_variable(&mut self, name: String, binding: VariableBinding<'ctx>) {
+        if let Some(scope) = self.scope_stack.last_mut() {
+            // Only save the first overwrite within this scope
+            scope.entry(name.clone()).or_insert_with(|| {
+                self.variables.get(&name).copied()
+            });
+        }
+        self.variables.insert(name, binding);
     }
 
     fn to_llvm_type(&mut self, type_id: u32) -> BasicTypeEnum<'ctx> {
@@ -775,7 +811,7 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                                         .insert(var_name.clone(), struct_type);
                                 }
                             }
-                            self.variables.insert(
+                            self.insert_scoped_variable(
                                 var_name.clone(),
                                 VariableBinding {
                                     ptr: var_ptr,
@@ -826,7 +862,7 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                                         .insert(var_name.clone(), struct_type);
                                 }
                             }
-                            self.variables.insert(
+                            self.insert_scoped_variable(
                                 var_name,
                                 VariableBinding {
                                     ptr: var_ptr,
@@ -1581,6 +1617,7 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
     }
 
     fn lower_compound(&mut self, arena: &Arena, node: &CAstNode) -> Result<(), BackendError> {
+        self.push_scope();
         let mut child_offset = node.first_child;
         while child_offset != NodeOffset::NULL {
             if let Some(child) = arena.get(child_offset) {
@@ -1591,6 +1628,7 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                 break;
             }
         }
+        self.pop_scope();
         Ok(())
     }
 

@@ -422,7 +422,87 @@ impl Preprocessor {
             }
             return macros;
         }
-        Vec::new()
+        // Fallback: no system compiler found, define essential platform macros
+        Self::platform_fallback_macros()
+    }
+
+    /// Fallback platform-specific macros when no system compiler (gcc/clang/cc) is available.
+    /// These cover the macros most commonly tested by real-world C code (#ifdef __linux__, etc.).
+    fn platform_fallback_macros() -> Vec<(String, MacroDefinition)> {
+        let mut macros = Vec::new();
+        let mut def = |name: &str, value: &str| {
+            macros.push((
+                name.to_string(),
+                MacroDefinition::ObjectLike {
+                    replacement: Self::tokenize_replacement_static(value),
+                },
+            ));
+        };
+
+        // OS detection
+        #[cfg(target_os = "linux")]
+        {
+            def("__linux__", "1");
+            def("__linux", "1");
+            def("linux", "1");
+            def("__unix__", "1");
+            def("__unix", "1");
+            def("unix", "1");
+            def("__gnu_linux__", "1");
+        }
+        #[cfg(target_os = "macos")]
+        {
+            def("__APPLE__", "1");
+            def("__MACH__", "1");
+            def("__unix__", "1");
+        }
+
+        // Architecture detection
+        #[cfg(target_arch = "x86_64")]
+        {
+            def("__x86_64__", "1");
+            def("__x86_64", "1");
+            def("__amd64__", "1");
+            def("__amd64", "1");
+            def("__LP64__", "1");
+            def("_LP64", "1");
+        }
+        #[cfg(target_arch = "aarch64")]
+        {
+            def("__aarch64__", "1");
+            def("__LP64__", "1");
+            def("_LP64", "1");
+        }
+
+        // Data model
+        def("__BYTE_ORDER__", "1234"); // little-endian
+        def("__ORDER_LITTLE_ENDIAN__", "1234");
+        def("__ORDER_BIG_ENDIAN__", "4321");
+        def("__CHAR_BIT__", "8");
+        def("__BIGGEST_ALIGNMENT__", "16");
+
+        // Integer width macros
+        def("__INT8_TYPE__", "signed char");
+        def("__INT16_TYPE__", "short");
+        def("__INT32_TYPE__", "int");
+        def("__INT64_TYPE__", "long long");
+        def("__UINT8_TYPE__", "unsigned char");
+        def("__UINT16_TYPE__", "unsigned short");
+        def("__UINT32_TYPE__", "unsigned int");
+        def("__UINT64_TYPE__", "unsigned long long");
+        def("__INTPTR_TYPE__", "long");
+        def("__UINTPTR_TYPE__", "unsigned long");
+        def("__SIZE_TYPE__", "unsigned long");
+        def("__PTRDIFF_TYPE__", "long");
+
+        // Common feature macros
+        def("__FINITE_MATH_ONLY__", "0");
+        def("__OPTIMIZE__", "0");
+        def("__PIC__", "2");
+        def("__pic__", "2");
+        def("__ELF__", "1");
+
+        macros
     }
 
     fn tokenize_replacement(&self, text: &str) -> Vec<Token> {
@@ -3198,5 +3278,33 @@ const char *s = STR(hello world);"#;
         let source = "#include <nonexistent.h>\nint x = 1;";
         let result = pp.process_source(source, "test.c");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_platform_fallback_macros_defined() {
+        // platform_fallback_macros should provide __BYTE_ORDER__ and __CHAR_BIT__ unconditionally
+        let macros = Preprocessor::platform_fallback_macros();
+        let names: Vec<&str> = macros.iter().map(|(n, _)| n.as_str()).collect();
+        assert!(names.contains(&"__BYTE_ORDER__"), "Expected __BYTE_ORDER__ in fallback macros");
+        assert!(names.contains(&"__CHAR_BIT__"), "Expected __CHAR_BIT__ in fallback macros");
+        assert!(names.contains(&"__SIZE_TYPE__"), "Expected __SIZE_TYPE__ in fallback macros");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_platform_fallback_linux_macros() {
+        let macros = Preprocessor::platform_fallback_macros();
+        let names: Vec<&str> = macros.iter().map(|(n, _)| n.as_str()).collect();
+        assert!(names.contains(&"__linux__"), "Expected __linux__ on Linux");
+        assert!(names.contains(&"__unix__"), "Expected __unix__ on Linux");
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn test_platform_fallback_x86_64_macros() {
+        let macros = Preprocessor::platform_fallback_macros();
+        let names: Vec<&str> = macros.iter().map(|(n, _)| n.as_str()).collect();
+        assert!(names.contains(&"__x86_64__"), "Expected __x86_64__ on x86_64");
+        assert!(names.contains(&"__LP64__"), "Expected __LP64__ on x86_64");
     }
 }
