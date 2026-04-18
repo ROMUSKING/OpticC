@@ -1544,15 +1544,20 @@ impl Parser {
         if token.kind == TokenKind::Identifier {
             if let Some(next) = self.peek_token(1) {
                 if next.kind == TokenKind::Punctuator && next.text == ":" {
-                    let _label_name = token.text.clone();
+                    let label_name = token.text.clone();
                     self.advance(); // skip label name
                     self.advance(); // skip ':'
+                    // Store label name in arena so backend can resolve it
+                    let label_str_offset = self
+                        .arena
+                        .store_string(&label_name)
+                        .unwrap_or(NodeOffset::NULL);
                     // A label must be followed by a statement
                     let stmt = self.parse_statement()?;
-                    // kind=51 for labeled statement
+                    // kind=51 for labeled statement, data=label name string offset
                     return Ok(self.alloc_node(
                         51,
-                        0,
+                        label_str_offset.0,
                         NodeOffset::NULL,
                         stmt,
                         NodeOffset::NULL,
@@ -1693,11 +1698,29 @@ impl Parser {
 
     fn parse_goto_statement(&mut self) -> Result<NodeOffset, ParseError> {
         self.expect("goto")?;
-        if self.current_token().kind == TokenKind::Identifier {
+        if self.current_token().text == "*" {
+            // Computed goto: goto *expr;
+            self.advance(); // skip '*'
+            let expr = self.parse_expression()?;
+            self.skip_punctuator(";");
+            // kind=49 with data=0 (no label name), first_child=expr for computed goto
+            Ok(self.alloc_node(49, 0, NodeOffset::NULL, expr, NodeOffset::NULL))
+        } else if self.current_token().kind == TokenKind::Identifier {
             let label = self.current_token().text.clone();
             self.advance();
             self.skip_punctuator(";");
-            Ok(self.alloc_node(49, 0, NodeOffset::NULL, NodeOffset::NULL, NodeOffset::NULL))
+            // Store label name in arena
+            let label_str_offset = self
+                .arena
+                .store_string(&label)
+                .unwrap_or(NodeOffset::NULL);
+            Ok(self.alloc_node(
+                49,
+                label_str_offset.0,
+                NodeOffset::NULL,
+                NodeOffset::NULL,
+                NodeOffset::NULL,
+            ))
         } else {
             self.skip_punctuator(";");
             Ok(self.alloc_node(49, 0, NodeOffset::NULL, NodeOffset::NULL, NodeOffset::NULL))

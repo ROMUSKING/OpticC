@@ -5,6 +5,7 @@ use inkwell::context::Context;
 use inkwell::module::Module;
 use inkwell::types::{BasicMetadataTypeEnum, BasicType, BasicTypeEnum, StructType};
 use inkwell::values::{BasicValue, BasicValueEnum, FunctionValue, PointerValue};
+use inkwell::basic_block::BasicBlock;
 use inkwell::AddressSpace;
 use std::collections::HashMap;
 
@@ -27,6 +28,12 @@ pub struct LlvmBackend<'ctx, 'types> {
     /// Registered pointee struct types keyed by pointer-backed variable/parameter name.
     pointer_struct_types: HashMap<String, StructType<'ctx>>,
     current_return_type: Option<BasicTypeEnum<'ctx>>,
+    /// Label name → BasicBlock mapping for goto/label support within a function.
+    label_blocks: HashMap<String, BasicBlock<'ctx>>,
+    /// Stack of break targets (innermost last) for switch/loop.
+    break_stack: Vec<BasicBlock<'ctx>>,
+    /// Stack of continue targets (innermost last) for loops.
+    continue_stack: Vec<BasicBlock<'ctx>>,
 }
 
 #[derive(Clone, Copy)]
@@ -60,6 +67,9 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
             struct_tag_fields: HashMap::new(),
             pointer_struct_types: HashMap::new(),
             current_return_type: None,
+            label_blocks: HashMap::new(),
+            break_stack: Vec::new(),
+            continue_stack: Vec::new(),
         }
     }
 
@@ -85,6 +95,9 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
             struct_tag_fields: HashMap::new(),
             pointer_struct_types: HashMap::new(),
             current_return_type: None,
+            label_blocks: HashMap::new(),
+            break_stack: Vec::new(),
+            continue_stack: Vec::new(),
         }
     }
 
@@ -1400,6 +1413,7 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
         }
         self.struct_fields.clear();
         self.pointer_struct_types.clear();
+        self.label_blocks.clear();
         self.current_return_type = if is_void_ret { None } else { Some(ret_llvm) };
 
         for (i, ((pname, ptype), struct_info)) in param_names
@@ -1573,17 +1587,10 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
             44 => self.lower_return_stmt(arena, &node),
             45 => self.lower_expr_stmt(arena, &node),
             48 => Ok(()),
-            46 | 47 => Ok(()), // break/continue
-            49 => Ok(()),      // goto (stub)
-            50 => Ok(()),      // switch (stub)
-            51 => {
-                // Labeled statement: first_child is the inner statement
-                if node.first_child != NodeOffset::NULL {
-                    self.lower_stmt(arena, node.first_child)
-                } else {
-                    Ok(())
-                }
-            }
+            46 | 47 => self.lower_break_continue(arena, &node),
+            49 => self.lower_goto_stmt(arena, &node),
+            50 => self.lower_switch_stmt(arena, &node),
+            51 => self.lower_labeled_stmt(arena, &node),
             52 => {
                 // Case label: next_sibling is the inner statement
                 if node.next_sibling != NodeOffset::NULL {
@@ -1731,14 +1738,23 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
         // kind=42: first_child=cond_wrap(kind=0)
         //   cond_wrap.first_child=condition_expr, cond_wrap.next_sibling=body
         let cond_wrap_offset = node.first_child;
-        let cond_offset = arena
-            .get(cond_wrap_offset)
-            .map(|w| w.first_child)
-            .unwrap_or(NodeOffset::NULL);
-        let body_offset = arena
-            .get(cond_wrap_offset)
-            .map(|w| w.next_sibling)
-            .unwrap_or(NodeOffset::NULL);
+
+        // do-while: data=1, first_child=body, next_sibling=condition
+        let is_do_while = node.data == 1;
+
+        let (cond_offset, body_offset) = if is_do_while {
+            (node.next_sibling, node.first_child)
+        } else {
+            let co = arena
+                .get(cond_wrap_offset)
+                .map(|w| w.first_child)
+                .unwrap_or(NodeOffset::NULL);
+            let bo = arena
+                .get(cond_wrap_offset)
+                .map(|w| w.next_sibling)
+                .unwrap_or(NodeOffset::NULL);
+            (co, bo)
+        };
 
         let function = self
             .builder
@@ -1750,21 +1766,46 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
         let body_bb = self.context.append_basic_block(function, "while.body");
         let end_bb = self.context.append_basic_block(function, "while.end");
 
-        self.builder
-            .build_unconditional_branch(cond_bb)
-            .map_err(|_| BackendError::InvalidNode)?;
+        // Push break/continue targets for this loop
+        self.break_stack.push(end_bb);
+        self.continue_stack.push(cond_bb);
 
+        if is_do_while {
+            // do-while: enter body first
+            self.builder
+                .build_unconditional_branch(body_bb)
+                .map_err(|_| BackendError::InvalidNode)?;
+        } else {
+            self.builder
+                .build_unconditional_branch(cond_bb)
+                .map_err(|_| BackendError::InvalidNode)?;
+        }
+
+        // Condition block
         self.builder.position_at_end(cond_bb);
-        let cond_val = self
-            .lower_expr(arena, cond_offset)?
-            .ok_or(BackendError::InvalidNode)?;
-        let cond_int = self.coerce_to_bool(cond_val)?;
-        self.builder
-            .build_conditional_branch(cond_int, body_bb, end_bb)
-            .map_err(|_| BackendError::InvalidNode)?;
+        if cond_offset != NodeOffset::NULL {
+            if let Some(cond_val) = self.lower_expr(arena, cond_offset)? {
+                let cond_int = self.coerce_to_bool(cond_val)?;
+                self.builder
+                    .build_conditional_branch(cond_int, body_bb, end_bb)
+                    .map_err(|_| BackendError::InvalidNode)?;
+            } else {
+                self.builder
+                    .build_unconditional_branch(body_bb)
+                    .map_err(|_| BackendError::InvalidNode)?;
+            }
+        } else {
+            // while(true)
+            self.builder
+                .build_unconditional_branch(body_bb)
+                .map_err(|_| BackendError::InvalidNode)?;
+        }
 
+        // Body block
         self.builder.position_at_end(body_bb);
-        self.lower_stmt(arena, body_offset)?;
+        if body_offset != NodeOffset::NULL {
+            let _ = self.lower_stmt(arena, body_offset);
+        }
         if self
             .builder
             .get_insert_block()
@@ -1775,6 +1816,10 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                 .build_unconditional_branch(cond_bb)
                 .map_err(|_| BackendError::InvalidNode)?;
         }
+
+        // Pop break/continue targets
+        self.break_stack.pop();
+        self.continue_stack.pop();
 
         self.builder.position_at_end(end_bb);
         Ok(())
@@ -1820,8 +1865,13 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
         }
 
         let cond_bb = self.context.append_basic_block(function, "for.cond");
+        let incr_bb = self.context.append_basic_block(function, "for.incr");
         let body_bb = self.context.append_basic_block(function, "for.body");
         let end_bb = self.context.append_basic_block(function, "for.end");
+
+        // Push break/continue targets: break→end, continue→incr (not cond!)
+        self.break_stack.push(end_bb);
+        self.continue_stack.push(incr_bb);
 
         self.builder
             .build_unconditional_branch(cond_bb)
@@ -1847,12 +1897,8 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
 
         self.builder.position_at_end(body_bb);
         if body_offset != NodeOffset::NULL {
-            self.lower_stmt(arena, body_offset)?;
+            let _ = self.lower_stmt(arena, body_offset);
         }
-        if incr_offset != NodeOffset::NULL {
-            let _ = self.lower_expr(arena, incr_offset)?;
-        }
-
         if self
             .builder
             .get_insert_block()
@@ -1860,12 +1906,379 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
             .is_none()
         {
             self.builder
+                .build_unconditional_branch(incr_bb)
+                .map_err(|_| BackendError::InvalidNode)?;
+        }
+
+        // Increment block
+        self.builder.position_at_end(incr_bb);
+        if incr_offset != NodeOffset::NULL {
+            let _ = self.lower_expr(arena, incr_offset)?;
+        }
+        if incr_bb.get_terminator().is_none() {
+            self.builder
                 .build_unconditional_branch(cond_bb)
                 .map_err(|_| BackendError::InvalidNode)?;
         }
 
+        // Pop break/continue targets
+        self.break_stack.pop();
+        self.continue_stack.pop();
+
         self.builder.position_at_end(end_bb);
         Ok(())
+    }
+
+    /// Lower a switch statement (kind=50).
+    /// AST: first_child=condition expr, next_sibling=body (compound stmt with case/default labels)
+    fn lower_switch_stmt(&mut self, arena: &Arena, node: &CAstNode) -> Result<(), BackendError> {
+        let cond_offset = node.first_child;
+        let body_offset = node.next_sibling;
+
+        let function = self
+            .builder
+            .get_insert_block()
+            .and_then(|bb| bb.get_parent())
+            .ok_or(BackendError::InvalidNode)?;
+
+        // Evaluate the switch condition
+        let cond_val = self
+            .lower_expr(arena, cond_offset)?
+            .ok_or(BackendError::InvalidNode)?;
+
+        let cond_int = if cond_val.is_int_value() {
+            cond_val.into_int_value()
+        } else if cond_val.is_pointer_value() {
+            self.builder
+                .build_ptr_to_int(
+                    cond_val.into_pointer_value(),
+                    self.context.i64_type(),
+                    "switch_ptr2int",
+                )
+                .map_err(|_| BackendError::InvalidNode)?
+        } else {
+            self.context.i32_type().const_int(0, false)
+        };
+
+        let end_bb = self.context.append_basic_block(function, "switch.end");
+        let default_bb = self.context.append_basic_block(function, "switch.default");
+
+        // Collect case values and create basic blocks for each case
+        let mut cases: Vec<(inkwell::values::IntValue<'ctx>, BasicBlock<'ctx>)> = Vec::new();
+        let mut case_bodies: Vec<(BasicBlock<'ctx>, NodeOffset)> = Vec::new();
+        let mut default_body_offset = NodeOffset::NULL;
+
+        // Walk the body to find case/default labels
+        self.collect_switch_cases(
+            arena,
+            body_offset,
+            function,
+            &cond_int,
+            &mut cases,
+            &mut case_bodies,
+            &mut default_body_offset,
+            default_bb,
+        );
+
+        // Build the switch instruction
+        let switch_inst = self
+            .builder
+            .build_switch(cond_int, default_bb, &cases)
+            .map_err(|_| BackendError::InvalidNode)?;
+        let _ = switch_inst; // used for building the instruction
+
+        // Push break target
+        self.break_stack.push(end_bb);
+
+        // Lower case bodies in order
+        for (bb, stmt_offset) in &case_bodies {
+            self.builder.position_at_end(*bb);
+            if *stmt_offset != NodeOffset::NULL {
+                let _ = self.lower_stmt(arena, *stmt_offset);
+            }
+            // Fall-through: if no terminator, branch to next case body or end
+            // Note: C switch semantics allow fall-through between cases
+        }
+
+        // Handle fall-through: for each case body without a terminator,
+        // branch to the next case body (fall-through) or to end
+        for i in 0..case_bodies.len() {
+            let (bb, _) = case_bodies[i];
+            if bb.get_terminator().is_none() {
+                self.builder.position_at_end(bb);
+                if i + 1 < case_bodies.len() {
+                    let next_bb = case_bodies[i + 1].0;
+                    self.builder
+                        .build_unconditional_branch(next_bb)
+                        .map_err(|_| BackendError::InvalidNode)?;
+                } else {
+                    self.builder
+                        .build_unconditional_branch(end_bb)
+                        .map_err(|_| BackendError::InvalidNode)?;
+                }
+            }
+        }
+
+        // Lower default body
+        self.builder.position_at_end(default_bb);
+        if default_body_offset != NodeOffset::NULL {
+            let _ = self.lower_stmt(arena, default_body_offset);
+        }
+        if default_bb.get_terminator().is_none() {
+            self.builder
+                .build_unconditional_branch(end_bb)
+                .map_err(|_| BackendError::InvalidNode)?;
+        }
+
+        // Pop break target
+        self.break_stack.pop();
+
+        self.builder.position_at_end(end_bb);
+        Ok(())
+    }
+
+    /// Recursively walk a compound statement to collect case/default labels for switch.
+    fn collect_switch_cases(
+        &mut self,
+        arena: &Arena,
+        offset: NodeOffset,
+        function: FunctionValue<'ctx>,
+        cond_int: &inkwell::values::IntValue<'ctx>,
+        cases: &mut Vec<(inkwell::values::IntValue<'ctx>, BasicBlock<'ctx>)>,
+        case_bodies: &mut Vec<(BasicBlock<'ctx>, NodeOffset)>,
+        default_body_offset: &mut NodeOffset,
+        default_bb: BasicBlock<'ctx>,
+    ) {
+        let node = match arena.get(offset) {
+            Some(n) => n,
+            None => return,
+        };
+
+        match node.kind {
+            52 => {
+                // Case label: first_child=case_value_expr, next_sibling=stmt
+                let case_val = if node.first_child != NodeOffset::NULL {
+                    self.lower_expr(arena, node.first_child).ok().flatten()
+                } else {
+                    None
+                };
+
+                let case_bb = self.context.append_basic_block(function, "switch.case");
+                let stmt_offset = node.next_sibling;
+
+                if let Some(val) = case_val {
+                    let case_int = if val.is_int_value() {
+                        // Match bitwidth to the switch condition
+                        let raw = val.into_int_value();
+                        let cond_bits = cond_int.get_type().get_bit_width();
+                        let case_bits = raw.get_type().get_bit_width();
+                        if case_bits < cond_bits {
+                            self.builder
+                                .build_int_z_extend(raw, cond_int.get_type(), "case_zext")
+                                .unwrap_or(raw)
+                        } else if case_bits > cond_bits {
+                            self.builder
+                                .build_int_truncate(raw, cond_int.get_type(), "case_trunc")
+                                .unwrap_or(raw)
+                        } else {
+                            raw
+                        }
+                    } else {
+                        // Non-int case value: treat as 0
+                        cond_int.get_type().const_int(0, false)
+                    };
+                    cases.push((case_int, case_bb));
+                } else {
+                    // Could not evaluate case value; use 0 as fallback
+                    cases.push((cond_int.get_type().const_int(0, false), case_bb));
+                }
+
+                case_bodies.push((case_bb, stmt_offset));
+
+                // The stmt in next_sibling may itself contain more case labels
+                // (fall-through chains like `case 1: case 2: stmt`)
+                if stmt_offset != NodeOffset::NULL {
+                    if let Some(stmt_node) = arena.get(stmt_offset) {
+                        if stmt_node.kind == 52 || stmt_node.kind == 53 {
+                            self.collect_switch_cases(
+                                arena,
+                                stmt_offset,
+                                function,
+                                cond_int,
+                                cases,
+                                case_bodies,
+                                default_body_offset,
+                                default_bb,
+                            );
+                        }
+                    }
+                }
+            }
+            53 => {
+                // Default label: first_child=stmt
+                *default_body_offset = node.first_child;
+                // The default stmt may also contain nested case labels
+                if node.first_child != NodeOffset::NULL {
+                    if let Some(child) = arena.get(node.first_child) {
+                        if child.kind == 52 || child.kind == 53 {
+                            self.collect_switch_cases(
+                                arena,
+                                node.first_child,
+                                function,
+                                cond_int,
+                                cases,
+                                case_bodies,
+                                default_body_offset,
+                                default_bb,
+                            );
+                        }
+                    }
+                }
+            }
+            40 => {
+                // Compound statement: walk children
+                let mut child_offset = node.first_child;
+                while child_offset != NodeOffset::NULL {
+                    if let Some(child) = arena.get(child_offset) {
+                        self.collect_switch_cases(
+                            arena,
+                            child_offset,
+                            function,
+                            cond_int,
+                            cases,
+                            case_bodies,
+                            default_body_offset,
+                            default_bb,
+                        );
+                        child_offset = child.next_sibling;
+                    } else {
+                        break;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Lower a goto statement (kind=49).
+    /// data = string offset of label name (0 if computed goto with first_child=expr)
+    fn lower_goto_stmt(&mut self, arena: &Arena, node: &CAstNode) -> Result<(), BackendError> {
+        let function = self
+            .builder
+            .get_insert_block()
+            .and_then(|bb| bb.get_parent())
+            .ok_or(BackendError::InvalidNode)?;
+
+        if node.data != 0 {
+            // Named goto
+            let label_name = arena
+                .get_string(NodeOffset(node.data))
+                .unwrap_or("")
+                .to_string();
+            if label_name.is_empty() {
+                return Ok(());
+            }
+
+            // Get or create the target basic block
+            let target_bb = if let Some(bb) = self.label_blocks.get(&label_name) {
+                *bb
+            } else {
+                let bb = self
+                    .context
+                    .append_basic_block(function, &format!("label.{}", label_name));
+                self.label_blocks.insert(label_name.clone(), bb);
+                bb
+            };
+
+            self.builder
+                .build_unconditional_branch(target_bb)
+                .map_err(|_| BackendError::InvalidNode)?;
+        }
+        // Computed goto (first_child=expr) is left as a no-op for now
+        Ok(())
+    }
+
+    /// Lower a labeled statement (kind=51).
+    /// data = string offset of label name, first_child = inner statement
+    fn lower_labeled_stmt(&mut self, arena: &Arena, node: &CAstNode) -> Result<(), BackendError> {
+        let function = self
+            .builder
+            .get_insert_block()
+            .and_then(|bb| bb.get_parent())
+            .ok_or(BackendError::InvalidNode)?;
+
+        let label_name = if node.data != 0 {
+            arena
+                .get_string(NodeOffset(node.data))
+                .unwrap_or("")
+                .to_string()
+        } else {
+            String::new()
+        };
+
+        if !label_name.is_empty() {
+            // Get or create the basic block for this label
+            let label_bb = if let Some(bb) = self.label_blocks.get(&label_name) {
+                *bb
+            } else {
+                let bb = self
+                    .context
+                    .append_basic_block(function, &format!("label.{}", label_name));
+                self.label_blocks.insert(label_name.clone(), bb);
+                bb
+            };
+
+            // Branch from current block to label block (fall-through)
+            if self
+                .builder
+                .get_insert_block()
+                .and_then(|bb| bb.get_terminator())
+                .is_none()
+            {
+                self.builder
+                    .build_unconditional_branch(label_bb)
+                    .map_err(|_| BackendError::InvalidNode)?;
+            }
+
+            self.builder.position_at_end(label_bb);
+        }
+
+        // Lower the inner statement
+        if node.first_child != NodeOffset::NULL {
+            self.lower_stmt(arena, node.first_child)?;
+        }
+        Ok(())
+    }
+
+    /// Lower break (kind=46) or continue (kind=47) statements.
+    fn lower_break_continue(
+        &mut self,
+        _arena: &Arena,
+        node: &CAstNode,
+    ) -> Result<(), BackendError> {
+        match node.kind {
+            46 => {
+                // break
+                if let Some(target) = self.break_stack.last() {
+                    let target = *target;
+                    self.builder
+                        .build_unconditional_branch(target)
+                        .map_err(|_| BackendError::InvalidNode)?;
+                }
+                Ok(())
+            }
+            47 => {
+                // continue
+                if let Some(target) = self.continue_stack.last() {
+                    let target = *target;
+                    self.builder
+                        .build_unconditional_branch(target)
+                        .map_err(|_| BackendError::InvalidNode)?;
+                }
+                Ok(())
+            }
+            _ => Ok(()),
+        }
     }
 
     fn lower_return_stmt(&mut self, arena: &Arena, node: &CAstNode) -> Result<(), BackendError> {
