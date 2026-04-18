@@ -1176,7 +1176,7 @@ impl Parser {
                     declarator =
                         self.alloc_node(9, 0, NodeOffset::NULL, declarator, NodeOffset::NULL);
                 } else {
-                    let params = self.parse_parameter_list()?;
+                    let (params, is_variadic) = self.parse_parameter_list()?;
                     self.expect(")")?;
                     // Chain params as declarator(ident).next_sibling so that
                     // link_siblings in parse_external_declaration cannot overwrite them
@@ -1186,8 +1186,10 @@ impl Parser {
                             d.next_sibling = params;
                         }
                     }
+                    // data=1 if variadic, 0 otherwise
+                    let va_flag = if is_variadic { 1 } else { 0 };
                     declarator =
-                        self.alloc_node(9, 0, NodeOffset::NULL, declarator, NodeOffset::NULL);
+                        self.alloc_node(9, va_flag, NodeOffset::NULL, declarator, NodeOffset::NULL);
                 }
             } else {
                 break;
@@ -1197,12 +1199,13 @@ impl Parser {
         Ok(declarator)
     }
 
-    fn parse_parameter_list(&mut self) -> Result<NodeOffset, ParseError> {
+    fn parse_parameter_list(&mut self) -> Result<(NodeOffset, bool), ParseError> {
         let mut first_param = NodeOffset::NULL;
         let mut last_param = NodeOffset::NULL;
+        let mut is_variadic = false;
 
         if self.current_token().text == ")" {
-            return Ok(first_param);
+            return Ok((first_param, is_variadic));
         }
 
         // Handle (void) — means no parameters
@@ -1210,7 +1213,7 @@ impl Parser {
             let next_pos = self.current + 1;
             if next_pos < self.tokens.len() && self.tokens[next_pos].text == ")" {
                 self.advance(); // skip "void"
-                return Ok(first_param);
+                return Ok((first_param, is_variadic));
             }
         }
 
@@ -1232,11 +1235,12 @@ impl Parser {
             }
             if self.current_token().text == "..." {
                 self.advance();
+                is_variadic = true;
                 break;
             }
         }
 
-        Ok(first_param)
+        Ok((first_param, is_variadic))
     }
 
     fn parse_parameter_declaration(&mut self) -> Result<NodeOffset, ParseError> {

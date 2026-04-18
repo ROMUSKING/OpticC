@@ -1227,6 +1227,7 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
         let mut param_types: Vec<BasicMetadataTypeEnum> = Vec::new();
         let mut return_llvm_type: Option<BasicTypeEnum<'ctx>> = None;
         let mut is_void_ret = false;
+        let mut is_variadic = false;
 
         let mut child_offset = node.first_child;
         while child_offset != NodeOffset::NULL {
@@ -1243,6 +1244,10 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                             self.find_function_declarator_offset(arena, child_offset)
                         {
                             if let Some(func_decl) = arena.get(func_decl_offset) {
+                                // Check variadic flag
+                                if func_decl.data == 1 {
+                                    is_variadic = true;
+                                }
                                 if !is_void_ret {
                                     return_llvm_type = Some(self.declarator_llvm_type(
                                         arena,
@@ -1285,9 +1290,9 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
 
         let ret_llvm = return_llvm_type.unwrap_or_else(|| self.context.i32_type().as_basic_type_enum());
         let fn_type = if is_void_ret {
-            self.context.void_type().fn_type(&param_types, false)
+            self.context.void_type().fn_type(&param_types, is_variadic)
         } else {
-            ret_llvm.fn_type(&param_types, false)
+            ret_llvm.fn_type(&param_types, is_variadic)
         };
         let function = self.module.add_function(&func_name, fn_type, None);
         self.functions.insert(func_name, function);
@@ -1314,6 +1319,7 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
         let mut body_offset = NodeOffset::NULL;
         let mut return_llvm_type: Option<BasicTypeEnum<'ctx>> = None;
         let mut is_void_ret = false;
+        let mut is_variadic = false;
 
         // Walk first_child chain: specifiers -> kind=9(func_decl) -> kind=40(body)
         let mut child_offset = node.first_child;
@@ -1346,6 +1352,10 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                             continue;
                         };
                         seen_func_declarator = true;
+                        // Check variadic flag (data=1 means ...)
+                        if func_decl.data == 1 {
+                            is_variadic = true;
+                        }
                         if !is_void_ret {
                             return_llvm_type = Some(self.declarator_llvm_type(
                                 arena,
@@ -1394,9 +1404,9 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
         let ret_llvm =
             return_llvm_type.unwrap_or_else(|| self.context.i32_type().as_basic_type_enum());
         let fn_type = if is_void_ret {
-            self.context.void_type().fn_type(&param_types, false)
+            self.context.void_type().fn_type(&param_types, is_variadic)
         } else {
-            ret_llvm.fn_type(&param_types, false)
+            ret_llvm.fn_type(&param_types, is_variadic)
         };
         // Use the pre-registered function if available, otherwise create new
         let function = self.module.get_function(&func_name)
@@ -3115,6 +3125,91 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
         }
 
         if let Some(name) = func_name {
+            // Intercept va_start/va_end/va_copy/va_arg as LLVM intrinsics
+            match name {
+                "__builtin_va_start" | "va_start" => {
+                    // va_start(ap) → llvm.va_start(ap)
+                    let va_start_type = self
+                        .context
+                        .void_type()
+                        .fn_type(&[self.context.ptr_type(AddressSpace::default()).into()], false);
+                    let va_start_fn = self
+                        .module
+                        .get_function("llvm.va_start")
+                        .unwrap_or_else(|| {
+                            self.module
+                                .add_function("llvm.va_start", va_start_type, None)
+                        });
+                    if let Some(ap_arg) = args.first() {
+                        let ap_ptr = match ap_arg {
+                            inkwell::values::BasicMetadataValueEnum::PointerValue(p) => Some(*p),
+                            _ => None,
+                        };
+                        if let Some(ptr) = ap_ptr {
+                            let _ = self
+                                .builder
+                                .build_call(va_start_fn, &[ptr.into()], "");
+                        }
+                    }
+                    return Ok(Some(self.context.i32_type().const_int(0, false).into()));
+                }
+                "__builtin_va_end" | "va_end" => {
+                    let va_end_type = self
+                        .context
+                        .void_type()
+                        .fn_type(&[self.context.ptr_type(AddressSpace::default()).into()], false);
+                    let va_end_fn = self
+                        .module
+                        .get_function("llvm.va_end")
+                        .unwrap_or_else(|| {
+                            self.module.add_function("llvm.va_end", va_end_type, None)
+                        });
+                    if let Some(ap_arg) = args.first() {
+                        let ap_ptr = match ap_arg {
+                            inkwell::values::BasicMetadataValueEnum::PointerValue(p) => Some(*p),
+                            _ => None,
+                        };
+                        if let Some(ptr) = ap_ptr {
+                            let _ = self.builder.build_call(va_end_fn, &[ptr.into()], "");
+                        }
+                    }
+                    return Ok(Some(self.context.i32_type().const_int(0, false).into()));
+                }
+                "__builtin_va_copy" | "va_copy" => {
+                    let va_copy_type = self.context.void_type().fn_type(
+                        &[
+                            self.context.ptr_type(AddressSpace::default()).into(),
+                            self.context.ptr_type(AddressSpace::default()).into(),
+                        ],
+                        false,
+                    );
+                    let va_copy_fn = self
+                        .module
+                        .get_function("llvm.va_copy")
+                        .unwrap_or_else(|| {
+                            self.module
+                                .add_function("llvm.va_copy", va_copy_type, None)
+                        });
+                    if args.len() >= 2 {
+                        let dest = match &args[0] {
+                            inkwell::values::BasicMetadataValueEnum::PointerValue(p) => Some(*p),
+                            _ => None,
+                        };
+                        let src = match &args[1] {
+                            inkwell::values::BasicMetadataValueEnum::PointerValue(p) => Some(*p),
+                            _ => None,
+                        };
+                        if let (Some(d), Some(s)) = (dest, src) {
+                            let _ = self
+                                .builder
+                                .build_call(va_copy_fn, &[d.into(), s.into()], "");
+                        }
+                    }
+                    return Ok(Some(self.context.i32_type().const_int(0, false).into()));
+                }
+                _ => {}
+            }
+
             if let Some(func) = self.functions.get(name) {
                 let call_site = self
                     .builder
