@@ -828,7 +828,7 @@ mod tests {
     #[test]
     fn test_download_mock() {
         let temp_dir =
-            std::env::temp_dir().join(format!("optic_integration_test_{}", std::process::id()));
+            std::env::temp_dir().join(format!("optic_integration_test_dl_{}", std::process::id()));
         let output_dir = temp_dir.join("output");
 
         let test = IntegrationTest::new(
@@ -848,7 +848,7 @@ mod tests {
     #[test]
     fn test_preprocess_mock() {
         let temp_dir =
-            std::env::temp_dir().join(format!("optic_integration_test_{}", std::process::id()));
+            std::env::temp_dir().join(format!("optic_integration_test_pp_{}", std::process::id()));
         let output_dir = temp_dir.join("output");
         fs::create_dir_all(&temp_dir).unwrap();
 
@@ -872,7 +872,7 @@ mod tests {
     #[test]
     fn test_compile_mock() {
         let temp_dir =
-            std::env::temp_dir().join(format!("optic_integration_test_{}", std::process::id()));
+            std::env::temp_dir().join(format!("optic_integration_test_cc_{}", std::process::id()));
         let output_dir = temp_dir.join("output");
         fs::create_dir_all(&temp_dir).unwrap();
 
@@ -896,7 +896,7 @@ mod tests {
     #[test]
     fn test_link_mock() {
         let temp_dir =
-            std::env::temp_dir().join(format!("optic_integration_test_{}", std::process::id()));
+            std::env::temp_dir().join(format!("optic_integration_test_ln_{}", std::process::id()));
         let output_dir = temp_dir.join("output");
         fs::create_dir_all(&temp_dir).unwrap();
 
@@ -921,7 +921,7 @@ mod tests {
     #[test]
     fn test_extract_mock() {
         let temp_dir =
-            std::env::temp_dir().join(format!("optic_integration_test_{}", std::process::id()));
+            std::env::temp_dir().join(format!("optic_integration_test_ex_{}", std::process::id()));
         let output_dir = temp_dir.join("output");
         fs::create_dir_all(&temp_dir).unwrap();
 
@@ -947,7 +947,7 @@ mod tests {
     #[test]
     fn test_full_pipeline_mock() {
         let temp_dir =
-            std::env::temp_dir().join(format!("optic_integration_test_{}", std::process::id()));
+            std::env::temp_dir().join(format!("optic_integration_test_fp_{}", std::process::id()));
         let output_dir = temp_dir.join("output");
 
         let test = IntegrationTest::new(

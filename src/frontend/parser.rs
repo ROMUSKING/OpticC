@@ -1540,6 +1540,9 @@ impl Parser {
                         NodeOffset::NULL,
                     ));
                 }
+                "asm" | "__asm__" | "__asm" => {
+                    return self.parse_asm_stmt();
+                }
                 _ => {}
             }
         }
