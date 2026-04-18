@@ -1,4 +1,6 @@
+use crate::build::{compile_source_to_object_with_stats, CompilePhaseTimings};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -13,11 +15,18 @@ pub struct BenchmarkResult {
     pub metrics: BenchmarkMetrics,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
 pub struct BenchmarkMetrics {
     pub compile_time_ms: u64,
     pub output_size_bytes: u64,
     pub peak_memory_kb: u64,
+    pub preprocess_time_ms: u64,
+    pub parse_time_ms: u64,
+    pub codegen_time_ms: u64,
+    pub optimize_time_ms: u64,
+    pub ir_write_time_ms: u64,
+    pub llc_time_ms: u64,
     pub correctness: String,
     pub test_total: u64,
     pub test_passed: u64,
@@ -30,6 +39,12 @@ impl BenchmarkMetrics {
             compile_time_ms: 0,
             output_size_bytes: 0,
             peak_memory_kb: 0,
+            preprocess_time_ms: 0,
+            parse_time_ms: 0,
+            codegen_time_ms: 0,
+            optimize_time_ms: 0,
+            ir_write_time_ms: 0,
+            llc_time_ms: 0,
             correctness: "error".to_string(),
             test_total: 0,
             test_passed: 0,
@@ -42,6 +57,12 @@ impl BenchmarkMetrics {
             compile_time_ms: 0,
             output_size_bytes: 0,
             peak_memory_kb: 0,
+            preprocess_time_ms: 0,
+            parse_time_ms: 0,
+            codegen_time_ms: 0,
+            optimize_time_ms: 0,
+            ir_write_time_ms: 0,
+            llc_time_ms: 0,
             correctness: "pass".to_string(),
             test_total: tests,
             test_passed: tests,
@@ -54,17 +75,24 @@ impl BenchmarkMetrics {
             compile_time_ms: 0,
             output_size_bytes: 0,
             peak_memory_kb: 0,
+            preprocess_time_ms: 0,
+            parse_time_ms: 0,
+            codegen_time_ms: 0,
+            optimize_time_ms: 0,
+            ir_write_time_ms: 0,
+            llc_time_ms: 0,
             correctness: "fail".to_string(),
             test_total: tests,
             test_passed: tests.saturating_sub(failed),
             test_failed: failed,
         }
     }
-}
 
-impl Default for BenchmarkMetrics {
-    fn default() -> Self {
-        Self::new()
+    pub fn skipped() -> Self {
+        BenchmarkMetrics {
+            correctness: "skipped".to_string(),
+            ..BenchmarkMetrics::new()
+        }
     }
 }
 
@@ -91,6 +119,8 @@ pub struct CompilerConfig {
     pub command: String,
     pub compile_args: Vec<String>,
     pub link_args: Vec<String>,
+    pub compile_only: bool,
+    pub internal: bool,
 }
 
 impl CompilerConfig {
@@ -100,10 +130,13 @@ impl CompilerConfig {
             command: command.to_string(),
             compile_args: Vec::new(),
             link_args: Vec::new(),
+            compile_only: false,
+            internal: false,
         }
     }
 
     pub fn with_compile_args(mut self, args: Vec<String>) -> Self {
+        self.compile_only = args.iter().any(|arg| arg == "-c");
         self.compile_args = args;
         self
     }
@@ -113,7 +146,26 @@ impl CompilerConfig {
         self
     }
 
+    pub fn with_compile_only(mut self, compile_only: bool) -> Self {
+        self.compile_only = compile_only;
+        self
+    }
+
+    pub fn opticc() -> Self {
+        CompilerConfig {
+            name: "opticc".to_string(),
+            command: "opticc".to_string(),
+            compile_args: Vec::new(),
+            link_args: Vec::new(),
+            compile_only: true,
+            internal: true,
+        }
+    }
+
     pub fn is_available(&self) -> bool {
+        if self.internal {
+            return true;
+        }
         Command::new(&self.command)
             .arg("--version")
             .output()
@@ -121,6 +173,9 @@ impl CompilerConfig {
     }
 
     pub fn get_version(&self) -> String {
+        if self.internal {
+            return env!("CARGO_PKG_VERSION").to_string();
+        }
         match Command::new(&self.command).arg("--version").output() {
             Ok(output) => {
                 let stdout = String::from_utf8_lossy(&output.stdout);
@@ -129,6 +184,13 @@ impl CompilerConfig {
             Err(_) => "unknown".to_string(),
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct CompileMeasurement {
+    pub total_ms: u64,
+    pub peak_memory_kb: u64,
+    pub phase_timings: CompilePhaseTimings,
 }
 
 #[derive(Debug)]
@@ -177,6 +239,8 @@ pub struct BenchmarkRunner {
 impl BenchmarkRunner {
     pub fn new() -> Self {
         let mut compilers = Vec::new();
+        compilers.push(CompilerConfig::opticc());
+
         let gcc = CompilerConfig::new("gcc", "gcc")
             .with_compile_args(vec!["-c".to_string()])
             .with_link_args(vec![]);
@@ -325,20 +389,20 @@ impl BenchmarkRunner {
         let opt_flag = format!("-{}", optimization);
         let out_path = bench_dir.join(format!("test_{}_{}", compiler.name, optimization));
 
-        let mut compile_times = Vec::new();
+        let mut measurements = Vec::new();
         let mut compile_success = false;
 
         for _ in 0..self.runs_per_benchmark {
             let elapsed = self.measure_compile_time(compiler, &src_path, &out_path, &opt_flag);
             if let Ok(ms) = elapsed {
-                compile_times.push(ms);
+                measurements.push(ms);
                 compile_success = true;
             } else {
                 break;
             }
         }
 
-        if !compile_success || compile_times.is_empty() {
+        if !compile_success || measurements.is_empty() {
             return Ok(BenchmarkResult {
                 name: name.to_string(),
                 compiler: compiler.name.clone(),
@@ -351,18 +415,24 @@ impl BenchmarkRunner {
             });
         }
 
-        let avg_compile_time = compile_times.iter().sum::<u64>() / compile_times.len() as u64;
+        let avg_compile_time =
+            measurements.iter().map(|m| m.total_ms).sum::<u64>() / measurements.len() as u64;
 
         let output_size = self.measure_output_size(&out_path).unwrap_or(0);
 
-        let peak_memory = measure_peak_memory().unwrap_or(0);
-
-        let correctness = self.measure_correctness(&out_path, name);
+        let measurement = average_measurements(&measurements);
+        let correctness = self.measure_correctness(&out_path, compiler, name);
 
         let metrics = BenchmarkMetrics {
             compile_time_ms: avg_compile_time,
             output_size_bytes: output_size,
-            peak_memory_kb: peak_memory,
+            peak_memory_kb: measurement.peak_memory_kb,
+            preprocess_time_ms: measurement.phase_timings.preprocess_ms,
+            parse_time_ms: measurement.phase_timings.parse_ms,
+            codegen_time_ms: measurement.phase_timings.codegen_ms,
+            optimize_time_ms: measurement.phase_timings.optimize_ms,
+            ir_write_time_ms: measurement.phase_timings.ir_write_ms,
+            llc_time_ms: measurement.phase_timings.llc_ms,
             correctness: correctness.correctness.clone(),
             test_total: correctness.test_total,
             test_passed: correctness.test_passed,
@@ -384,7 +454,28 @@ impl BenchmarkRunner {
         src_path: &Path,
         out_path: &Path,
         opt_flag: &str,
-    ) -> Result<u64, BenchmarkError> {
+    ) -> Result<CompileMeasurement, BenchmarkError> {
+        if compiler.internal {
+            let opt_level = opt_flag
+                .trim_start_matches("-O")
+                .parse::<u32>()
+                .unwrap_or(0);
+            let timings = compile_source_to_object_with_stats(
+                src_path,
+                out_path,
+                opt_level,
+                &[],
+                &HashMap::new(),
+            )
+            .map_err(|e| BenchmarkError::CompileError(src_path.display().to_string(), e.to_string()))?;
+
+            return Ok(CompileMeasurement {
+                total_ms: timings.total_ms(),
+                peak_memory_kb: measure_peak_memory().unwrap_or(0),
+                phase_timings: timings,
+            });
+        }
+
         let start = Instant::now();
 
         let mut cmd = Command::new(&compiler.command);
@@ -406,7 +497,11 @@ impl BenchmarkRunner {
             ));
         }
 
-        Ok(elapsed)
+        Ok(CompileMeasurement {
+            total_ms: elapsed,
+            peak_memory_kb: measure_peak_memory().unwrap_or(0),
+            phase_timings: CompilePhaseTimings::default(),
+        })
     }
 
     pub fn measure_output_size(&self, out_path: &Path) -> Result<u64, BenchmarkError> {
@@ -414,7 +509,15 @@ impl BenchmarkRunner {
         Ok(metadata.len())
     }
 
-    pub fn measure_correctness(&self, binary_path: &Path, _name: &str) -> BenchmarkMetrics {
+    pub fn measure_correctness(
+        &self,
+        binary_path: &Path,
+        compiler: &CompilerConfig,
+        _name: &str,
+    ) -> BenchmarkMetrics {
+        if compiler.compile_only {
+            return BenchmarkMetrics::skipped();
+        }
         if !binary_path.exists() {
             return BenchmarkMetrics::fail(1, 1);
         }
@@ -528,11 +631,35 @@ pub fn generate_markdown_report(results: &[BenchmarkResult]) -> String {
     let passed = results.iter().filter(|r| r.metrics.correctness == "pass").count();
     let failed = results.iter().filter(|r| r.metrics.correctness == "fail").count();
     let errors = results.iter().filter(|r| r.metrics.correctness == "error").count();
+    let skipped = results.iter().filter(|r| r.metrics.correctness == "skipped").count();
 
     md.push_str(&format!("- Total benchmarks: {}\n", total));
     md.push_str(&format!("- Passed: {}\n", passed));
     md.push_str(&format!("- Failed: {}\n", failed));
     md.push_str(&format!("- Errors: {}\n", errors));
+    md.push_str(&format!("- Skipped correctness checks: {}\n", skipped));
+
+    let opticc_results: Vec<&BenchmarkResult> =
+        results.iter().filter(|r| r.compiler == "opticc").collect();
+    if !opticc_results.is_empty() {
+        md.push_str("\n## OpticC Phase Breakdown\n\n");
+        md.push_str("| Benchmark | Optimization | Preprocess | Parse | Codegen | Optimize | IR Write | llc |\n");
+        md.push_str("|-----------|--------------|------------|-------|---------|----------|----------|-----|\n");
+
+        for result in opticc_results {
+            md.push_str(&format!(
+                "| {} | {} | {} | {} | {} | {} | {} | {} |\n",
+                result.name,
+                result.optimization,
+                result.metrics.preprocess_time_ms,
+                result.metrics.parse_time_ms,
+                result.metrics.codegen_time_ms,
+                result.metrics.optimize_time_ms,
+                result.metrics.ir_write_time_ms,
+                result.metrics.llc_time_ms,
+            ));
+        }
+    }
 
     md
 }
@@ -574,6 +701,18 @@ pub fn calculate_averages(results: &[BenchmarkResult]) -> Vec<BenchmarkResult> {
                 compile_time_ms: avg_compile,
                 output_size_bytes: avg_output,
                 peak_memory_kb: avg_memory,
+                preprocess_time_ms: group.iter().map(|r| r.metrics.preprocess_time_ms).sum::<u64>()
+                    / group.len() as u64,
+                parse_time_ms: group.iter().map(|r| r.metrics.parse_time_ms).sum::<u64>()
+                    / group.len() as u64,
+                codegen_time_ms: group.iter().map(|r| r.metrics.codegen_time_ms).sum::<u64>()
+                    / group.len() as u64,
+                optimize_time_ms: group.iter().map(|r| r.metrics.optimize_time_ms).sum::<u64>()
+                    / group.len() as u64,
+                ir_write_time_ms: group.iter().map(|r| r.metrics.ir_write_time_ms).sum::<u64>()
+                    / group.len() as u64,
+                llc_time_ms: group.iter().map(|r| r.metrics.llc_time_ms).sum::<u64>()
+                    / group.len() as u64,
                 correctness: first.metrics.correctness.clone(),
                 test_total: first.metrics.test_total,
                 test_passed: first.metrics.test_passed,
@@ -620,6 +759,54 @@ fn measure_peak_memory() -> Result<u64, BenchmarkError> {
         }
     }
     Ok(0)
+}
+
+fn average_measurements(measurements: &[CompileMeasurement]) -> CompileMeasurement {
+    if measurements.is_empty() {
+        return CompileMeasurement::default();
+    }
+
+    let len = measurements.len() as u64;
+    CompileMeasurement {
+        total_ms: measurements.iter().map(|m| m.total_ms).sum::<u64>() / len,
+        peak_memory_kb: measurements
+            .iter()
+            .map(|m| m.peak_memory_kb)
+            .sum::<u64>()
+            / len,
+        phase_timings: CompilePhaseTimings {
+            preprocess_ms: measurements
+                .iter()
+                .map(|m| m.phase_timings.preprocess_ms)
+                .sum::<u64>()
+                / len,
+            parse_ms: measurements
+                .iter()
+                .map(|m| m.phase_timings.parse_ms)
+                .sum::<u64>()
+                / len,
+            codegen_ms: measurements
+                .iter()
+                .map(|m| m.phase_timings.codegen_ms)
+                .sum::<u64>()
+                / len,
+            optimize_ms: measurements
+                .iter()
+                .map(|m| m.phase_timings.optimize_ms)
+                .sum::<u64>()
+                / len,
+            ir_write_ms: measurements
+                .iter()
+                .map(|m| m.phase_timings.ir_write_ms)
+                .sum::<u64>()
+                / len,
+            llc_ms: measurements
+                .iter()
+                .map(|m| m.phase_timings.llc_ms)
+                .sum::<u64>()
+                / len,
+        },
+    }
 }
 
 fn generate_synthetic_c(num_functions: usize) -> String {
@@ -822,6 +1009,7 @@ mod tests {
         assert_eq!(config.command, "gcc");
         assert_eq!(config.compile_args, vec!["-c".to_string()]);
         assert_eq!(config.link_args, vec!["-lm".to_string()]);
+        assert!(config.compile_only);
     }
 
     #[test]
@@ -898,6 +1086,7 @@ mod tests {
         let runner = BenchmarkRunner::new();
         let metrics = runner.measure_correctness(
             Path::new("/nonexistent/binary_xyz_123"),
+            &CompilerConfig::new("gcc", "gcc"),
             "test",
         );
         assert_eq!(metrics.correctness, "fail");
@@ -922,7 +1111,8 @@ mod tests {
                 let _ = Command::new("gcc").arg("-o").arg(&out).arg(&src).output();
                 if out.exists() {
                     let runner = BenchmarkRunner::new();
-                    let metrics = runner.measure_correctness(&out, "test");
+                    let metrics =
+                        runner.measure_correctness(&out, &CompilerConfig::new("gcc", "gcc"), "test");
                     assert_eq!(metrics.correctness, "pass");
                 }
             }
@@ -950,10 +1140,7 @@ mod tests {
                     compile_time_ms: 100,
                     output_size_bytes: 8192,
                     peak_memory_kb: 1024,
-                    correctness: "pass".to_string(),
-                    test_total: 1,
-                    test_passed: 1,
-                    test_failed: 0,
+                    ..BenchmarkMetrics::pass(1)
                 },
             },
         ];
@@ -998,10 +1185,7 @@ mod tests {
                     compile_time_ms: 100,
                     output_size_bytes: 8000,
                     peak_memory_kb: 1000,
-                    correctness: "pass".to_string(),
-                    test_total: 1,
-                    test_passed: 1,
-                    test_failed: 0,
+                    ..BenchmarkMetrics::pass(1)
                 },
             },
             BenchmarkResult {
@@ -1013,10 +1197,7 @@ mod tests {
                     compile_time_ms: 200,
                     output_size_bytes: 8200,
                     peak_memory_kb: 1100,
-                    correctness: "pass".to_string(),
-                    test_total: 1,
-                    test_passed: 1,
-                    test_failed: 0,
+                    ..BenchmarkMetrics::pass(1)
                 },
             },
         ];
@@ -1040,10 +1221,7 @@ mod tests {
                     compile_time_ms: 100,
                     output_size_bytes: 8000,
                     peak_memory_kb: 1000,
-                    correctness: "pass".to_string(),
-                    test_total: 1,
-                    test_passed: 1,
-                    test_failed: 0,
+                    ..BenchmarkMetrics::pass(1)
                 },
             },
             BenchmarkResult {
@@ -1055,10 +1233,7 @@ mod tests {
                     compile_time_ms: 80,
                     output_size_bytes: 7500,
                     peak_memory_kb: 900,
-                    correctness: "pass".to_string(),
-                    test_total: 1,
-                    test_passed: 1,
-                    test_failed: 0,
+                    ..BenchmarkMetrics::pass(1)
                 },
             },
         ];
@@ -1079,10 +1254,7 @@ mod tests {
                     compile_time_ms: 100,
                     output_size_bytes: 8000,
                     peak_memory_kb: 1000,
-                    correctness: "pass".to_string(),
-                    test_total: 1,
-                    test_passed: 1,
-                    test_failed: 0,
+                    ..BenchmarkMetrics::pass(1)
                 },
             },
             BenchmarkResult {
@@ -1094,10 +1266,7 @@ mod tests {
                     compile_time_ms: 80,
                     output_size_bytes: 7500,
                     peak_memory_kb: 900,
-                    correctness: "pass".to_string(),
-                    test_total: 1,
-                    test_passed: 1,
-                    test_failed: 0,
+                    ..BenchmarkMetrics::pass(1)
                 },
             },
         ];
@@ -1191,10 +1360,9 @@ mod tests {
                 compile_time_ms: 100,
                 output_size_bytes: 8192,
                 peak_memory_kb: 1024,
-                correctness: "pass".to_string(),
                 test_total: 5,
                 test_passed: 5,
-                test_failed: 0,
+                ..BenchmarkMetrics::pass(5)
             },
         };
 

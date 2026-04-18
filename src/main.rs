@@ -182,8 +182,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 for name in compilers.split(',') {
                     let name = name.trim();
                     let config = match name {
-                        "gcc" => CompilerConfig::new("gcc", "gcc"),
-                        "clang" => CompilerConfig::new("clang", "clang"),
+                        "opticc" => CompilerConfig::opticc(),
+                        "gcc" => CompilerConfig::new("gcc", "gcc").with_compile_args(vec!["-c".to_string()]),
+                        "clang" => CompilerConfig::new("clang", "clang").with_compile_args(vec!["-c".to_string()]),
                         _ => {
                             eprintln!("Unknown compiler: {}", name);
                             continue;

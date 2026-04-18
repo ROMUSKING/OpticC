@@ -6,6 +6,7 @@ use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::OnceLock;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Token {
@@ -149,11 +150,17 @@ pub struct Preprocessor {
     active_include_guards: Vec<IncludeGuard>,
 }
 
+struct PreprocessorBootstrap {
+    include_paths: Vec<PathBuf>,
+    macros: Vec<(String, MacroDefinition)>,
+}
+
 impl Preprocessor {
     pub fn new(db: OpticDb) -> Self {
+        let bootstrap = Self::bootstrap();
         let mut p = Self {
             db,
-            include_paths: Self::default_include_paths(),
+            include_paths: bootstrap.include_paths.clone(),
             macros: HashMap::new(),
             pragmas: Vec::new(),
             warnings: Vec::new(),
@@ -163,12 +170,25 @@ impl Preprocessor {
             include_guards: HashMap::new(),
             active_include_guards: Vec::new(),
         };
-        p.define_predefined_macros();
-        p.define_compiler_predefined_macros();
+        p.define_bootstrap_macros(bootstrap);
         p
     }
 
-    fn default_include_paths() -> Vec<PathBuf> {
+    fn bootstrap() -> &'static PreprocessorBootstrap {
+        static BOOTSTRAP: OnceLock<PreprocessorBootstrap> = OnceLock::new();
+        BOOTSTRAP.get_or_init(Self::build_bootstrap)
+    }
+
+    fn build_bootstrap() -> PreprocessorBootstrap {
+        let mut macros = Self::predefined_macro_definitions();
+        macros.extend(Self::compiler_predefined_macro_definitions());
+        PreprocessorBootstrap {
+            include_paths: Self::discover_default_include_paths(),
+            macros,
+        }
+    }
+
+    fn discover_default_include_paths() -> Vec<PathBuf> {
         let mut include_paths = Vec::new();
 
         for key in ["C_INCLUDE_PATH", "CPATH"] {
@@ -195,6 +215,12 @@ impl Preprocessor {
         }
 
         include_paths
+    }
+
+    fn define_bootstrap_macros(&mut self, bootstrap: &PreprocessorBootstrap) {
+        for (name, definition) in &bootstrap.macros {
+            self.macros.insert(name.clone(), definition.clone());
+        }
     }
 
     fn detect_compiler_include_paths(compiler: &str) -> Vec<PathBuf> {
@@ -292,7 +318,7 @@ impl Preprocessor {
         &self.errors
     }
 
-    fn define_predefined_macros(&mut self) {
+    fn predefined_macro_definitions() -> Vec<(String, MacroDefinition)> {
         let predefined_int_macros = [
             ("__STDC__", "1".to_string()),
             ("__STDC_VERSION__", "201112L".to_string()),
@@ -309,17 +335,26 @@ impl Preprocessor {
             ("__SIZEOF_PTRDIFF_T__", std::mem::size_of::<libc::ptrdiff_t>().to_string()),
         ];
 
-        for (name, value) in predefined_int_macros {
-            self.macros.insert(
-                name.to_string(),
-                MacroDefinition::ObjectLike {
-                    replacement: vec![Token::new(TokenKind::IntLiteral, value, 0, 0, String::new())],
-                },
-            );
-        }
+        predefined_int_macros
+            .into_iter()
+            .map(|(name, value)| {
+                (
+                    name.to_string(),
+                    MacroDefinition::ObjectLike {
+                        replacement: vec![Token::new(
+                            TokenKind::IntLiteral,
+                            value,
+                            0,
+                            0,
+                            String::new(),
+                        )],
+                    },
+                )
+            })
+            .collect()
     }
 
-    fn define_compiler_predefined_macros(&mut self) {
+    fn compiler_predefined_macro_definitions() -> Vec<(String, MacroDefinition)> {
         for compiler in ["gcc", "clang", "cc"] {
             let output = match Command::new(compiler).args(["-dM", "-E", "-"]).output() {
                 Ok(output) => output,
@@ -330,6 +365,7 @@ impl Preprocessor {
             }
 
             let stdout = String::from_utf8_lossy(&output.stdout);
+            let mut macros = Vec::new();
             for line in stdout.lines() {
                 let Some(rest) = line.strip_prefix("#define ") else {
                     continue;
@@ -342,13 +378,23 @@ impl Preprocessor {
                     continue;
                 }
                 let value = parts.next().map(str::trim).filter(|v| !v.is_empty()).unwrap_or("1");
-                self.define_macro(name, value);
+                macros.push((
+                    name.to_string(),
+                    MacroDefinition::ObjectLike {
+                        replacement: Self::tokenize_replacement_static(value),
+                    },
+                ));
             }
-            break;
+            return macros;
         }
+        Vec::new()
     }
 
     fn tokenize_replacement(&self, text: &str) -> Vec<Token> {
+        Self::tokenize_replacement_static(text)
+    }
+
+    fn tokenize_replacement_static(text: &str) -> Vec<Token> {
         let mut tokens = Vec::new();
         let mut chars = text.chars().peekable();
 
@@ -1082,7 +1128,7 @@ impl Preprocessor {
         if let Some(parent) = Path::new(current_file).parent() {
             search_paths.push(parent.to_path_buf());
         }
-        search_paths.extend(self.include_paths.clone());
+        search_paths.extend(self.include_paths.iter().cloned());
 
         for search_path in &search_paths {
             let full_path = search_path.join(path);
