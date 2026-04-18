@@ -1593,6 +1593,17 @@ impl Parser {
     fn parse_case_label(&mut self) -> Result<NodeOffset, ParseError> {
         self.expect("case")?;
         let expr = self.parse_constant_expression()?;
+
+        // Check for GNU case range extension: case LOW ... HIGH:
+        if self.current_token().kind == TokenKind::Punctuator && self.current_token().text == "..." {
+            self.advance(); // skip '...'
+            let high_expr = self.parse_constant_expression()?;
+            self.expect(":")?;
+            let stmt = self.parse_statement()?;
+            // kind=54 (case_range): first_child=low_expr, data=high_expr.0, next_sibling=stmt
+            return Ok(self.alloc_node(54, high_expr.0, NodeOffset::NULL, expr, stmt));
+        }
+
         self.expect(":")?;
         let stmt = self.parse_statement()?;
         Ok(self.alloc_node(52, 0, NodeOffset::NULL, expr, stmt))

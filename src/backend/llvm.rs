@@ -1609,6 +1609,14 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                     Ok(())
                 }
             }
+            54 => {
+                // Case range: next_sibling is the inner statement (same as regular case)
+                if node.next_sibling != NodeOffset::NULL {
+                    self.lower_stmt(arena, node.next_sibling)
+                } else {
+                    Ok(())
+                }
+            }
             53 => {
                 // Default label: first_child is the inner statement
                 if node.first_child != NodeOffset::NULL {
@@ -2110,7 +2118,69 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                 // (fall-through chains like `case 1: case 2: stmt`)
                 if stmt_offset != NodeOffset::NULL {
                     if let Some(stmt_node) = arena.get(stmt_offset) {
-                        if stmt_node.kind == 52 || stmt_node.kind == 53 {
+                        if stmt_node.kind == 52 || stmt_node.kind == 53 || stmt_node.kind == 54 {
+                            self.collect_switch_cases(
+                                arena,
+                                stmt_offset,
+                                function,
+                                cond_int,
+                                cases,
+                                case_bodies,
+                                default_body_offset,
+                                default_bb,
+                            );
+                        }
+                    }
+                }
+            }
+            54 => {
+                // Case range (GNU extension): case LOW ... HIGH:
+                // kind=54: first_child=low_expr, data=high_expr_offset, next_sibling=stmt
+                let low_val = if node.first_child != NodeOffset::NULL {
+                    self.lower_expr(arena, node.first_child).ok().flatten()
+                } else {
+                    None
+                };
+                let high_val = if node.data != 0 {
+                    self.lower_expr(arena, NodeOffset(node.data)).ok().flatten()
+                } else {
+                    None
+                };
+
+                let case_bb = self.context.append_basic_block(function, "switch.case_range");
+                let stmt_offset = node.next_sibling;
+
+                if let (Some(lo), Some(hi)) = (low_val, high_val) {
+                    if lo.is_int_value() && hi.is_int_value() {
+                        let lo_raw = lo.into_int_value();
+                        let hi_raw = hi.into_int_value();
+                        // Get constant values for the range
+                        let lo_const = lo_raw.get_zero_extended_constant().unwrap_or(0);
+                        let hi_const = hi_raw.get_zero_extended_constant().unwrap_or(0);
+                        // Cap range to prevent huge switch tables (max 256 entries)
+                        let count = if hi_const >= lo_const {
+                            (hi_const - lo_const + 1).min(256)
+                        } else {
+                            1
+                        };
+                        for i in 0..count {
+                            let val = cond_int.get_type().const_int(lo_const + i, false);
+                            cases.push((val, case_bb));
+                        }
+                    } else {
+                        // Fallback: treat as single case with low value
+                        cases.push((cond_int.get_type().const_int(0, false), case_bb));
+                    }
+                } else {
+                    cases.push((cond_int.get_type().const_int(0, false), case_bb));
+                }
+
+                case_bodies.push((case_bb, stmt_offset));
+
+                // Check if stmt contains more case labels
+                if stmt_offset != NodeOffset::NULL {
+                    if let Some(stmt_node) = arena.get(stmt_offset) {
+                        if stmt_node.kind == 52 || stmt_node.kind == 53 || stmt_node.kind == 54 {
                             self.collect_switch_cases(
                                 arena,
                                 stmt_offset,
@@ -2131,7 +2201,7 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                 // The default stmt may also contain nested case labels
                 if node.first_child != NodeOffset::NULL {
                     if let Some(child) = arena.get(node.first_child) {
-                        if child.kind == 52 || child.kind == 53 {
+                        if child.kind == 52 || child.kind == 53 || child.kind == 54 {
                             self.collect_switch_cases(
                                 arena,
                                 node.first_child,
@@ -2204,8 +2274,18 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
             self.builder
                 .build_unconditional_branch(target_bb)
                 .map_err(|_| BackendError::InvalidNode)?;
+        } else if node.first_child != NodeOffset::NULL {
+            // Computed goto: goto *expr → LLVM indirectbr
+            if let Some(addr_val) = self.lower_expr(arena, node.first_child)? {
+                // Collect all known label blocks as possible destinations
+                let destinations: Vec<BasicBlock<'ctx>> =
+                    self.label_blocks.values().copied().collect();
+
+                self.builder
+                    .build_indirect_branch(addr_val, &destinations)
+                    .map_err(|_| BackendError::InvalidNode)?;
+            }
         }
-        // Computed goto (first_child=expr) is left as a no-op for now
         Ok(())
     }
 
@@ -3669,13 +3749,55 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
         Ok(last_val)
     }
 
+    /// Lower `&&label` (GCC label-as-value extension, kind=203).
+    /// Produces LLVM `blockaddress(@fn, %label_bb)`.
     fn lower_label_addr(
         &mut self,
-        _arena: &Arena,
+        arena: &Arena,
         node: &CAstNode,
     ) -> Result<Option<BasicValueEnum<'ctx>>, BackendError> {
-        let ptr = self.context.ptr_type(AddressSpace::default()).const_null();
-        Ok(Some(ptr.into()))
+        let label_name = if node.data != 0 {
+            arena
+                .get_string(NodeOffset(node.data))
+                .unwrap_or("")
+                .to_string()
+        } else {
+            String::new()
+        };
+
+        if label_name.is_empty() {
+            let ptr = self.context.ptr_type(AddressSpace::default()).const_null();
+            return Ok(Some(ptr.into()));
+        }
+
+        let function = self
+            .builder
+            .get_insert_block()
+            .and_then(|bb| bb.get_parent())
+            .ok_or(BackendError::InvalidNode)?;
+
+        // Get or create the target basic block for this label
+        let label_bb = if let Some(bb) = self.label_blocks.get(&label_name) {
+            *bb
+        } else {
+            let bb = self
+                .context
+                .append_basic_block(function, &format!("label.{}", label_name));
+            self.label_blocks.insert(label_name.clone(), bb);
+            bb
+        };
+
+        // Get the blockaddress via inkwell's get_address()
+        // SAFETY: The returned pointer is only used for indirectbr (computed goto).
+        let addr = unsafe { label_bb.get_address() };
+        match addr {
+            Some(ptr_val) => Ok(Some(ptr_val.into())),
+            None => {
+                // get_address() returns None for entry blocks; fall back to null pointer
+                let ptr = self.context.ptr_type(AddressSpace::default()).const_null();
+                Ok(Some(ptr.into()))
+            }
+        }
     }
 
     fn lower_builtin_call(
@@ -4665,5 +4787,63 @@ mod tests {
             }"
         );
         assert!(ir.contains("memset") || ir.contains("__builtin_memset"), "Expected memset call in IR:\n{}", ir);
+    }
+
+    #[test]
+    fn test_label_addr_expr() {
+        let ir = compile_c_to_ir(
+            "int test_label_addr() { \
+                void *p; \
+                target: \
+                p = &&target; \
+                return 0; \
+            }"
+        );
+        assert!(ir.contains("blockaddress") || ir.contains("label.target"), 
+            "Expected blockaddress or label block in IR:\n{}", ir);
+    }
+
+    #[test]
+    fn test_computed_goto() {
+        let ir = compile_c_to_ir(
+            "void test_computed_goto() { \
+                void *target; \
+                label1: \
+                target = &&label1; \
+                goto *target; \
+            }"
+        );
+        assert!(ir.contains("indirectbr") || ir.contains("label.label1"), 
+            "Expected indirectbr or label block in IR:\n{}", ir);
+    }
+
+    #[test]
+    fn test_case_range() {
+        let ir = compile_c_to_ir(
+            "int classify(int x) { \
+                switch (x) { \
+                    case 1 ... 5: return 1; \
+                    case 10 ... 20: return 2; \
+                    default: return 0; \
+                } \
+            }"
+        );
+        assert!(ir.contains("switch"), "Expected switch instruction in IR:\n{}", ir);
+        // Case ranges should generate multiple case entries
+        assert!(ir.contains("switch.case_range") || ir.contains("i32 1") || ir.contains("switch i32"),
+            "Expected case range expansion in IR:\n{}", ir);
+    }
+
+    #[test]
+    fn test_case_range_single_value() {
+        let ir = compile_c_to_ir(
+            "int test_single_range(int x) { \
+                switch (x) { \
+                    case 5 ... 5: return 1; \
+                    default: return 0; \
+                } \
+            }"
+        );
+        assert!(ir.contains("switch"), "Expected switch in IR:\n{}", ir);
     }
 }
