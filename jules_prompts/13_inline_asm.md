@@ -51,6 +51,37 @@ The repository already includes inline-assembly parsing support. The current foc
 - **Consumed by**: LLVM backend (for IR generation)
 - **Uses**: Parser's AST node structure, type system (for operand types)
 
+## CURRENT STATUS (2026-04-18)
+- ✅ Parsing: `parse_asm_stmt()` in `src/frontend/inline_asm.rs` handles basic, extended, and goto asm
+- ✅ AST nodes: kind=207 (ASM_STMT), 208 (output), 209 (input), 210 (clobber), 211 (goto label)
+- ✅ `parse_statement()` dispatches `asm`/`__asm__`/`__asm` to `parse_asm_stmt()`
+- ✅ **CODEGEN IMPLEMENTED**: `lower_asm_stmt` in backend dispatches kind=207, reads template from arena string, walks operand children to build LLVM constraint string, creates InlineAsm via `context.create_inline_asm()`, calls via `build_indirect_call()`, stores output operands to lvalue pointers
+
+## CODEGEN IMPLEMENTATION (Milestone 4 — COMPLETED)
+The inline asm codegen path should be implemented in `src/backend/llvm.rs`:
+
+1. **Add `lower_asm_stmt` method**: Match on kind=207 in `lower_stmt` dispatch.
+2. **Read template**: The ASM_STMT node stores the template string in the arena. Retrieve via `arena.get_string(node.data)`.
+3. **Build constraint string**: Walk child nodes (kind=208 outputs, kind=209 inputs, kind=210 clobbers).
+   - Output constraints: `"=r"`, `"=m"`, `"+r"` etc.
+   - Input constraints: `"r"`, `"m"`, `"i"` etc.
+   - Clobbers: `"~{memory}"`, `"~{cc}"`, `"~{eax}"` etc.
+   - Format: `"=r,=r,r,r,~{memory},~{cc}"` (outputs first, then inputs, then clobbers)
+4. **Build function type**: Output types form the return type (struct if >1). Input types are parameter types.
+5. **Create InlineAsm**: Use `inkwell::values::InlineAsm::get(fn_type, template, constraints, volatile, align_stack, dialect)`.
+6. **Call it**: `builder.build_call(inline_asm_value, &input_values, "asm_result")`.
+7. **Store outputs**: Extract return values and store to output operand lvalues.
+
+### Kernel asm patterns to test:
+```c
+// Memory barrier
+asm volatile("" ::: "memory");
+// Register read
+unsigned long val; asm volatile("mov %%cr0, %0" : "=r"(val));
+// Atomic compare-and-swap
+asm volatile("lock cmpxchg %1, %2" : "+a"(old) : "r"(new_val), "m"(*ptr) : "memory");
+```
+
 ## ACCEPTANCE CRITERIA
 1. Parser correctly handles basic `asm volatile("nop");`
 2. Extended asm with output, input, and clobber operands parses correctly

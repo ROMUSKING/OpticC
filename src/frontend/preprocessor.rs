@@ -422,7 +422,87 @@ impl Preprocessor {
             }
             return macros;
         }
-        Vec::new()
+        // Fallback: no system compiler found, define essential platform macros
+        Self::platform_fallback_macros()
+    }
+
+    /// Fallback platform-specific macros when no system compiler (gcc/clang/cc) is available.
+    /// These cover the macros most commonly tested by real-world C code (#ifdef __linux__, etc.).
+    fn platform_fallback_macros() -> Vec<(String, MacroDefinition)> {
+        let mut macros = Vec::new();
+        let mut def = |name: &str, value: &str| {
+            macros.push((
+                name.to_string(),
+                MacroDefinition::ObjectLike {
+                    replacement: Self::tokenize_replacement_static(value),
+                },
+            ));
+        };
+
+        // OS detection
+        #[cfg(target_os = "linux")]
+        {
+            def("__linux__", "1");
+            def("__linux", "1");
+            def("linux", "1");
+            def("__unix__", "1");
+            def("__unix", "1");
+            def("unix", "1");
+            def("__gnu_linux__", "1");
+        }
+        #[cfg(target_os = "macos")]
+        {
+            def("__APPLE__", "1");
+            def("__MACH__", "1");
+            def("__unix__", "1");
+        }
+
+        // Architecture detection
+        #[cfg(target_arch = "x86_64")]
+        {
+            def("__x86_64__", "1");
+            def("__x86_64", "1");
+            def("__amd64__", "1");
+            def("__amd64", "1");
+            def("__LP64__", "1");
+            def("_LP64", "1");
+        }
+        #[cfg(target_arch = "aarch64")]
+        {
+            def("__aarch64__", "1");
+            def("__LP64__", "1");
+            def("_LP64", "1");
+        }
+
+        // Data model
+        def("__BYTE_ORDER__", "1234"); // little-endian
+        def("__ORDER_LITTLE_ENDIAN__", "1234");
+        def("__ORDER_BIG_ENDIAN__", "4321");
+        def("__CHAR_BIT__", "8");
+        def("__BIGGEST_ALIGNMENT__", "16");
+
+        // Integer width macros
+        def("__INT8_TYPE__", "signed char");
+        def("__INT16_TYPE__", "short");
+        def("__INT32_TYPE__", "int");
+        def("__INT64_TYPE__", "long long");
+        def("__UINT8_TYPE__", "unsigned char");
+        def("__UINT16_TYPE__", "unsigned short");
+        def("__UINT32_TYPE__", "unsigned int");
+        def("__UINT64_TYPE__", "unsigned long long");
+        def("__INTPTR_TYPE__", "long");
+        def("__UINTPTR_TYPE__", "unsigned long");
+        def("__SIZE_TYPE__", "unsigned long");
+        def("__PTRDIFF_TYPE__", "long");
+
+        // Common feature macros
+        def("__FINITE_MATH_ONLY__", "0");
+        def("__OPTIMIZE__", "0");
+        def("__PIC__", "2");
+        def("__pic__", "2");
+        def("__ELF__", "1");
+
+        macros
     }
 
     fn tokenize_replacement(&self, text: &str) -> Vec<Token> {
@@ -3198,5 +3278,173 @@ const char *s = STR(hello world);"#;
         let source = "#include <nonexistent.h>\nint x = 1;";
         let result = pp.process_source(source, "test.c");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_platform_fallback_macros_defined() {
+        // platform_fallback_macros should provide __BYTE_ORDER__ and __CHAR_BIT__ unconditionally
+        let macros = Preprocessor::platform_fallback_macros();
+        let names: Vec<&str> = macros.iter().map(|(n, _)| n.as_str()).collect();
+        assert!(names.contains(&"__BYTE_ORDER__"), "Expected __BYTE_ORDER__ in fallback macros");
+        assert!(names.contains(&"__CHAR_BIT__"), "Expected __CHAR_BIT__ in fallback macros");
+        assert!(names.contains(&"__SIZE_TYPE__"), "Expected __SIZE_TYPE__ in fallback macros");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_platform_fallback_linux_macros() {
+        let macros = Preprocessor::platform_fallback_macros();
+        let names: Vec<&str> = macros.iter().map(|(n, _)| n.as_str()).collect();
+        assert!(names.contains(&"__linux__"), "Expected __linux__ on Linux");
+        assert!(names.contains(&"__unix__"), "Expected __unix__ on Linux");
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn test_platform_fallback_x86_64_macros() {
+        let macros = Preprocessor::platform_fallback_macros();
+        let names: Vec<&str> = macros.iter().map(|(n, _)| n.as_str()).collect();
+        assert!(names.contains(&"__x86_64__"), "Expected __x86_64__ on x86_64");
+        assert!(names.contains(&"__LP64__"), "Expected __LP64__ on x86_64");
+    }
+
+    /// Verify that `-I` style include paths work: a header in an external
+    /// directory is found when the directory is registered via `add_include_path`,
+    /// and macros defined inside that header are expanded correctly.
+    #[test]
+    fn test_include_path_resolves_external_header() {
+        let (mut pp, _db_dir) = create_test_preprocessor();
+
+        // Create a *separate* temp directory to act as the include path.
+        let inc_dir = TempDir::new().unwrap();
+        let header_path = inc_dir.path().join("myheader.h");
+        fs::write(&header_path, "#define MYCONST 99\n").unwrap();
+
+        // Register the include directory – mirrors the `-I` CLI flow.
+        pp.add_include_path(inc_dir.path().to_str().unwrap());
+
+        // Source that includes the header via a quoted include and uses the macro.
+        let source = "#include \"myheader.h\"\nint val = MYCONST;\n";
+        let tokens = pp.process_source(source, "test_ext.c").unwrap();
+
+        let non_ws: Vec<&Token> = tokens.iter().filter(|t| !t.is_whitespace()).collect();
+        // The macro MYCONST from the header should have been expanded to 99.
+        assert!(
+            non_ws.iter().any(|t| t.text == "99"),
+            "Expected MYCONST to expand to 99 via included header; tokens: {:?}",
+            non_ws.iter().map(|t| &t.text).collect::<Vec<_>>()
+        );
+        assert!(
+            non_ws.iter().any(|t| t.text == "val"),
+            "Expected identifier 'val' in output"
+        );
+    }
+
+    /// Verify that `-D` style command-line defines work: `define_macro` makes
+    /// the value available for expansion in subsequently processed source.
+    #[test]
+    fn test_command_line_define_substitution() {
+        let (mut pp, _db_dir) = create_test_preprocessor();
+
+        // Simulate `-DMYVAL=42`
+        pp.define_macro("MYVAL", "42");
+
+        let source = "int x = MYVAL;\n";
+        let tokens = pp.process_source(source, "test_define.c").unwrap();
+
+        let non_ws: Vec<&Token> = tokens.iter().filter(|t| !t.is_whitespace()).collect();
+        assert!(
+            non_ws.iter().any(|t| t.text == "42"),
+            "Expected MYVAL to expand to 42; tokens: {:?}",
+            non_ws.iter().map(|t| &t.text).collect::<Vec<_>>()
+        );
+    }
+
+    /// Verify that `-D` defines without a value default to "1" (tested via
+    /// `#ifdef` conditional).
+    #[test]
+    fn test_command_line_define_flag_only() {
+        let (mut pp, _db_dir) = create_test_preprocessor();
+
+        // Simulate `-DDEBUG` (no value → "1")
+        pp.define_macro("DEBUG", "1");
+
+        let source = "#ifdef DEBUG\nint debug_on = 1;\n#else\nint debug_on = 0;\n#endif\n";
+        let tokens = pp.process_source(source, "test_flag.c").unwrap();
+
+        let non_ws: Vec<&Token> = tokens.iter().filter(|t| !t.is_whitespace()).collect();
+        assert!(
+            non_ws.iter().any(|t| t.text == "debug_on"),
+            "Expected 'debug_on' in output"
+        );
+        // Should take the #ifdef branch, so the value should be 1 (not 0).
+        let texts: Vec<&str> = non_ws.iter().map(|t| t.text.as_str()).collect();
+        // Pattern: int debug_on = 1 ;
+        let pos = texts.iter().position(|&t| t == "debug_on").unwrap();
+        assert_eq!(texts[pos + 1], "=");
+        assert_eq!(texts[pos + 2], "1", "Expected debug_on = 1 in #ifdef DEBUG branch");
+    }
+
+    /// Verify that `discover_default_include_paths()` finds at least one
+    /// existing include path on this system. On a typical Linux CI runner with
+    /// gcc/clang installed, `/usr/include` (or compiler-detected paths) should
+    /// appear.
+    #[test]
+    fn test_discover_default_include_paths_non_empty() {
+        let paths = Preprocessor::discover_default_include_paths();
+        assert!(
+            !paths.is_empty(),
+            "Expected at least one default include path; got none"
+        );
+        // Every returned path must actually exist on disk.
+        for p in &paths {
+            assert!(
+                p.exists(),
+                "Default include path {} does not exist",
+                p.display()
+            );
+        }
+    }
+
+    /// On Linux, `/usr/include` should be among the discovered paths (either
+    /// directly or via compiler detection).
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_discover_default_include_paths_has_usr_include() {
+        let paths = Preprocessor::discover_default_include_paths();
+        let has_usr_include = paths.iter().any(|p| p == Path::new("/usr/include"));
+        assert!(
+            has_usr_include,
+            "Expected /usr/include among default paths; got: {:?}",
+            paths
+        );
+    }
+
+    /// End-to-end: include path + define work together. A header uses a
+    /// command-line define to conditionally emit code.
+    #[test]
+    fn test_include_path_and_define_combined() {
+        let (mut pp, _db_dir) = create_test_preprocessor();
+
+        let inc_dir = TempDir::new().unwrap();
+        let header = inc_dir.path().join("config.h");
+        fs::write(
+            &header,
+            "#ifdef USE_FEATURE\n#define FEATURE_VAL 77\n#else\n#define FEATURE_VAL 0\n#endif\n",
+        )
+        .unwrap();
+
+        pp.add_include_path(inc_dir.path().to_str().unwrap());
+        pp.define_macro("USE_FEATURE", "1");
+
+        let source = "#include \"config.h\"\nint feat = FEATURE_VAL;\n";
+        let tokens = pp.process_source(source, "combo.c").unwrap();
+
+        let non_ws: Vec<&Token> = tokens.iter().filter(|t| !t.is_whitespace()).collect();
+        assert!(
+            non_ws.iter().any(|t| t.text == "77"),
+            "Expected FEATURE_VAL=77 when USE_FEATURE is defined; tokens: {:?}",
+            non_ws.iter().map(|t| &t.text).collect::<Vec<_>>()
+        );
     }
 }

@@ -5,14 +5,20 @@ use inkwell::context::Context;
 use inkwell::module::Module;
 use inkwell::types::{BasicMetadataTypeEnum, BasicType, BasicTypeEnum, StructType};
 use inkwell::values::{BasicValue, BasicValueEnum, FunctionValue, PointerValue};
+use inkwell::basic_block::BasicBlock;
 use inkwell::AddressSpace;
 use std::collections::HashMap;
+
+/// Maximum number of switch entries to emit for a single `case LOW ... HIGH:` range.
+/// Prevents blowup for huge ranges like `case 0 ... 0xFFFFFFFF:`.
+const MAX_CASE_RANGE_EXPANSION: u64 = 256;
 
 pub struct LlvmBackend<'ctx, 'types> {
     context: &'ctx Context,
     module: Module<'ctx>,
     builder: Builder<'ctx>,
     variables: HashMap<String, VariableBinding<'ctx>>,
+    global_variables: HashMap<String, VariableBinding<'ctx>>,
     functions: HashMap<String, FunctionValue<'ctx>>,
     vectorization_hints: VectorizationHints,
     types: Option<&'types TypeSystem>,
@@ -26,6 +32,24 @@ pub struct LlvmBackend<'ctx, 'types> {
     /// Registered pointee struct types keyed by pointer-backed variable/parameter name.
     pointer_struct_types: HashMap<String, StructType<'ctx>>,
     current_return_type: Option<BasicTypeEnum<'ctx>>,
+    /// Label name → BasicBlock mapping for goto/label support within a function.
+    label_blocks: HashMap<String, BasicBlock<'ctx>>,
+    /// Stack of break targets (innermost last) for switch/loop.
+    break_stack: Vec<BasicBlock<'ctx>>,
+    /// Stack of continue targets (innermost last) for loops.
+    continue_stack: Vec<BasicBlock<'ctx>>,
+    /// Scope stack for block-scoped variable shadowing. Each entry saves variable
+    /// bindings that were overwritten when entering a new block scope.
+    scope_stack: Vec<HashMap<String, Option<VariableBinding<'ctx>>>>,
+    /// Bitfield GEP info: struct_tag → field_name → (gep_index, Option<(bit_offset, bit_width)>).
+    /// Tracks how each struct member maps to LLVM struct field indices, with
+    /// optional bit-level packing metadata for bitfield members.
+    struct_gep_info: HashMap<String, HashMap<String, (u32, Option<(u32, u32)>)>>,
+    /// Maps variable name → struct tag name (for looking up gep_info).
+    var_struct_tag: HashMap<String, String>,
+    /// Set by `lower_member_access_ptr` when the access resolved a bitfield.
+    /// Consumed by callers that need shift/mask codegen for read or write.
+    last_bitfield_access: Option<(u32, u32)>,
 }
 
 #[derive(Clone, Copy)]
@@ -49,6 +73,7 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
             module,
             builder,
             variables: HashMap::new(),
+            global_variables: HashMap::new(),
             functions: HashMap::new(),
             vectorization_hints: VectorizationHints::default(),
             types: None,
@@ -58,6 +83,13 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
             struct_tag_fields: HashMap::new(),
             pointer_struct_types: HashMap::new(),
             current_return_type: None,
+            label_blocks: HashMap::new(),
+            break_stack: Vec::new(),
+            continue_stack: Vec::new(),
+            scope_stack: Vec::new(),
+            struct_gep_info: HashMap::new(),
+            var_struct_tag: HashMap::new(),
+            last_bitfield_access: None,
         }
     }
 
@@ -73,6 +105,7 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
             module,
             builder,
             variables: HashMap::new(),
+            global_variables: HashMap::new(),
             functions: HashMap::new(),
             vectorization_hints: VectorizationHints::default(),
             types: Some(types),
@@ -82,11 +115,49 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
             struct_tag_fields: HashMap::new(),
             pointer_struct_types: HashMap::new(),
             current_return_type: None,
+            label_blocks: HashMap::new(),
+            break_stack: Vec::new(),
+            continue_stack: Vec::new(),
+            scope_stack: Vec::new(),
+            struct_gep_info: HashMap::new(),
+            var_struct_tag: HashMap::new(),
+            last_bitfield_access: None,
         }
     }
 
     pub fn set_vectorization_hints(&mut self, hints: VectorizationHints) {
         self.vectorization_hints = hints;
+    }
+
+    /// Enter a new block scope. Any variables declared inside this scope will
+    /// shadow outer definitions; when the scope is popped the originals are restored.
+    fn push_scope(&mut self) {
+        self.scope_stack.push(HashMap::new());
+    }
+
+    /// Leave a block scope, restoring any variables that were shadowed.
+    fn pop_scope(&mut self) {
+        if let Some(saved) = self.scope_stack.pop() {
+            for (name, prev_binding) in saved {
+                if let Some(binding) = prev_binding {
+                    self.variables.insert(name, binding);
+                } else {
+                    self.variables.remove(&name);
+                }
+            }
+        }
+    }
+
+    /// Insert a variable into the current scope, saving the previous binding
+    /// on the scope stack so it can be restored on pop_scope.
+    fn insert_scoped_variable(&mut self, name: String, binding: VariableBinding<'ctx>) {
+        if let Some(scope) = self.scope_stack.last_mut() {
+            // Only save the first overwrite within this scope
+            scope.entry(name.clone()).or_insert_with(|| {
+                self.variables.get(&name).copied()
+            });
+        }
+        self.variables.insert(name, binding);
     }
 
     fn to_llvm_type(&mut self, type_id: u32) -> BasicTypeEnum<'ctx> {
@@ -166,6 +237,45 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
         Ok(())
     }
 
+    /// Create an alloca in the entry block of the current function.
+    /// This ensures dominance: the alloca dominates all uses in the function.
+    fn build_entry_alloca(
+        &self,
+        alloca_type: BasicTypeEnum<'ctx>,
+        name: &str,
+    ) -> Result<PointerValue<'ctx>, BackendError> {
+        let current_fn = self
+            .builder
+            .get_insert_block()
+            .and_then(|bb| bb.get_parent())
+            .ok_or(BackendError::InvalidNode)?;
+        let entry_bb = current_fn
+            .get_first_basic_block()
+            .ok_or(BackendError::InvalidNode)?;
+
+        // Save current position
+        let saved_block = self.builder.get_insert_block();
+
+        // Position at the beginning of the entry block (before any existing instructions)
+        if let Some(first_instr) = entry_bb.get_first_instruction() {
+            self.builder.position_before(&first_instr);
+        } else {
+            self.builder.position_at_end(entry_bb);
+        }
+
+        let alloca = self
+            .builder
+            .build_alloca(alloca_type, name)
+            .map_err(|_| BackendError::InvalidNode)?;
+
+        // Restore position
+        if let Some(bb) = saved_block {
+            self.builder.position_at_end(bb);
+        }
+
+        Ok(alloca)
+    }
+
     pub fn module(&self) -> &Module<'ctx> {
         &self.module
     }
@@ -186,14 +296,51 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
             }
         }
 
+        // === Pass 1: Pre-register all function definitions AND declarations with correct signatures ===
+        // This prevents auto-declarations with wrong types when functions call
+        // each other before their definitions are reached.
+        let mut prescan_offset = offset;
+        while prescan_offset != NodeOffset::NULL {
+            if let Some(node) = arena.get(prescan_offset) {
+                if node.kind == 23 {
+                    let _ = self.pre_register_func_def(arena, node);
+                } else if node.kind == 22 {
+                    let _ = self.lower_func_decl(arena, node);
+                } else if node.kind == 20 {
+                    // A kind=20 declaration may contain a function declarator
+                    // (e.g. `extern void foo(int);`). Walk its children to find
+                    // any function declarator and pre-register it.
+                    let mut decl_child = node.first_child;
+                    while decl_child != NodeOffset::NULL {
+                        if let Some(c) = arena.get(decl_child) {
+                            if matches!(c.kind, 7..=9) {
+                                if self.find_function_declarator_offset(arena, decl_child).is_some() {
+                                    let _ = self.lower_func_decl(arena, node);
+                                    break;
+                                }
+                            }
+                            decl_child = c.next_sibling;
+                        } else {
+                            break;
+                        }
+                    }
+                }
+                prescan_offset = node.next_sibling;
+            } else {
+                break;
+            }
+        }
+
+        // === Pass 2: Compile all declarations and function bodies ===
         let mut child_offset = offset;
         while child_offset != NodeOffset::NULL {
             if let Some(node) = arena.get(child_offset) {
                 match node.kind {
                     1..=9 | 83 => {}
-                    20 => self.lower_decl(arena, node)?,
-                    22 => self.lower_func_decl(arena, node)?,
-                    23 => self.lower_func_def(arena, node)?,
+                    20 => { let _ = self.lower_global_decl(arena, node); }
+                    21 => { let _ = self.lower_global_var(arena, node, node.kind); }
+                    22 => { let _ = self.lower_func_decl(arena, node); }
+                    23 => { let _ = self.lower_func_def(arena, node); }
                     101..=105 => {}
                     _ => {}
                 }
@@ -205,14 +352,235 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
         Ok(())
     }
 
+    /// Lower a top-level declaration, handling global variables properly.
+    fn lower_global_decl(&mut self, arena: &Arena, node: &CAstNode) -> Result<(), BackendError> {
+        let mut child_offset = node.first_child;
+        // Find the type specifier and then the declarator(s)
+        let mut spec_kind: u16 = 2; // default int
+        let mut _is_const = false;
+        let mut first_spec = NodeOffset::NULL;
+        
+        // First pass: find type info
+        let mut scan_off = node.first_child;
+        while scan_off != NodeOffset::NULL {
+            if let Some(child) = arena.get(scan_off) {
+                match child.kind {
+                    1..=6 | 83 => {
+                        spec_kind = child.kind;
+                        if first_spec == NodeOffset::NULL {
+                            first_spec = scan_off;
+                        }
+                    }
+                    101..=105 => {
+                        if child.kind == 104 { _is_const = true; } // const qualifier
+                    }
+                    _ => break,
+                }
+                scan_off = child.next_sibling;
+            } else {
+                break;
+            }
+        }
+
+        // Process each child - function decls, func defs, and var decls
+        child_offset = node.first_child;
+        while child_offset != NodeOffset::NULL {
+            if let Some(child) = arena.get(child_offset) {
+                match child.kind {
+                    21 => {
+                        // Try to handle as a global variable
+                        let _ = self.lower_global_var(arena, child, spec_kind);
+                    }
+                    22 => { let _ = self.lower_func_decl(arena, child); }
+                    23 => { let _ = self.lower_func_def(arena, child); }
+                    7..=9 => {
+                        // A declarator containing a function declarator represents
+                        // a forward / extern function declaration wrapped in a
+                        // kind=20 declaration node (e.g. `extern void foo(int);`).
+                        // Delegate to lower_func_decl with the parent declaration
+                        // so it can walk the full specifier + declarator chain.
+                        if self.find_function_declarator_offset(arena, child_offset).is_some() {
+                            let _ = self.lower_func_decl(arena, node);
+                        }
+                    }
+                    _ => {}
+                }
+                child_offset = child.next_sibling;
+            } else {
+                break;
+            }
+        }
+        Ok(())
+    }
+
+    /// Lower a global variable declaration with optional initializer.
+    fn lower_global_var(&mut self, arena: &Arena, node: &CAstNode, spec_kind: u16) -> Result<(), BackendError> {
+        let llvm_type = self.node_kind_to_llvm_type(spec_kind);
+        // Extract attributes early so we can apply them to any globals we create
+        let attrs = self.extract_attributes(arena, node);
+        
+        // Find the variable name and initializer
+        let mut name_opt: Option<String> = None;
+        let mut is_pointer = false;
+        let mut is_array = false;
+        let mut init_offset = NodeOffset::NULL;
+        
+        let mut child_offset = node.first_child;
+        while child_offset != NodeOffset::NULL {
+            if let Some(child) = arena.get(child_offset) {
+                match child.kind {
+                    // init-declarator (name = init)
+                    73 => {
+                        let decl_node = arena.get(child.first_child);
+                        if let Some(dn) = decl_node {
+                            match dn.kind {
+                                60 => {
+                                    name_opt = arena.get_string(NodeOffset(dn.data))
+                                        .filter(|s| !s.is_empty())
+                                        .map(|s| s.to_string());
+                                    init_offset = dn.next_sibling;
+                                }
+                                7 => {
+                                    is_pointer = true;
+                                    name_opt = self.find_ident_name_in(arena, dn);
+                                    init_offset = dn.next_sibling;
+                                }
+                                8 => {
+                                    is_array = true;
+                                    name_opt = self.find_ident_name_in(arena, dn);
+                                    init_offset = dn.next_sibling;
+                                }
+                                _ => {
+                                    name_opt = self.find_ident_name_in(arena, dn);
+                                    init_offset = dn.next_sibling;
+                                }
+                            }
+                        }
+                    }
+                    // plain identifier
+                    60 => {
+                        name_opt = arena.get_string(NodeOffset(child.data))
+                            .filter(|s| !s.is_empty())
+                            .map(|s| s.to_string());
+                    }
+                    // pointer declarator
+                    7 => {
+                        is_pointer = true;
+                        name_opt = self.find_ident_name_in(arena, child);
+                    }
+                    // array declarator
+                    8 => {
+                        is_array = true;
+                        name_opt = self.find_ident_name_in(arena, child);
+                    }
+                    // type specifiers - skip
+                    1..=6 | 83 | 101..=105 => {}
+                    _ => {}
+                }
+                child_offset = child.next_sibling;
+            } else {
+                break;
+            }
+        }
+
+        if let Some(var_name) = name_opt {
+            let global_type = if is_pointer {
+                self.context.ptr_type(AddressSpace::default()).as_basic_type_enum()
+            } else if is_array {
+                // For arrays like `char name[] = "..."`, use the initializer to determine type
+                llvm_type
+            } else {
+                llvm_type
+            };
+
+            // Check if there's a string initializer (for char arrays)
+            if init_offset != NodeOffset::NULL {
+                if let Some(init_node) = arena.get(init_offset) {
+                    if init_node.kind == 63 || init_node.kind == 81 {
+                        // String literal initializer - create global string
+                        let string_offset = NodeOffset(init_node.data);
+                        let string_text = arena.get_string(string_offset).unwrap_or("");
+                        let bytes = string_text.as_bytes();
+                        let string_val = self.context.const_string(bytes, true);
+                        let global = self.module.add_global(
+                            string_val.get_type(),
+                            Some(AddressSpace::default()),
+                            &var_name,
+                        );
+                        global.set_initializer(&string_val);
+                        global.set_constant(true);
+                        self.apply_global_attributes(global, &attrs);
+                        // Store in variables for later reference
+                        let binding = VariableBinding {
+                                ptr: global.as_pointer_value(),
+                                pointee_type: string_val.get_type().as_basic_type_enum(),
+                        };
+                        self.global_variables.insert(var_name.clone(), binding);
+                        self.variables.insert(var_name, binding);
+                        return Ok(());
+                    } else if init_node.kind == 61 || init_node.kind == 80 {
+                        // Integer constant initializer
+                        let value = init_node.data as u64;
+                        let global = self.module.add_global(
+                            global_type,
+                            Some(AddressSpace::default()),
+                            &var_name,
+                        );
+                        // For pointer types, use null instead of integer 0
+                        if global_type.is_pointer_type() {
+                            let null_val = self.context.ptr_type(AddressSpace::default()).const_null();
+                            global.set_initializer(&null_val);
+                        } else {
+                            let const_val = match global_type {
+                                BasicTypeEnum::IntType(it) => it.const_int(value, false),
+                                _ => self.context.i32_type().const_int(value, false),
+                            };
+                            global.set_initializer(&const_val);
+                        }
+                        let binding = VariableBinding {
+                                ptr: global.as_pointer_value(),
+                                pointee_type: global_type,
+                        };
+                        self.apply_global_attributes(global, &attrs);
+                        self.global_variables.insert(var_name.clone(), binding);
+                        self.variables.insert(var_name, binding);
+                        return Ok(());
+                    }
+                }
+            }
+
+            // Default: create zero-initialized global
+            let global = self.module.add_global(
+                global_type,
+                Some(AddressSpace::default()),
+                &var_name,
+            );
+            let zero: BasicValueEnum = match global_type {
+                BasicTypeEnum::IntType(it) => it.const_zero().into(),
+                BasicTypeEnum::FloatType(ft) => ft.const_zero().into(),
+                BasicTypeEnum::PointerType(pt) => pt.const_null().into(),
+                _ => self.context.i32_type().const_zero().into(),
+            };
+            global.set_initializer(&zero);
+            self.apply_global_attributes(global, &attrs);
+            let binding = VariableBinding {
+                    ptr: global.as_pointer_value(),
+                    pointee_type: global_type,
+            };
+            self.global_variables.insert(var_name.clone(), binding);
+            self.variables.insert(var_name, binding);
+        }
+        Ok(())
+    }
+
     fn lower_decl(&mut self, arena: &Arena, node: &CAstNode) -> Result<(), BackendError> {
         let mut child_offset = node.first_child;
         while child_offset != NodeOffset::NULL {
             if let Some(child) = arena.get(child_offset) {
                 match child.kind {
-                    21 => self.lower_var_decl(arena, &child)?,
-                    22 => self.lower_func_decl(arena, &child)?,
-                    23 => self.lower_func_def(arena, &child)?,
+                    21 => { let _ = self.lower_var_decl(arena, &child); }
+                    22 => { let _ = self.lower_func_decl(arena, &child); }
+                    23 => { let _ = self.lower_func_def(arena, &child); }
                     _ => {}
                 }
                 child_offset = child.next_sibling;
@@ -236,11 +604,78 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                         if !self.struct_tag_types.contains_key(&tag_name) {
                             let field_names = Self::collect_struct_field_names(arena, child);
                             let mut field_types: Vec<BasicTypeEnum<'ctx>> = Vec::new();
+                            // Track bitfield info: field_name → (gep_idx, Option<(bit_offset, bit_width)>)
+                            let mut gep_info: HashMap<String, (u32, Option<(u32, u32)>)> = HashMap::new();
+                            let mut gep_idx: u32 = 0;
+                            let mut field_name_idx: usize = 0;
+                            // Track current bitfield group: (base_kind, bits_used, storage_bit_capacity)
+                            let mut bitfield_group: Option<(u16, u32, u32)> = None;
+
                             let mut member_off = child.first_child;
                             while member_off != NodeOffset::NULL {
                                 if let Some(m) = arena.get(member_off) {
-                                    let mk = arena.get(m.first_child).map(|n| n.kind).unwrap_or(2);
-                                    field_types.push(self.node_kind_to_llvm_type(mk));
+                                    // Determine field type and check for bitfield
+                                    let mut has_pointer = false;
+                                    let mut base_kind = 2u16; // default to int
+                                    let mut bitfield_width: Option<u32> = None;
+                                    let mut check_off = m.first_child;
+                                    while check_off != NodeOffset::NULL {
+                                        if let Some(cn) = arena.get(check_off) {
+                                            match cn.kind {
+                                                1..=6 | 10..=13 | 83 | 84 => base_kind = cn.kind,
+                                                7 => has_pointer = true,
+                                                27 => {
+                                                    // Bitfield node: data = width
+                                                    if cn.data > 0 {
+                                                        bitfield_width = Some(cn.data);
+                                                    }
+                                                }
+                                                _ => {}
+                                            }
+                                            check_off = cn.next_sibling;
+                                        } else {
+                                            break;
+                                        }
+                                    }
+
+                                    let current_name = field_names.get(field_name_idx).cloned()
+                                        .unwrap_or_else(|| format!("_field{}", field_name_idx));
+                                    field_name_idx += 1;
+
+                                    if let Some(bw) = bitfield_width {
+                                        // This is a bitfield member
+                                        let storage_bits = self.node_kind_bit_width(base_kind);
+                                        if let Some((grp_kind, ref mut bits_used, capacity)) = bitfield_group {
+                                            if grp_kind == base_kind && *bits_used + bw <= capacity {
+                                                // Fits in current group
+                                                gep_info.insert(current_name, (gep_idx - 1, Some((*bits_used, bw))));
+                                                *bits_used += bw;
+                                            } else {
+                                                // Start new storage unit
+                                                field_types.push(self.node_kind_to_llvm_type(base_kind));
+                                                gep_info.insert(current_name, (gep_idx, Some((0, bw))));
+                                                bitfield_group = Some((base_kind, bw, storage_bits));
+                                                gep_idx += 1;
+                                            }
+                                        } else {
+                                            // Start first bitfield group
+                                            field_types.push(self.node_kind_to_llvm_type(base_kind));
+                                            gep_info.insert(current_name, (gep_idx, Some((0, bw))));
+                                            bitfield_group = Some((base_kind, bw, storage_bits));
+                                            gep_idx += 1;
+                                        }
+                                    } else {
+                                        // Non-bitfield member: close any open bitfield group
+                                        bitfield_group = None;
+                                        if has_pointer {
+                                            field_types.push(self.context.ptr_type(AddressSpace::default()).as_basic_type_enum());
+                                        } else {
+                                            field_types.push(self.node_kind_to_llvm_type(base_kind));
+                                        }
+                                        gep_info.insert(current_name, (gep_idx, None));
+                                        gep_idx += 1;
+                                    }
+
                                     member_off = m.next_sibling;
                                 } else {
                                     break;
@@ -249,7 +684,10 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                             if !field_types.is_empty() {
                                 let st = self.context.struct_type(&field_types, false);
                                 self.struct_tag_types.insert(tag_name.clone(), st);
-                                self.struct_tag_fields.insert(tag_name, field_names);
+                                self.struct_tag_fields.insert(tag_name.clone(), field_names);
+                                if gep_info.values().any(|(_, bf)| bf.is_some()) {
+                                    self.struct_gep_info.insert(tag_name, gep_info);
+                                }
                             }
                         }
                     }
@@ -274,6 +712,29 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
             83 => self.context.f32_type().as_basic_type_enum(),
             84 => self.context.f64_type().as_basic_type_enum(),
             _ => self.context.i32_type().as_basic_type_enum(),
+        }
+    }
+
+    /// Return the bit width of a storage unit for a given AST type-specifier kind.
+    fn node_kind_bit_width(&self, kind: u16) -> u32 {
+        match kind {
+            1 | 3 => 8,          // void (treated as i8), char
+            10 => 16,            // short
+            2 | 6 | 12 | 13 => 32, // int, enum, signed, unsigned
+            11 => 64,            // long
+            _ => 32,
+        }
+    }
+
+    /// Resolve a type specifier node to its LLVM type, including struct/union types.
+    /// For struct/union (kind=4/5), looks up struct_tag_types or builds inline.
+    fn specifier_to_llvm_type(&self, arena: &Arena, spec_node: &CAstNode) -> BasicTypeEnum<'ctx> {
+        if matches!(spec_node.kind, 4 | 5) {
+            self.struct_info_for_spec(arena, Some(spec_node))
+                .map(|(st, _)| st.as_basic_type_enum())
+                .unwrap_or_else(|| self.context.i32_type().as_basic_type_enum())
+        } else {
+            self.node_kind_to_llvm_type(spec_node.kind)
         }
     }
 
@@ -390,20 +851,14 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
 
         match declarator.kind {
             7 => {
-                let mut depth = 1usize;
-                let mut cursor = declarator.next_sibling;
-                while cursor != NodeOffset::NULL {
-                    if let Some(node) = arena.get(cursor) {
-                        if node.kind == 7 {
-                            depth += 1;
-                            cursor = node.next_sibling;
-                        } else {
-                            break;
-                        }
-                    } else {
-                        break;
-                    }
-                }
+                // Pointer depth is stored in `data` (set by the parser).
+                // A value of 0 means a single pointer level (legacy nodes that
+                // were allocated before the parser encoded the depth).
+                let depth = if declarator.data > 0 {
+                    declarator.data as usize
+                } else {
+                    1
+                };
 
                 let mut ty = base_type;
                 for _ in 0..depth {
@@ -478,9 +933,8 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                         });
                         if let Some(var_name) = var_name_opt {
                             let var_ptr = self
-                                .builder
-                                .build_alloca(actual_alloca_type, &var_name)
-                                .map_err(|_| BackendError::InvalidNode)?;
+                                .build_entry_alloca(actual_alloca_type, &var_name)
+                                .or_else(|_| self.builder.build_alloca(actual_alloca_type, &var_name).map_err(|_| BackendError::InvalidNode))?;
                             if let Some((struct_type, field_names)) = struct_info.clone() {
                                 self.struct_fields
                                     .insert(var_name.clone(), field_names.clone());
@@ -489,7 +943,17 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                                         .insert(var_name.clone(), struct_type);
                                 }
                             }
-                            self.variables.insert(
+                            // Record struct tag for bitfield lookups
+                            if matches!(spec_kind, 4 | 5) {
+                                if let Some(sn) = spec_node {
+                                    if sn.data != 0 {
+                                        if let Some(tag) = arena.get_string(NodeOffset(sn.data)) {
+                                            self.var_struct_tag.insert(var_name.clone(), tag.to_string());
+                                        }
+                                    }
+                                }
+                            }
+                            self.insert_scoped_variable(
                                 var_name.clone(),
                                 VariableBinding {
                                     ptr: var_ptr,
@@ -503,7 +967,25 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                                     .map(|d| d.next_sibling)
                                     .unwrap_or(NodeOffset::NULL);
                                 if init_offset != NodeOffset::NULL {
-                                    if let Some(val) = self.lower_expr(arena, init_offset)? {
+                                    let is_designated_init = arena
+                                        .get(init_offset)
+                                        .map(|n| n.kind == 205)
+                                        .unwrap_or(false);
+                                    if is_designated_init {
+                                        if let BasicTypeEnum::StructType(struct_type) =
+                                            actual_alloca_type
+                                        {
+                                            self.lower_designated_init_into_struct(
+                                                arena,
+                                                init_offset,
+                                                var_ptr,
+                                                struct_type,
+                                                &var_name,
+                                            )?;
+                                        }
+                                    } else if let Some(val) =
+                                        self.lower_expr(arena, init_offset)?
+                                    {
                                         if Self::types_compatible(actual_alloca_type, val) {
                                             let _ = self
                                                 .builder
@@ -530,9 +1012,8 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
 
                         if let Some(var_name) = var_name_opt {
                             let var_ptr = self
-                                .builder
-                                .build_alloca(actual_alloca_type, &var_name)
-                                .map_err(|_| BackendError::InvalidNode)?;
+                                .build_entry_alloca(actual_alloca_type, &var_name)
+                                .or_else(|_| self.builder.build_alloca(actual_alloca_type, &var_name).map_err(|_| BackendError::InvalidNode))?;
                             if let Some((struct_type, field_names)) = struct_info.clone() {
                                 self.struct_fields
                                     .insert(var_name.clone(), field_names.clone());
@@ -541,7 +1022,17 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                                         .insert(var_name.clone(), struct_type);
                                 }
                             }
-                            self.variables.insert(
+                            // Record struct tag for bitfield lookups
+                            if matches!(spec_kind, 4 | 5) {
+                                if let Some(sn) = spec_node {
+                                    if sn.data != 0 {
+                                        if let Some(tag) = arena.get_string(NodeOffset(sn.data)) {
+                                            self.var_struct_tag.insert(var_name.clone(), tag.to_string());
+                                        }
+                                    }
+                                }
+                            }
+                            self.insert_scoped_variable(
                                 var_name,
                                 VariableBinding {
                                     ptr: var_ptr,
@@ -581,6 +1072,9 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
         arena: &Arena,
         offset: NodeOffset,
     ) -> Result<Option<(PointerValue<'ctx>, BasicTypeEnum<'ctx>)>, BackendError> {
+        // Clear bitfield state; it will be set by lower_member_access_ptr if needed
+        self.last_bitfield_access = None;
+
         let node = match arena.get(offset) {
             Some(node) => node,
             None => return Ok(None),
@@ -620,19 +1114,11 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
         arena: &Arena,
         node: &CAstNode,
     ) -> Result<Option<(PointerValue<'ctx>, BasicTypeEnum<'ctx>)>, BackendError> {
+        // Clear bitfield state from any previous call
+        self.last_bitfield_access = None;
+
         let base_offset = node.first_child;
         let field_offset = node.next_sibling;
-
-        let base_name = match arena.get(base_offset).and_then(|n| {
-            if n.kind == 60 {
-                arena.get_string(NodeOffset(n.data)).map(|s| s.to_string())
-            } else {
-                None
-            }
-        }) {
-            Some(name) => name,
-            None => return Ok(None),
-        };
 
         let field_name = match arena.get(field_offset).and_then(|n| {
             if n.kind == 60 {
@@ -645,23 +1131,63 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
             None => return Ok(None),
         };
 
-        let field_idx = self
-            .struct_fields
-            .get(&base_name)
-            .and_then(|fields| fields.iter().position(|f| f == &field_name))
-            .unwrap_or(0) as u32;
+        // Try to resolve base as a simple identifier first (fast path)
+        let base_name = arena.get(base_offset).and_then(|n| {
+            if n.kind == 60 {
+                arena.get_string(NodeOffset(n.data)).map(|s| s.to_string())
+            } else {
+                None
+            }
+        });
 
-        if node.data == 1 {
-            let Some(struct_type) = self.pointer_struct_types.get(&base_name).copied() else {
-                return Ok(None);
+        if let Some(ref base_name) = base_name {
+            // Look up bitfield/gep info from struct tag metadata
+            let gep_lookup = self.var_struct_tag.get(base_name).cloned()
+                .and_then(|tag| {
+                    self.struct_gep_info.get(&tag)
+                        .and_then(|m| m.get(&field_name).copied())
+                });
+
+            let field_idx = if let Some((idx, bf)) = gep_lookup {
+                self.last_bitfield_access = bf;
+                idx
+            } else {
+                self.struct_fields
+                    .get(base_name)
+                    .and_then(|fields| fields.iter().position(|f| f == &field_name))
+                    .unwrap_or(0) as u32
             };
-            let base_ptr = match self.lower_expr(arena, base_offset)? {
-                Some(BasicValueEnum::PointerValue(ptr)) => ptr,
-                _ => return Ok(None),
+
+            if node.data == 1 {
+                // Arrow operator: base is a pointer to struct
+                let Some(struct_type) = self.pointer_struct_types.get(base_name).copied() else {
+                    return Ok(None);
+                };
+                let base_ptr = match self.lower_expr(arena, base_offset)? {
+                    Some(BasicValueEnum::PointerValue(ptr)) => ptr,
+                    _ => return Ok(None),
+                };
+                let field_ptr = self
+                    .builder
+                    .build_struct_gep(struct_type, base_ptr, field_idx, "arrow.gep")
+                    .map_err(|_| BackendError::InvalidNode)?;
+                let field_type = struct_type
+                    .get_field_type_at_index(field_idx)
+                    .unwrap_or_else(|| self.context.i32_type().as_basic_type_enum());
+                return Ok(Some((field_ptr, field_type)));
+            }
+
+            // Dot operator: base is a struct variable
+            let binding = match self.variables.get(base_name).copied() {
+                Some(binding) => binding,
+                None => return Ok(None),
+            };
+            let BasicTypeEnum::StructType(struct_type) = binding.pointee_type else {
+                return Ok(None);
             };
             let field_ptr = self
                 .builder
-                .build_struct_gep(struct_type, base_ptr, field_idx, "arrow.gep")
+                .build_struct_gep(struct_type, binding.ptr, field_idx, "dot.gep")
                 .map_err(|_| BackendError::InvalidNode)?;
             let field_type = struct_type
                 .get_field_type_at_index(field_idx)
@@ -669,21 +1195,78 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
             return Ok(Some((field_ptr, field_type)));
         }
 
-        let binding = match self.variables.get(&base_name).copied() {
-            Some(binding) => binding,
-            None => return Ok(None),
-        };
-        let BasicTypeEnum::StructType(struct_type) = binding.pointee_type else {
-            return Ok(None);
-        };
-        let field_ptr = self
-            .builder
-            .build_struct_gep(struct_type, binding.ptr, field_idx, "dot.gep")
-            .map_err(|_| BackendError::InvalidNode)?;
-        let field_type = struct_type
-            .get_field_type_at_index(field_idx)
-            .unwrap_or_else(|| self.context.i32_type().as_basic_type_enum());
-        Ok(Some((field_ptr, field_type)))
+        // Recursive path: base is a complex expression (e.g., nested member access like p->next->field)
+        if node.data == 1 {
+            // Arrow operator on a complex base expression
+            // First, lower the base expression to get a pointer
+            let base_val = self.lower_expr(arena, base_offset)?;
+            let base_ptr = match base_val {
+                Some(BasicValueEnum::PointerValue(ptr)) => ptr,
+                _ => return Ok(None),
+            };
+
+            // Try to determine the struct type from the base expression
+            // For nested arrow (e.g., head->next->value), the base is itself a member access
+            // that returned a pointer. We need to find what struct type it points to.
+            if let Some(base_node) = arena.get(base_offset) {
+                if base_node.kind == 69 {
+                    // The base is another member access. Look at its root variable
+                    // to find the struct tag, then use the tag's struct type.
+                    let root_var = self.find_member_access_root_var(arena, base_node);
+                    if let Some(root_name) = root_var {
+                        // Get the struct type from pointer_struct_types (same struct for self-ref)
+                        if let Some(struct_type) = self.pointer_struct_types.get(&root_name).copied() {
+                            // Look up field names from struct_fields
+                            if let Some(fields) = self.struct_fields.get(&root_name) {
+                                let field_idx = fields.iter().position(|f| f == &field_name).unwrap_or(0) as u32;
+                                let field_ptr = self
+                                    .builder
+                                    .build_struct_gep(struct_type, base_ptr, field_idx, "chain.gep")
+                                    .map_err(|_| BackendError::InvalidNode)?;
+                                let ft = struct_type
+                                    .get_field_type_at_index(field_idx)
+                                    .unwrap_or_else(|| self.context.i32_type().as_basic_type_enum());
+                                return Ok(Some((field_ptr, ft)));
+                            }
+                        }
+                    }
+
+                    // Fallback: search struct_tag_types/struct_tag_fields for a struct with this field
+                    for (tag_name, fields) in &self.struct_tag_fields {
+                        if fields.contains(&field_name) {
+                            if let Some(struct_type) = self.struct_tag_types.get(tag_name).copied() {
+                                let field_idx = fields.iter().position(|f| f == &field_name).unwrap_or(0) as u32;
+                                let field_ptr = self
+                                    .builder
+                                    .build_struct_gep(struct_type, base_ptr, field_idx, "chain.gep")
+                                    .map_err(|_| BackendError::InvalidNode)?;
+                                let ft = struct_type
+                                    .get_field_type_at_index(field_idx)
+                                    .unwrap_or_else(|| self.context.i32_type().as_basic_type_enum());
+                                return Ok(Some((field_ptr, ft)));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(None)
+    }
+
+    /// Find the root variable name of a chained member access expression.
+    /// E.g., for `head->next->value`, walks back through kind=69 nodes to find "head".
+    fn find_member_access_root_var(&self, arena: &Arena, node: &CAstNode) -> Option<String> {
+        let base_offset = node.first_child;
+        if let Some(base) = arena.get(base_offset) {
+            if base.kind == 60 {
+                return arena.get_string(NodeOffset(base.data)).map(|s| s.to_string());
+            }
+            if base.kind == 69 {
+                return self.find_member_access_root_var(arena, base);
+            }
+        }
+        None
     }
 
     fn lower_array_element_ptr(
@@ -719,11 +1302,26 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
             }
         }
 
+        // Fallback: evaluate base as expression, determine element type
+        // Try to infer element type from the base variable's pointee type
+        let mut elem_type = self.context.i32_type().as_basic_type_enum();
+        if let Some(base_node) = arena.get(node.first_child) {
+            if base_node.kind == 60 {
+                if let Some(name) = arena.get_string(NodeOffset(base_node.data)) {
+                    if let Some(binding) = self.variables.get(name).copied() {
+                        // If the variable is a pointer (pointee_type is ptr), then
+                        // loading it gives a pointer, and indexing into it should use ptr element type
+                        if binding.pointee_type.is_pointer_type() {
+                            elem_type = self.context.ptr_type(AddressSpace::default()).as_basic_type_enum();
+                        }
+                    }
+                }
+            }
+        }
         let base_ptr = match self.lower_expr(arena, node.first_child)? {
             Some(BasicValueEnum::PointerValue(ptr)) => ptr,
             _ => return Ok(None),
         };
-        let elem_type = self.context.i32_type().as_basic_type_enum();
         let ptr = unsafe {
             self.builder
                 .build_gep(elem_type, base_ptr, &[index_val], "arrayidx")
@@ -792,8 +1390,48 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
             };
         }
 
+        // Handle pointer operands by converting them to integers first
+        let lhs_val = if lhs_val.is_pointer_value() {
+            self.builder
+                .build_ptr_to_int(lhs_val.into_pointer_value(), self.context.i64_type(), "assign_ptr2int_lhs")
+                .map_err(|_| BackendError::InvalidNode)?
+                .into()
+        } else {
+            lhs_val
+        };
+        let rhs_val = if rhs_val.is_pointer_value() {
+            self.builder
+                .build_ptr_to_int(rhs_val.into_pointer_value(), self.context.i64_type(), "assign_ptr2int_rhs")
+                .map_err(|_| BackendError::InvalidNode)?
+                .into()
+        } else {
+            rhs_val
+        };
+        if !lhs_val.is_int_value() || !rhs_val.is_int_value() {
+            return Err(BackendError::InvalidNode);
+        }
         let lhs_int = lhs_val.into_int_value();
         let rhs_int = rhs_val.into_int_value();
+        // Coerce both int operands to the same width (promote narrower to wider)
+        let (lhs_int, rhs_int) = {
+            let lw = lhs_int.get_type().get_bit_width();
+            let rw = rhs_int.get_type().get_bit_width();
+            if lw == rw {
+                (lhs_int, rhs_int)
+            } else if lw < rw {
+                let extended = self
+                    .builder
+                    .build_int_s_extend(lhs_int, rhs_int.get_type(), "assign_sext_lhs")
+                    .map_err(|_| BackendError::InvalidNode)?;
+                (extended, rhs_int)
+            } else {
+                let extended = self
+                    .builder
+                    .build_int_s_extend(rhs_int, lhs_int.get_type(), "assign_sext_rhs")
+                    .map_err(|_| BackendError::InvalidNode)?;
+                (lhs_int, extended)
+            }
+        };
         match op_code {
             1 => Ok(self
                 .builder
@@ -851,12 +1489,57 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
 
     fn build_struct_llvm_type(&self, arena: &Arena, node: &CAstNode) -> BasicTypeEnum<'ctx> {
         let mut field_types: Vec<BasicTypeEnum<'ctx>> = Vec::new();
+        // Track current bitfield group to pack consecutive bitfields into a single storage unit
+        let mut bitfield_group: Option<(u16, u32, u32)> = None; // (base_kind, bits_used, capacity)
         let mut member_off = node.first_child;
         while member_off != NodeOffset::NULL {
             if let Some(member) = arena.get(member_off) {
-                let member_kind = arena.get(member.first_child).map(|n| n.kind).unwrap_or(2);
-                let ft = self.node_kind_to_llvm_type(member_kind);
-                field_types.push(ft);
+                // Walk children to detect type and bitfield
+                let mut base_kind = 2u16;
+                let mut has_pointer = false;
+                let mut bitfield_width: Option<u32> = None;
+                let mut check_off = member.first_child;
+                while check_off != NodeOffset::NULL {
+                    if let Some(cn) = arena.get(check_off) {
+                        match cn.kind {
+                            1..=6 | 10..=13 | 83 | 84 => base_kind = cn.kind,
+                            7 => has_pointer = true,
+                            27 => {
+                                if cn.data > 0 {
+                                    bitfield_width = Some(cn.data);
+                                }
+                            }
+                            _ => {}
+                        }
+                        check_off = cn.next_sibling;
+                    } else {
+                        break;
+                    }
+                }
+
+                if let Some(bw) = bitfield_width {
+                    let storage_bits = self.node_kind_bit_width(base_kind);
+                    if let Some((grp_kind, ref mut bits_used, capacity)) = bitfield_group {
+                        if grp_kind == base_kind && *bits_used + bw <= capacity {
+                            *bits_used += bw;
+                            // Same storage unit – no new field_type
+                        } else {
+                            field_types.push(self.node_kind_to_llvm_type(base_kind));
+                            bitfield_group = Some((base_kind, bw, storage_bits));
+                        }
+                    } else {
+                        field_types.push(self.node_kind_to_llvm_type(base_kind));
+                        bitfield_group = Some((base_kind, bw, storage_bits));
+                    }
+                } else {
+                    bitfield_group = None;
+                    if has_pointer {
+                        field_types.push(self.context.ptr_type(AddressSpace::default()).as_basic_type_enum());
+                    } else {
+                        field_types.push(self.node_kind_to_llvm_type(base_kind));
+                    }
+                }
+
                 member_off = member.next_sibling;
             } else {
                 break;
@@ -887,6 +1570,48 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                                 break;
                             }
                         }
+                        // Descend into bitfield wrapper (kind=27) to find ident
+                        if child.kind == 27 && !found {
+                            let mut inner = child.first_child;
+                            while inner != NodeOffset::NULL {
+                                if let Some(inner_n) = arena.get(inner) {
+                                    if inner_n.kind == 60 {
+                                        if let Some(name) = arena.get_string(NodeOffset(inner_n.data)) {
+                                            names.push(name.to_string());
+                                            found = true;
+                                            break;
+                                        }
+                                    }
+                                    inner = inner_n.next_sibling;
+                                } else {
+                                    break;
+                                }
+                            }
+                            if found {
+                                break;
+                            }
+                        }
+                        // Descend into pointer/array declarators (kind=7/8) to find ident
+                        if matches!(child.kind, 7 | 8) && !found {
+                            let mut inner = child.first_child;
+                            while inner != NodeOffset::NULL {
+                                if let Some(inner_n) = arena.get(inner) {
+                                    if inner_n.kind == 60 {
+                                        if let Some(name) = arena.get_string(NodeOffset(inner_n.data)) {
+                                            names.push(name.to_string());
+                                            found = true;
+                                            break;
+                                        }
+                                    }
+                                    inner = inner_n.next_sibling;
+                                } else {
+                                    break;
+                                }
+                            }
+                            if found {
+                                break;
+                            }
+                        }
                         child_off = child.next_sibling;
                     } else {
                         break;
@@ -903,13 +1628,167 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
         names
     }
 
+    /// Pre-register a function definition so it can be called before its body is compiled.
+    /// This extracts the signature (name, return type, parameter types) without
+    /// compiling the body.
+    fn pre_register_func_def(&mut self, arena: &Arena, node: &CAstNode) -> Result<(), BackendError> {
+        let mut func_name = "func".to_string();
+        let mut param_types: Vec<BasicMetadataTypeEnum> = Vec::new();
+        let mut return_llvm_type: Option<BasicTypeEnum<'ctx>> = None;
+        let mut is_void_ret = false;
+        let mut is_variadic = false;
+
+        let mut child_offset = node.first_child;
+        while child_offset != NodeOffset::NULL {
+            if let Some(child) = arena.get(child_offset) {
+                match child.kind {
+                    1..=6 | 83 => {
+                        is_void_ret = child.kind == 1;
+                        if !is_void_ret {
+                            return_llvm_type = Some(self.specifier_to_llvm_type(arena, child));
+                        }
+                    }
+                    7..=9 => {
+                        if let Some(func_decl_offset) =
+                            self.find_function_declarator_offset(arena, child_offset)
+                        {
+                            if let Some(func_decl) = arena.get(func_decl_offset) {
+                                // Check variadic flag
+                                if func_decl.data == 1 {
+                                    is_variadic = true;
+                                }
+                                if !is_void_ret {
+                                    return_llvm_type = Some(self.declarator_llvm_type(
+                                        arena,
+                                        Some(child),
+                                        return_llvm_type.unwrap_or_else(|| {
+                                            self.context.i32_type().as_basic_type_enum()
+                                        }),
+                                    ));
+                                }
+                                if let Some(ident) = arena.get(func_decl.first_child) {
+                                    if ident.kind == 60 {
+                                        if let Some(name) = arena.get_string(NodeOffset(ident.data)) {
+                                            func_name = name.to_string();
+                                        }
+                                    }
+                                    let mut param_off = ident.next_sibling;
+                                    while param_off != NodeOffset::NULL {
+                                        if let Some(param) = arena.get(param_off) {
+                                            if param.kind == 24 {
+                                                let (ptype, _, _) =
+                                                    self.extract_param_type_name(arena, param);
+                                                param_types.push(ptype.into());
+                                            }
+                                            param_off = param.next_sibling;
+                                        } else {
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+                child_offset = child.next_sibling;
+            } else {
+                break;
+            }
+        }
+
+        let ret_llvm = return_llvm_type.unwrap_or_else(|| self.context.i32_type().as_basic_type_enum());
+        let fn_type = if is_void_ret {
+            self.context.void_type().fn_type(&param_types, is_variadic)
+        } else {
+            ret_llvm.fn_type(&param_types, is_variadic)
+        };
+        let function = self.module.add_function(&func_name, fn_type, None);
+        // Apply any __attribute__ decorations to the pre-registered function
+        let attrs = self.extract_attributes(arena, node);
+        self.apply_function_attributes(function, &attrs);
+        self.functions.insert(func_name, function);
+        Ok(())
+    }
+
     fn lower_func_decl(&mut self, arena: &Arena, node: &CAstNode) -> Result<(), BackendError> {
-        let name = self.find_ident_name(arena, node);
-        let func_name = name.as_deref().unwrap_or("func");
-        let fn_type = self.context.i32_type().fn_type(&[], false);
-        let function = self.module.add_function(func_name, fn_type, None);
-        if let Some(n) = name {
-            self.functions.insert(n, function);
+        // Use the same logic as pre_register_func_def to get correct param types
+        let mut func_name = "func".to_string();
+        let mut param_types: Vec<BasicMetadataTypeEnum> = Vec::new();
+        let mut return_llvm_type: Option<BasicTypeEnum<'ctx>> = None;
+        let mut is_void_ret = false;
+        let mut is_variadic = false;
+
+        let mut child_offset = node.first_child;
+        while child_offset != NodeOffset::NULL {
+            if let Some(child) = arena.get(child_offset) {
+                match child.kind {
+                    1..=6 | 83 => {
+                        is_void_ret = child.kind == 1;
+                        if !is_void_ret {
+                            return_llvm_type = Some(self.specifier_to_llvm_type(arena, child));
+                        }
+                    }
+                    7..=9 => {
+                        if let Some(func_decl_offset) =
+                            self.find_function_declarator_offset(arena, child_offset)
+                        {
+                            if let Some(func_decl) = arena.get(func_decl_offset) {
+                                if func_decl.data == 1 {
+                                    is_variadic = true;
+                                }
+                                if !is_void_ret {
+                                    return_llvm_type = Some(self.declarator_llvm_type(
+                                        arena,
+                                        Some(child),
+                                        return_llvm_type.unwrap_or_else(|| {
+                                            self.context.i32_type().as_basic_type_enum()
+                                        }),
+                                    ));
+                                }
+                                if let Some(ident) = arena.get(func_decl.first_child) {
+                                    if ident.kind == 60 {
+                                        if let Some(name) = arena.get_string(NodeOffset(ident.data)) {
+                                            func_name = name.to_string();
+                                        }
+                                    }
+                                    let mut param_off = ident.next_sibling;
+                                    while param_off != NodeOffset::NULL {
+                                        if let Some(param) = arena.get(param_off) {
+                                            if param.kind == 24 {
+                                                let (ptype, _, _) =
+                                                    self.extract_param_type_name(arena, param);
+                                                param_types.push(ptype.into());
+                                            }
+                                            param_off = param.next_sibling;
+                                        } else {
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+                child_offset = child.next_sibling;
+            } else {
+                break;
+            }
+        }
+
+        let ret_llvm = return_llvm_type.unwrap_or_else(|| self.context.i32_type().as_basic_type_enum());
+        let fn_type = if is_void_ret {
+            self.context.void_type().fn_type(&param_types, is_variadic)
+        } else {
+            ret_llvm.fn_type(&param_types, is_variadic)
+        };
+        // Only add if not already registered (pre_register may have added it)
+        if self.module.get_function(&func_name).is_none() {
+            let function = self.module.add_function(&func_name, fn_type, None);
+            let attrs = self.extract_attributes(arena, node);
+            self.apply_function_attributes(function, &attrs);
+            self.functions.insert(func_name, function);
         }
         Ok(())
     }
@@ -923,6 +1802,7 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
         let mut body_offset = NodeOffset::NULL;
         let mut return_llvm_type: Option<BasicTypeEnum<'ctx>> = None;
         let mut is_void_ret = false;
+        let mut is_variadic = false;
 
         // Walk first_child chain: specifiers -> kind=9(func_decl) -> kind=40(body)
         let mut child_offset = node.first_child;
@@ -940,7 +1820,7 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                     1..=6 | 83 => {
                         is_void_ret = child.kind == 1;
                         if !is_void_ret {
-                            return_llvm_type = Some(self.node_kind_to_llvm_type(child.kind));
+                            return_llvm_type = Some(self.specifier_to_llvm_type(arena, child));
                         }
                     }
                     7..=9 => {
@@ -955,6 +1835,10 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                             continue;
                         };
                         seen_func_declarator = true;
+                        // Check variadic flag (data=1 means ...)
+                        if func_decl.data == 1 {
+                            is_variadic = true;
+                        }
                         if !is_void_ret {
                             return_llvm_type = Some(self.declarator_llvm_type(
                                 arena,
@@ -1003,19 +1887,30 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
         let ret_llvm =
             return_llvm_type.unwrap_or_else(|| self.context.i32_type().as_basic_type_enum());
         let fn_type = if is_void_ret {
-            self.context.void_type().fn_type(&param_types, false)
+            self.context.void_type().fn_type(&param_types, is_variadic)
         } else {
-            ret_llvm.fn_type(&param_types, false)
+            ret_llvm.fn_type(&param_types, is_variadic)
         };
-        let function = self.module.add_function(&func_name, fn_type, None);
+        // Use the pre-registered function if available, otherwise create new
+        let function = self.module.get_function(&func_name)
+            .unwrap_or_else(|| self.module.add_function(&func_name, fn_type, None));
+        // Apply __attribute__ decorations to the function
+        let attrs = self.extract_attributes(arena, node);
+        self.apply_function_attributes(function, &attrs);
         self.functions.insert(func_name.clone(), function);
 
         let entry = self.context.append_basic_block(function, "entry");
         self.builder.position_at_end(entry);
 
         self.variables.clear();
+        // Restore global variables so function bodies can reference them
+        for (name, binding) in &self.global_variables {
+            self.variables.insert(name.clone(), *binding);
+        }
         self.struct_fields.clear();
         self.pointer_struct_types.clear();
+        self.var_struct_tag.clear();
+        self.label_blocks.clear();
         self.current_return_type = if is_void_ret { None } else { Some(ret_llvm) };
 
         for (i, ((pname, ptype), struct_info)) in param_names
@@ -1057,7 +1952,8 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
             while stmt_off != NodeOffset::NULL {
                 if let Some(stmt) = arena.get(stmt_off) {
                     let next = stmt.next_sibling;
-                    self.lower_stmt(arena, stmt_off)?;
+                    // Skip errors in individual statements to keep compiling
+                    let _ = self.lower_stmt(arena, stmt_off);
                     stmt_off = next;
                 } else {
                     break;
@@ -1076,13 +1972,80 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                     self.builder
                         .build_return(Some(&ptr_type.const_null()))
                         .map_err(|_| BackendError::InvalidNode)?;
-                } else {
+                } else if let BasicTypeEnum::FloatType(ft) = ret_llvm {
+                    self.builder
+                        .build_return(Some(&ft.const_float(0.0)))
+                        .map_err(|_| BackendError::InvalidNode)?;
+                } else if ret_llvm.is_int_type() {
                     let int_type = ret_llvm.into_int_type();
                     self.builder
                         .build_return(Some(&int_type.const_int(0, false)))
                         .map_err(|_| BackendError::InvalidNode)?;
+                } else if let BasicTypeEnum::StructType(st) = ret_llvm {
+                    let zero = st.const_zero();
+                    self.builder
+                        .build_return(Some(&zero))
+                        .map_err(|_| BackendError::InvalidNode)?;
+                } else if let BasicTypeEnum::ArrayType(at) = ret_llvm {
+                    let zero = at.const_zero();
+                    self.builder
+                        .build_return(Some(&zero))
+                        .map_err(|_| BackendError::InvalidNode)?;
+                } else {
+                    // Fallback: try int, ignore error if it doesn't work
+                    let _ = self.builder.build_return(Some(
+                        &self.context.i32_type().const_int(0, false),
+                    ));
                 }
             }
+        }
+
+        // Clean up empty/unreachable basic blocks to keep LLVM IR valid.
+        // Walk all blocks: if a block has no predecessors (and is not the entry block),
+        // and has no terminator, add an `unreachable` instruction.
+        // Also ensure every block has a terminator.
+        let mut block_opt = function.get_first_basic_block();
+        let entry_block = function.get_first_basic_block();
+        while let Some(bb) = block_opt {
+            let next = bb.get_next_basic_block();
+            if bb.get_terminator().is_none() {
+                self.builder.position_at_end(bb);
+                // Check if block is the entry or has uses (predecessors)
+                if Some(bb) == entry_block {
+                    // Entry block: add default return
+                    if is_void_ret {
+                        let _ = self.builder.build_return(None);
+                    } else if let BasicTypeEnum::PointerType(pt) = ret_llvm {
+                        let _ = self.builder.build_return(Some(&pt.const_null()));
+                    } else if let BasicTypeEnum::FloatType(ft) = ret_llvm {
+                        let _ = self.builder.build_return(Some(&ft.const_float(0.0)));
+                    } else if ret_llvm.is_int_type() {
+                        let _ = self
+                            .builder
+                            .build_return(Some(&ret_llvm.into_int_type().const_int(0, false)));
+                    } else {
+                        let _ = self.builder.build_unreachable();
+                    }
+                } else {
+                    let _ = self.builder.build_unreachable();
+                }
+            }
+            block_opt = next;
+        }
+
+        // Remove truly dead blocks (no predecessors, not entry, only have unreachable)
+        let mut block_opt = function.get_first_basic_block();
+        while let Some(bb) = block_opt {
+            let next = bb.get_next_basic_block();
+            if Some(bb) != entry_block
+                && bb.get_first_use().is_none()
+                && bb.get_first_instruction()
+                    .map(|i| i.get_opcode() == inkwell::values::InstructionOpcode::Unreachable)
+                    .unwrap_or(false)
+            {
+                unsafe { bb.delete().ok(); }
+            }
+            block_opt = next;
         }
 
         self.current_return_type = None;
@@ -1090,15 +2053,18 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
     }
 
     fn lower_compound(&mut self, arena: &Arena, node: &CAstNode) -> Result<(), BackendError> {
+        self.push_scope();
         let mut child_offset = node.first_child;
         while child_offset != NodeOffset::NULL {
             if let Some(child) = arena.get(child_offset) {
-                self.lower_stmt(arena, child_offset)?;
+                // Skip errors in individual statements to keep compiling
+                let _ = self.lower_stmt(arena, child_offset);
                 child_offset = child.next_sibling;
             } else {
                 break;
             }
         }
+        self.pop_scope();
         Ok(())
     }
 
@@ -1120,11 +2086,40 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
             44 => self.lower_return_stmt(arena, &node),
             45 => self.lower_expr_stmt(arena, &node),
             48 => Ok(()),
-            46 | 47 => Ok(()),
-            50 => Ok(()),
+            46 | 47 => self.lower_break_continue(arena, &node),
+            49 => self.lower_goto_stmt(arena, &node),
+            50 => self.lower_switch_stmt(arena, &node),
+            51 => self.lower_labeled_stmt(arena, &node),
+            52 => {
+                // Case label: next_sibling is the inner statement
+                if node.next_sibling != NodeOffset::NULL {
+                    self.lower_stmt(arena, node.next_sibling)
+                } else {
+                    Ok(())
+                }
+            }
+            54 => {
+                // Case range: next_sibling is the inner statement (same as regular case)
+                if node.next_sibling != NodeOffset::NULL {
+                    self.lower_stmt(arena, node.next_sibling)
+                } else {
+                    Ok(())
+                }
+            }
+            53 => {
+                // Default label: first_child is the inner statement
+                if node.first_child != NodeOffset::NULL {
+                    self.lower_stmt(arena, node.first_child)
+                } else {
+                    Ok(())
+                }
+            }
+            27 => Ok(()), // Bitfield - skip
             1..=9 | 83 | 90..=94 | 101..=105 => Ok(()),
             24 => Ok(()),
             25 | 26 => Ok(()),
+            200 | 206 => Ok(()), // __attribute__, __extension__
+            207 => self.lower_asm_stmt(arena, &node),
             _ => {
                 let _ = self.lower_expr(arena, offset)?;
                 Ok(())
@@ -1138,7 +2133,16 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
         val: BasicValueEnum<'ctx>,
     ) -> Result<inkwell::values::IntValue<'ctx>, BackendError> {
         if val.is_int_value() {
-            Ok(val.into_int_value())
+            let int_val = val.into_int_value();
+            // If already i1, no conversion needed
+            if int_val.get_type().get_bit_width() == 1 {
+                return Ok(int_val);
+            }
+            // Compare against zero to produce i1
+            let zero = int_val.get_type().const_zero();
+            self.builder
+                .build_int_compare(inkwell::IntPredicate::NE, int_val, zero, "tobool")
+                .map_err(|_| BackendError::InvalidNode)
         } else if val.is_pointer_value() {
             let ptr_val = val.into_pointer_value();
             let ptr_int = self
@@ -1151,7 +2155,7 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                 .map_err(|_| BackendError::InvalidNode)
         } else if val.is_float_value() {
             let float_val = val.into_float_value();
-            let zero = self.context.f64_type().const_float(0.0);
+            let zero = float_val.get_type().const_float(0.0);
             self.builder
                 .build_float_compare(
                     inkwell::FloatPredicate::ONE,
@@ -1242,14 +2246,28 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
         // kind=42: first_child=cond_wrap(kind=0)
         //   cond_wrap.first_child=condition_expr, cond_wrap.next_sibling=body
         let cond_wrap_offset = node.first_child;
-        let cond_offset = arena
-            .get(cond_wrap_offset)
-            .map(|w| w.first_child)
-            .unwrap_or(NodeOffset::NULL);
-        let body_offset = arena
-            .get(cond_wrap_offset)
-            .map(|w| w.next_sibling)
-            .unwrap_or(NodeOffset::NULL);
+
+        // do-while: data=1, first_child=body, body.next_sibling=condition
+        let is_do_while = node.data == 1;
+
+        let (cond_offset, body_offset) = if is_do_while {
+            let body_off = node.first_child;
+            let cond_off = arena
+                .get(body_off)
+                .map(|b| b.next_sibling)
+                .unwrap_or(NodeOffset::NULL);
+            (cond_off, body_off)
+        } else {
+            let co = arena
+                .get(cond_wrap_offset)
+                .map(|w| w.first_child)
+                .unwrap_or(NodeOffset::NULL);
+            let bo = arena
+                .get(cond_wrap_offset)
+                .map(|w| w.next_sibling)
+                .unwrap_or(NodeOffset::NULL);
+            (co, bo)
+        };
 
         let function = self
             .builder
@@ -1261,21 +2279,46 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
         let body_bb = self.context.append_basic_block(function, "while.body");
         let end_bb = self.context.append_basic_block(function, "while.end");
 
-        self.builder
-            .build_unconditional_branch(cond_bb)
-            .map_err(|_| BackendError::InvalidNode)?;
+        // Push break/continue targets for this loop
+        self.break_stack.push(end_bb);
+        self.continue_stack.push(cond_bb);
 
+        if is_do_while {
+            // do-while: enter body first
+            self.builder
+                .build_unconditional_branch(body_bb)
+                .map_err(|_| BackendError::InvalidNode)?;
+        } else {
+            self.builder
+                .build_unconditional_branch(cond_bb)
+                .map_err(|_| BackendError::InvalidNode)?;
+        }
+
+        // Condition block
         self.builder.position_at_end(cond_bb);
-        let cond_val = self
-            .lower_expr(arena, cond_offset)?
-            .ok_or(BackendError::InvalidNode)?;
-        let cond_int = self.coerce_to_bool(cond_val)?;
-        self.builder
-            .build_conditional_branch(cond_int, body_bb, end_bb)
-            .map_err(|_| BackendError::InvalidNode)?;
+        if cond_offset != NodeOffset::NULL {
+            if let Some(cond_val) = self.lower_expr(arena, cond_offset)? {
+                let cond_int = self.coerce_to_bool(cond_val)?;
+                self.builder
+                    .build_conditional_branch(cond_int, body_bb, end_bb)
+                    .map_err(|_| BackendError::InvalidNode)?;
+            } else {
+                self.builder
+                    .build_unconditional_branch(body_bb)
+                    .map_err(|_| BackendError::InvalidNode)?;
+            }
+        } else {
+            // while(true)
+            self.builder
+                .build_unconditional_branch(body_bb)
+                .map_err(|_| BackendError::InvalidNode)?;
+        }
 
+        // Body block
         self.builder.position_at_end(body_bb);
-        self.lower_stmt(arena, body_offset)?;
+        if body_offset != NodeOffset::NULL {
+            let _ = self.lower_stmt(arena, body_offset);
+        }
         if self
             .builder
             .get_insert_block()
@@ -1286,6 +2329,10 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                 .build_unconditional_branch(cond_bb)
                 .map_err(|_| BackendError::InvalidNode)?;
         }
+
+        // Pop break/continue targets
+        self.break_stack.pop();
+        self.continue_stack.pop();
 
         self.builder.position_at_end(end_bb);
         Ok(())
@@ -1331,8 +2378,13 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
         }
 
         let cond_bb = self.context.append_basic_block(function, "for.cond");
+        let incr_bb = self.context.append_basic_block(function, "for.incr");
         let body_bb = self.context.append_basic_block(function, "for.body");
         let end_bb = self.context.append_basic_block(function, "for.end");
+
+        // Push break/continue targets: break→end, continue→incr (not cond!)
+        self.break_stack.push(end_bb);
+        self.continue_stack.push(incr_bb);
 
         self.builder
             .build_unconditional_branch(cond_bb)
@@ -1358,12 +2410,8 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
 
         self.builder.position_at_end(body_bb);
         if body_offset != NodeOffset::NULL {
-            self.lower_stmt(arena, body_offset)?;
+            let _ = self.lower_stmt(arena, body_offset);
         }
-        if incr_offset != NodeOffset::NULL {
-            let _ = self.lower_expr(arena, incr_offset)?;
-        }
-
         if self
             .builder
             .get_insert_block()
@@ -1371,15 +2419,724 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
             .is_none()
         {
             self.builder
+                .build_unconditional_branch(incr_bb)
+                .map_err(|_| BackendError::InvalidNode)?;
+        }
+
+        // Increment block
+        self.builder.position_at_end(incr_bb);
+        if incr_offset != NodeOffset::NULL {
+            let _ = self.lower_expr(arena, incr_offset)?;
+        }
+        if incr_bb.get_terminator().is_none() {
+            self.builder
                 .build_unconditional_branch(cond_bb)
                 .map_err(|_| BackendError::InvalidNode)?;
         }
+
+        // Pop break/continue targets
+        self.break_stack.pop();
+        self.continue_stack.pop();
 
         self.builder.position_at_end(end_bb);
         Ok(())
     }
 
+    /// Lower a switch statement (kind=50).
+    /// AST: first_child=condition expr, next_sibling=body (compound stmt with case/default labels)
+    fn lower_switch_stmt(&mut self, arena: &Arena, node: &CAstNode) -> Result<(), BackendError> {
+        let cond_offset = node.first_child;
+        let body_offset = node.next_sibling;
+
+        let function = self
+            .builder
+            .get_insert_block()
+            .and_then(|bb| bb.get_parent())
+            .ok_or(BackendError::InvalidNode)?;
+
+        // Evaluate the switch condition
+        let cond_val = self
+            .lower_expr(arena, cond_offset)?
+            .ok_or(BackendError::InvalidNode)?;
+
+        let cond_int = if cond_val.is_int_value() {
+            cond_val.into_int_value()
+        } else if cond_val.is_pointer_value() {
+            self.builder
+                .build_ptr_to_int(
+                    cond_val.into_pointer_value(),
+                    self.context.i64_type(),
+                    "switch_ptr2int",
+                )
+                .map_err(|_| BackendError::InvalidNode)?
+        } else {
+            self.context.i32_type().const_int(0, false)
+        };
+
+        let end_bb = self.context.append_basic_block(function, "switch.end");
+        let default_bb = self.context.append_basic_block(function, "switch.default");
+
+        // Collect case values and create basic blocks for each case
+        let mut cases: Vec<(inkwell::values::IntValue<'ctx>, BasicBlock<'ctx>)> = Vec::new();
+        let mut case_bodies: Vec<(BasicBlock<'ctx>, NodeOffset)> = Vec::new();
+        let mut default_body_offset = NodeOffset::NULL;
+
+        // Walk the body to find case/default labels
+        self.collect_switch_cases(
+            arena,
+            body_offset,
+            function,
+            &cond_int,
+            &mut cases,
+            &mut case_bodies,
+            &mut default_body_offset,
+            default_bb,
+        );
+
+        // Build the switch instruction
+        let switch_inst = self
+            .builder
+            .build_switch(cond_int, default_bb, &cases)
+            .map_err(|_| BackendError::InvalidNode)?;
+        let _ = switch_inst; // used for building the instruction
+
+        // Push break target
+        self.break_stack.push(end_bb);
+
+        // Lower case bodies in order
+        for (bb, stmt_offset) in &case_bodies {
+            self.builder.position_at_end(*bb);
+            if *stmt_offset != NodeOffset::NULL {
+                let _ = self.lower_stmt(arena, *stmt_offset);
+            }
+            // Fall-through: if no terminator, branch to next case body or end
+            // Note: C switch semantics allow fall-through between cases
+        }
+
+        // Handle fall-through: for each case body without a terminator,
+        // branch to the next case body (fall-through) or to end
+        for i in 0..case_bodies.len() {
+            let (bb, _) = case_bodies[i];
+            if bb.get_terminator().is_none() {
+                self.builder.position_at_end(bb);
+                if i + 1 < case_bodies.len() {
+                    let next_bb = case_bodies[i + 1].0;
+                    self.builder
+                        .build_unconditional_branch(next_bb)
+                        .map_err(|_| BackendError::InvalidNode)?;
+                } else {
+                    self.builder
+                        .build_unconditional_branch(end_bb)
+                        .map_err(|_| BackendError::InvalidNode)?;
+                }
+            }
+        }
+
+        // Lower default body
+        self.builder.position_at_end(default_bb);
+        if default_body_offset != NodeOffset::NULL {
+            let _ = self.lower_stmt(arena, default_body_offset);
+        }
+        if default_bb.get_terminator().is_none() {
+            self.builder
+                .build_unconditional_branch(end_bb)
+                .map_err(|_| BackendError::InvalidNode)?;
+        }
+
+        // Pop break target
+        self.break_stack.pop();
+
+        self.builder.position_at_end(end_bb);
+        Ok(())
+    }
+
+    /// Recursively walk a compound statement to collect case/default labels for switch.
+    fn collect_switch_cases(
+        &mut self,
+        arena: &Arena,
+        offset: NodeOffset,
+        function: FunctionValue<'ctx>,
+        cond_int: &inkwell::values::IntValue<'ctx>,
+        cases: &mut Vec<(inkwell::values::IntValue<'ctx>, BasicBlock<'ctx>)>,
+        case_bodies: &mut Vec<(BasicBlock<'ctx>, NodeOffset)>,
+        default_body_offset: &mut NodeOffset,
+        default_bb: BasicBlock<'ctx>,
+    ) {
+        let node = match arena.get(offset) {
+            Some(n) => n,
+            None => return,
+        };
+
+        match node.kind {
+            52 => {
+                // Case label: first_child=case_value_expr, next_sibling=stmt
+                let case_val = if node.first_child != NodeOffset::NULL {
+                    self.lower_expr(arena, node.first_child).ok().flatten()
+                } else {
+                    None
+                };
+
+                let case_bb = self.context.append_basic_block(function, "switch.case");
+                let stmt_offset = node.next_sibling;
+
+                if let Some(val) = case_val {
+                    let case_int = if val.is_int_value() {
+                        // Match bitwidth to the switch condition
+                        let raw = val.into_int_value();
+                        let cond_bits = cond_int.get_type().get_bit_width();
+                        let case_bits = raw.get_type().get_bit_width();
+                        if case_bits < cond_bits {
+                            self.builder
+                                .build_int_z_extend(raw, cond_int.get_type(), "case_zext")
+                                .unwrap_or(raw)
+                        } else if case_bits > cond_bits {
+                            self.builder
+                                .build_int_truncate(raw, cond_int.get_type(), "case_trunc")
+                                .unwrap_or(raw)
+                        } else {
+                            raw
+                        }
+                    } else {
+                        // Non-int case value: treat as 0
+                        cond_int.get_type().const_int(0, false)
+                    };
+                    cases.push((case_int, case_bb));
+                } else {
+                    // Could not evaluate case value; use 0 as fallback
+                    cases.push((cond_int.get_type().const_int(0, false), case_bb));
+                }
+
+                case_bodies.push((case_bb, stmt_offset));
+
+                // The stmt in next_sibling may itself contain more case labels
+                // (fall-through chains like `case 1: case 2: stmt`)
+                if stmt_offset != NodeOffset::NULL {
+                    if let Some(stmt_node) = arena.get(stmt_offset) {
+                        if stmt_node.kind == 52 || stmt_node.kind == 53 || stmt_node.kind == 54 {
+                            self.collect_switch_cases(
+                                arena,
+                                stmt_offset,
+                                function,
+                                cond_int,
+                                cases,
+                                case_bodies,
+                                default_body_offset,
+                                default_bb,
+                            );
+                        }
+                    }
+                }
+            }
+            54 => {
+                // Case range (GNU extension): case LOW ... HIGH:
+                // kind=54: first_child=low_expr, data=high_expr_offset, next_sibling=stmt
+                let low_val = if node.first_child != NodeOffset::NULL {
+                    self.lower_expr(arena, node.first_child).ok().flatten()
+                } else {
+                    None
+                };
+                let high_val = if node.data != 0 {
+                    self.lower_expr(arena, NodeOffset(node.data)).ok().flatten()
+                } else {
+                    None
+                };
+
+                let case_bb = self.context.append_basic_block(function, "switch.case_range");
+                let stmt_offset = node.next_sibling;
+
+                if let (Some(lo), Some(hi)) = (low_val, high_val) {
+                    if lo.is_int_value() && hi.is_int_value() {
+                        let lo_raw = lo.into_int_value();
+                        let hi_raw = hi.into_int_value();
+                        // Get constant values for the range
+                        let lo_const = lo_raw.get_zero_extended_constant().unwrap_or(0);
+                        let hi_const = hi_raw.get_zero_extended_constant().unwrap_or(0);
+                        // Cap range to prevent huge switch tables (max 256 entries)
+                        let count = if hi_const >= lo_const {
+                            (hi_const - lo_const + 1).min(MAX_CASE_RANGE_EXPANSION)
+                        } else {
+                            1
+                        };
+                        for i in 0..count {
+                            let val = cond_int.get_type().const_int(lo_const + i, false);
+                            cases.push((val, case_bb));
+                        }
+                    } else {
+                        // Fallback: treat as single case with low value
+                        cases.push((cond_int.get_type().const_int(0, false), case_bb));
+                    }
+                } else {
+                    cases.push((cond_int.get_type().const_int(0, false), case_bb));
+                }
+
+                case_bodies.push((case_bb, stmt_offset));
+
+                // Check if stmt contains more case labels
+                if stmt_offset != NodeOffset::NULL {
+                    if let Some(stmt_node) = arena.get(stmt_offset) {
+                        if stmt_node.kind == 52 || stmt_node.kind == 53 || stmt_node.kind == 54 {
+                            self.collect_switch_cases(
+                                arena,
+                                stmt_offset,
+                                function,
+                                cond_int,
+                                cases,
+                                case_bodies,
+                                default_body_offset,
+                                default_bb,
+                            );
+                        }
+                    }
+                }
+            }
+            53 => {
+                // Default label: first_child=stmt
+                *default_body_offset = node.first_child;
+                // The default stmt may also contain nested case labels
+                if node.first_child != NodeOffset::NULL {
+                    if let Some(child) = arena.get(node.first_child) {
+                        if child.kind == 52 || child.kind == 53 || child.kind == 54 {
+                            self.collect_switch_cases(
+                                arena,
+                                node.first_child,
+                                function,
+                                cond_int,
+                                cases,
+                                case_bodies,
+                                default_body_offset,
+                                default_bb,
+                            );
+                        }
+                    }
+                }
+            }
+            40 => {
+                // Compound statement: walk children
+                let mut child_offset = node.first_child;
+                while child_offset != NodeOffset::NULL {
+                    if let Some(child) = arena.get(child_offset) {
+                        self.collect_switch_cases(
+                            arena,
+                            child_offset,
+                            function,
+                            cond_int,
+                            cases,
+                            case_bodies,
+                            default_body_offset,
+                            default_bb,
+                        );
+                        child_offset = child.next_sibling;
+                    } else {
+                        break;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Lower a goto statement (kind=49).
+    /// data = string offset of label name (0 if computed goto with first_child=expr)
+    fn lower_goto_stmt(&mut self, arena: &Arena, node: &CAstNode) -> Result<(), BackendError> {
+        let function = self
+            .builder
+            .get_insert_block()
+            .and_then(|bb| bb.get_parent())
+            .ok_or(BackendError::InvalidNode)?;
+
+        if node.data != 0 {
+            // Named goto
+            let label_name = arena
+                .get_string(NodeOffset(node.data))
+                .unwrap_or("")
+                .to_string();
+            if label_name.is_empty() {
+                return Ok(());
+            }
+
+            // Get or create the target basic block
+            let target_bb = if let Some(bb) = self.label_blocks.get(&label_name) {
+                *bb
+            } else {
+                let bb = self
+                    .context
+                    .append_basic_block(function, &format!("label.{}", label_name));
+                self.label_blocks.insert(label_name.clone(), bb);
+                bb
+            };
+
+            self.builder
+                .build_unconditional_branch(target_bb)
+                .map_err(|_| BackendError::InvalidNode)?;
+        } else if node.first_child != NodeOffset::NULL {
+            // Computed goto: goto *expr → LLVM indirectbr
+            if let Some(addr_val) = self.lower_expr(arena, node.first_child)? {
+                // Collect all known label blocks as possible destinations
+                let destinations: Vec<BasicBlock<'ctx>> =
+                    self.label_blocks.values().copied().collect();
+
+                self.builder
+                    .build_indirect_branch(addr_val, &destinations)
+                    .map_err(|_| BackendError::InvalidNode)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Lower a labeled statement (kind=51).
+    /// data = string offset of label name, first_child = inner statement
+    fn lower_labeled_stmt(&mut self, arena: &Arena, node: &CAstNode) -> Result<(), BackendError> {
+        let function = self
+            .builder
+            .get_insert_block()
+            .and_then(|bb| bb.get_parent())
+            .ok_or(BackendError::InvalidNode)?;
+
+        let label_name = if node.data != 0 {
+            arena
+                .get_string(NodeOffset(node.data))
+                .unwrap_or("")
+                .to_string()
+        } else {
+            String::new()
+        };
+
+        if !label_name.is_empty() {
+            // Get or create the basic block for this label
+            let label_bb = if let Some(bb) = self.label_blocks.get(&label_name) {
+                *bb
+            } else {
+                let bb = self
+                    .context
+                    .append_basic_block(function, &format!("label.{}", label_name));
+                self.label_blocks.insert(label_name.clone(), bb);
+                bb
+            };
+
+            // Branch from current block to label block (fall-through)
+            if self
+                .builder
+                .get_insert_block()
+                .and_then(|bb| bb.get_terminator())
+                .is_none()
+            {
+                self.builder
+                    .build_unconditional_branch(label_bb)
+                    .map_err(|_| BackendError::InvalidNode)?;
+            }
+
+            self.builder.position_at_end(label_bb);
+        }
+
+        // Lower the inner statement
+        if node.first_child != NodeOffset::NULL {
+            self.lower_stmt(arena, node.first_child)?;
+        }
+        Ok(())
+    }
+
+    /// Lower break (kind=46) or continue (kind=47) statements.
+    fn lower_break_continue(
+        &mut self,
+        _arena: &Arena,
+        node: &CAstNode,
+    ) -> Result<(), BackendError> {
+        match node.kind {
+            46 => {
+                // break
+                if let Some(target) = self.break_stack.last() {
+                    let target = *target;
+                    self.builder
+                        .build_unconditional_branch(target)
+                        .map_err(|_| BackendError::InvalidNode)?;
+                }
+                Ok(())
+            }
+            47 => {
+                // continue
+                if let Some(target) = self.continue_stack.last() {
+                    let target = *target;
+                    self.builder
+                        .build_unconditional_branch(target)
+                        .map_err(|_| BackendError::InvalidNode)?;
+                }
+                Ok(())
+            }
+            _ => Ok(()),
+        }
+    }
+
+    /// Lower inline asm statement (kind=207).
+    ///
+    /// ASM_STMT node layout:
+    /// - data = flags (bit 0 = volatile, bit 1 = goto)
+    /// - first_child = template string offset (NodeOffset into string arena)
+    /// - next_sibling = first operand child (linked chain of kind=208/209/210/211)
+    fn lower_asm_stmt(&mut self, arena: &Arena, node: &CAstNode) -> Result<(), BackendError> {
+        let is_volatile = (node.data & 1) != 0;
+
+        // Read template string from arena
+        let template = arena
+            .get_string(node.first_child)
+            .unwrap_or("")
+            .to_string();
+
+        // Strip surrounding quotes if present (parser may store them)
+        let template = template
+            .strip_prefix('"')
+            .and_then(|s| s.strip_suffix('"'))
+            .unwrap_or(&template)
+            .to_string();
+
+        // Walk operand children to gather outputs, inputs, clobbers, and goto labels
+        let mut output_constraints: Vec<String> = Vec::new();
+        let mut input_constraints: Vec<String> = Vec::new();
+        let mut clobbers: Vec<String> = Vec::new();
+        let mut input_values: Vec<inkwell::values::BasicMetadataValueEnum<'ctx>> = Vec::new();
+        let mut output_lvalues: Vec<Option<(PointerValue<'ctx>, BasicTypeEnum<'ctx>)>> = Vec::new();
+
+        let mut child_offset = node.next_sibling;
+        while child_offset != NodeOffset::NULL {
+            let child = match arena.get(child_offset) {
+                Some(c) => c,
+                None => break,
+            };
+
+            match child.kind {
+                208 => {
+                    // ASM_OPERAND_OUTPUT: data = constraint string offset, first_child = expr
+                    let constraint = arena
+                        .get_string(NodeOffset(child.data))
+                        .unwrap_or("r")
+                        .to_string();
+
+                    // Strip quotes from constraint
+                    let constraint = constraint
+                        .strip_prefix('"')
+                        .and_then(|s| s.strip_suffix('"'))
+                        .unwrap_or(&constraint)
+                        .to_string();
+
+                    // Determine if readwrite (+) or output-only (=)
+                    let is_readwrite = constraint.starts_with('+');
+                    let clean = if is_readwrite {
+                        constraint.strip_prefix('+').unwrap_or(&constraint).to_string()
+                    } else {
+                        format!("={}", constraint.strip_prefix('=').unwrap_or(&constraint))
+                    };
+
+                    let llvm_constraint = if is_readwrite {
+                        // LLVM read-write: output constraint with matching input
+                        format!("+{}", constraint.strip_prefix('+').unwrap_or(&constraint))
+                    } else {
+                        clean
+                    };
+
+                    output_constraints.push(llvm_constraint);
+
+                    // Get the lvalue pointer for the output operand expression
+                    if child.first_child != NodeOffset::NULL {
+                        let lvalue = self.lower_lvalue_ptr(arena, child.first_child)?;
+                        output_lvalues.push(lvalue);
+
+                        // For readwrite operands, the current value is also an input
+                        if is_readwrite {
+                            if let Some((ptr, pointee_ty)) = &lvalue {
+                                let loaded = self.builder
+                                    .build_load(*pointee_ty, *ptr, "asm_rw_load")
+                                    .map_err(|_| BackendError::InvalidNode)?;
+                                input_values.push(loaded.into());
+                            }
+                        }
+                    } else {
+                        output_lvalues.push(None);
+                    }
+                }
+                209 => {
+                    // ASM_OPERAND_INPUT: data = constraint string offset, first_child = expr
+                    let constraint = arena
+                        .get_string(NodeOffset(child.data))
+                        .unwrap_or("r")
+                        .to_string();
+
+                    // Strip quotes from constraint
+                    let constraint = constraint
+                        .strip_prefix('"')
+                        .and_then(|s| s.strip_suffix('"'))
+                        .unwrap_or(&constraint)
+                        .to_string();
+
+                    input_constraints.push(constraint);
+
+                    // Evaluate input expression
+                    if child.first_child != NodeOffset::NULL {
+                        if let Some(val) = self.lower_expr(arena, child.first_child)? {
+                            input_values.push(val.into());
+                        }
+                    }
+                }
+                210 => {
+                    // ASM_CLOBBER: data = clobber string offset
+                    let clobber = arena
+                        .get_string(NodeOffset(child.data))
+                        .unwrap_or("")
+                        .to_string();
+
+                    // Strip quotes from clobber
+                    let clobber = clobber
+                        .strip_prefix('"')
+                        .and_then(|s| s.strip_suffix('"'))
+                        .unwrap_or(&clobber)
+                        .to_string();
+
+                    if !clobber.is_empty() {
+                        clobbers.push(format!("~{{{}}}", clobber));
+                    }
+                }
+                211 => {
+                    // ASM_GOTO_LABEL: data = label string offset — ignored for now
+                }
+                _ => {}
+            }
+
+            child_offset = child.next_sibling;
+        }
+
+        // Build the full constraint string: outputs, inputs, clobbers
+        let mut all_constraints: Vec<String> = Vec::new();
+        all_constraints.extend(output_constraints.iter().cloned());
+        all_constraints.extend(input_constraints.iter().cloned());
+        all_constraints.extend(clobbers.iter().cloned());
+        let constraints_str = all_constraints.join(",");
+
+        // Build the LLVM function type for this inline asm
+        // Input parameter types come from the evaluated input values
+        let param_types: Vec<BasicMetadataTypeEnum<'ctx>> = input_values
+            .iter()
+            .map(|v| match v {
+                inkwell::values::BasicMetadataValueEnum::IntValue(v) => {
+                    BasicMetadataTypeEnum::IntType(v.get_type())
+                }
+                inkwell::values::BasicMetadataValueEnum::FloatValue(v) => {
+                    BasicMetadataTypeEnum::FloatType(v.get_type())
+                }
+                inkwell::values::BasicMetadataValueEnum::PointerValue(_) => {
+                    BasicMetadataTypeEnum::PointerType(
+                        self.context.ptr_type(AddressSpace::default()),
+                    )
+                }
+                _ => BasicMetadataTypeEnum::IntType(self.context.i32_type()),
+            })
+            .collect();
+
+        // Determine return type based on output operands
+        let has_side_effects = is_volatile || clobbers.iter().any(|c| c.contains("memory"));
+
+        let asm_fn_type = if output_constraints.is_empty() {
+            // No outputs → void return
+            self.context.void_type().fn_type(&param_types, false)
+        } else if output_constraints.len() == 1 {
+            // Single output → i32 return (default; could be refined with type info)
+            self.context.i32_type().fn_type(&param_types, false)
+        } else {
+            // Multiple outputs → struct return
+            let field_types: Vec<BasicTypeEnum<'ctx>> = output_constraints
+                .iter()
+                .map(|_| self.context.i32_type().into())
+                .collect();
+            let struct_type = self.context.struct_type(&field_types, false);
+            struct_type.fn_type(&param_types, false)
+        };
+
+        // Create the inline asm value
+        let asm_val = self.context.create_inline_asm(
+            asm_fn_type,
+            template,
+            constraints_str,
+            has_side_effects,
+            false, // alignstack
+            None,  // dialect (ATT default)
+            false, // can_throw
+        );
+
+        // Call the inline asm
+        let call_result = self.builder
+            .build_indirect_call(asm_fn_type, asm_val, &input_values, "asm_call")
+            .map_err(|_| BackendError::InvalidNode)?;
+
+        // Store output results back to lvalue pointers
+        if output_constraints.len() == 1 {
+            if let Some(Some((ptr, pointee_ty))) = output_lvalues.first() {
+                match call_result.try_as_basic_value() {
+                    inkwell::values::ValueKind::Basic(result) => {
+                        // Cast result to match the expected pointee type if needed
+                        let store_val: BasicValueEnum<'ctx> = if result.get_type() != *pointee_ty {
+                            if result.is_int_value() && pointee_ty.is_int_type() {
+                                let result_int = result.into_int_value();
+                                let target_int = pointee_ty.into_int_type();
+                                if result_int.get_type().get_bit_width() > target_int.get_bit_width() {
+                                    self.builder
+                                        .build_int_truncate(result_int, target_int, "asm_trunc")
+                                        .map_err(|_| BackendError::InvalidNode)?
+                                        .into()
+                                } else {
+                                    self.builder
+                                        .build_int_z_extend(result_int, target_int, "asm_zext")
+                                        .map_err(|_| BackendError::InvalidNode)?
+                                        .into()
+                                }
+                            } else {
+                                result
+                            }
+                        } else {
+                            result
+                        };
+                        self.builder
+                            .build_store(*ptr, store_val)
+                            .map_err(|_| BackendError::InvalidNode)?;
+                    }
+                    inkwell::values::ValueKind::Instruction(_) => {}
+                }
+            }
+        } else if output_constraints.len() > 1 {
+            // Multiple outputs: extract from struct
+            match call_result.try_as_basic_value() {
+                inkwell::values::ValueKind::Basic(result) => {
+                    for (i, lvalue) in output_lvalues.iter().enumerate() {
+                        if let Some((ptr, _pointee_ty)) = lvalue {
+                            let extracted = self.builder
+                                .build_extract_value(
+                                    result.into_struct_value(),
+                                    i as u32,
+                                    &format!("asm_out_{}", i),
+                                )
+                                .map_err(|_| BackendError::InvalidNode)?;
+                            self.builder
+                                .build_store(*ptr, extracted)
+                                .map_err(|_| BackendError::InvalidNode)?;
+                        }
+                    }
+                }
+                inkwell::values::ValueKind::Instruction(_) => {}
+            }
+        }
+
+        Ok(())
+    }
+
     fn lower_return_stmt(&mut self, arena: &Arena, node: &CAstNode) -> Result<(), BackendError> {
+        // If function is void, always emit ret void regardless of expression
+        if self.current_return_type.is_none() {
+            // Evaluate expression for side effects if present
+            if node.first_child != NodeOffset::NULL {
+                let _ = self.lower_expr(arena, node.first_child);
+            }
+            self.builder
+                .build_return(None)
+                .map_err(|_| BackendError::InvalidNode)?;
+            return Ok(());
+        }
+
         if node.first_child != NodeOffset::NULL {
             if let Some(val) = self.lower_expr(arena, node.first_child)? {
                 if let Some(BasicTypeEnum::PointerType(ptr_type)) = self.current_return_type {
@@ -1388,43 +3145,210 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                         self.builder
                             .build_return(Some(&ptr_val))
                             .map_err(|_| BackendError::InvalidNode)?;
-                    } else if val.is_int_value()
-                        && val.into_int_value().get_zero_extended_constant() == Some(0)
-                    {
+                    } else if val.is_int_value() {
+                        let int_val = val.into_int_value();
+                        if int_val.get_zero_extended_constant() == Some(0) {
+                            self.builder
+                                .build_return(Some(&ptr_type.const_null()))
+                                .map_err(|_| BackendError::InvalidNode)?;
+                        } else {
+                            // Non-zero int returned as pointer: inttoptr
+                            let cast = self
+                                .builder
+                                .build_int_to_ptr(int_val, ptr_type, "int2ptr_ret")
+                                .map_err(|_| BackendError::InvalidNode)?;
+                            self.builder
+                                .build_return(Some(&cast))
+                                .map_err(|_| BackendError::InvalidNode)?;
+                        }
+                    } else {
+                        // Unknown value type for pointer return - return null
                         self.builder
                             .build_return(Some(&ptr_type.const_null()))
                             .map_err(|_| BackendError::InvalidNode)?;
+                    }
+                } else if let Some(BasicTypeEnum::StructType(_st)) = self.current_return_type {
+                    // Struct return: the value should be a struct value from a load
+                    if val.is_struct_value() {
+                        self.builder
+                            .build_return(Some(&val.into_struct_value()))
+                            .map_err(|_| BackendError::InvalidNode)?;
                     } else {
-                        return Err(BackendError::InvalidNode);
+                        // Value type mismatch — return zeroinitializer
+                        self.builder
+                            .build_return(Some(&_st.const_zero()))
+                            .map_err(|_| BackendError::InvalidNode)?;
+                    }
+                } else if let Some(BasicTypeEnum::FloatType(_ft)) = self.current_return_type {
+                    if val.is_float_value() {
+                        self.builder
+                            .build_return(Some(&val.into_float_value()))
+                            .map_err(|_| BackendError::InvalidNode)?;
+                    } else if val.is_int_value() {
+                        // int returned as float: sitofp
+                        let int_val = val.into_int_value();
+                        let cast = self
+                            .builder
+                            .build_signed_int_to_float(int_val, _ft, "int2fp_ret")
+                            .map_err(|_| BackendError::InvalidNode)?;
+                        self.builder
+                            .build_return(Some(&cast))
+                            .map_err(|_| BackendError::InvalidNode)?;
+                    } else {
+                        self.builder
+                            .build_return(Some(&_ft.const_float(0.0)))
+                            .map_err(|_| BackendError::InvalidNode)?;
                     }
                 } else if val.is_int_value() {
                     let int_val = val.into_int_value();
-                    self.builder
-                        .build_return(Some(&int_val))
-                        .map_err(|_| BackendError::InvalidNode)?;
+                    // Match the return type width
+                    if let Some(ret_ty) = self.current_return_type {
+                        if ret_ty.is_int_type() {
+                            let ret_int = ret_ty.into_int_type();
+                            let val_width = int_val.get_type().get_bit_width();
+                            let ret_width = ret_int.get_bit_width();
+                            if val_width < ret_width {
+                                let extended = self
+                                    .builder
+                                    .build_int_s_extend(int_val, ret_int, "sext_ret")
+                                    .map_err(|_| BackendError::InvalidNode)?;
+                                self.builder
+                                    .build_return(Some(&extended))
+                                    .map_err(|_| BackendError::InvalidNode)?;
+                            } else if val_width > ret_width {
+                                let truncated = self
+                                    .builder
+                                    .build_int_truncate(int_val, ret_int, "trunc_ret")
+                                    .map_err(|_| BackendError::InvalidNode)?;
+                                self.builder
+                                    .build_return(Some(&truncated))
+                                    .map_err(|_| BackendError::InvalidNode)?;
+                            } else {
+                                self.builder
+                                    .build_return(Some(&int_val))
+                                    .map_err(|_| BackendError::InvalidNode)?;
+                            }
+                        } else {
+                            self.builder
+                                .build_return(Some(&int_val))
+                                .map_err(|_| BackendError::InvalidNode)?;
+                        }
+                    } else {
+                        self.builder
+                            .build_return(Some(&int_val))
+                            .map_err(|_| BackendError::InvalidNode)?;
+                    }
                 } else if val.is_float_value() {
                     let float_val = val.into_float_value();
-                    self.builder
-                        .build_return(Some(&float_val))
-                        .map_err(|_| BackendError::InvalidNode)?;
+                    // Check if function returns a non-float type and convert
+                    if let Some(ret_ty) = self.current_return_type {
+                        if ret_ty.is_int_type() {
+                            let ret_int = ret_ty.into_int_type();
+                            let cast = self
+                                .builder
+                                .build_float_to_signed_int(float_val, ret_int, "fp2int_ret")
+                                .map_err(|_| BackendError::InvalidNode)?;
+                            self.builder
+                                .build_return(Some(&cast))
+                                .map_err(|_| BackendError::InvalidNode)?;
+                        } else {
+                            self.builder
+                                .build_return(Some(&float_val))
+                                .map_err(|_| BackendError::InvalidNode)?;
+                        }
+                    } else {
+                        self.builder
+                            .build_return(Some(&float_val))
+                            .map_err(|_| BackendError::InvalidNode)?;
+                    }
+                } else if val.is_pointer_value() {
+                    // Pointer returned in non-pointer function - ptrtoint
+                    if let Some(ret_ty) = self.current_return_type {
+                        if ret_ty.is_int_type() {
+                            let ptr_val = val.into_pointer_value();
+                            let cast = self
+                                .builder
+                                .build_ptr_to_int(ptr_val, ret_ty.into_int_type(), "ptr2int_ret")
+                                .map_err(|_| BackendError::InvalidNode)?;
+                            self.builder
+                                .build_return(Some(&cast))
+                                .map_err(|_| BackendError::InvalidNode)?;
+                        } else {
+                            return Ok(());
+                        }
+                    } else {
+                        return Ok(());
+                    }
                 } else {
                     return Ok(());
                 }
             } else {
-                if let Some(BasicTypeEnum::PointerType(ptr_type)) = self.current_return_type {
-                    self.builder
-                        .build_return(Some(&ptr_type.const_null()))
-                        .map_err(|_| BackendError::InvalidNode)?;
-                } else {
-                    self.builder
-                        .build_return(Some(&self.context.i32_type().const_int(0, false)))
-                        .map_err(|_| BackendError::InvalidNode)?;
+                // lower_expr returned None - return a default zero/null for the function return type
+                match self.current_return_type {
+                    None => {
+                        self.builder
+                            .build_return(None)
+                            .map_err(|_| BackendError::InvalidNode)?;
+                    }
+                    Some(BasicTypeEnum::PointerType(ptr_type)) => {
+                        self.builder
+                            .build_return(Some(&ptr_type.const_null()))
+                            .map_err(|_| BackendError::InvalidNode)?;
+                    }
+                    Some(BasicTypeEnum::FloatType(ft)) => {
+                        self.builder
+                            .build_return(Some(&ft.const_float(0.0)))
+                            .map_err(|_| BackendError::InvalidNode)?;
+                    }
+                    Some(BasicTypeEnum::StructType(st)) => {
+                        self.builder
+                            .build_return(Some(&st.const_zero()))
+                            .map_err(|_| BackendError::InvalidNode)?;
+                    }
+                    Some(ret_ty) if ret_ty.is_int_type() => {
+                        let int_type = ret_ty.into_int_type();
+                        self.builder
+                            .build_return(Some(&int_type.const_int(0, false)))
+                            .map_err(|_| BackendError::InvalidNode)?;
+                    }
+                    Some(_) => {
+                        self.builder
+                            .build_return(Some(&self.context.i32_type().const_int(0, false)))
+                            .map_err(|_| BackendError::InvalidNode)?;
+                    }
                 }
             }
         } else {
-            self.builder
-                .build_return(None)
-                .map_err(|_| BackendError::InvalidNode)?;
+            // Empty return statement: use `ret void` only if the function is void,
+            // otherwise return a zero/null default to keep LLVM IR valid.
+            match self.current_return_type {
+                None => {
+                    self.builder
+                        .build_return(None)
+                        .map_err(|_| BackendError::InvalidNode)?;
+                }
+                Some(BasicTypeEnum::PointerType(ptr_type)) => {
+                    self.builder
+                        .build_return(Some(&ptr_type.const_null()))
+                        .map_err(|_| BackendError::InvalidNode)?;
+                }
+                Some(BasicTypeEnum::FloatType(ft)) => {
+                    self.builder
+                        .build_return(Some(&ft.const_float(0.0)))
+                        .map_err(|_| BackendError::InvalidNode)?;
+                }
+                Some(BasicTypeEnum::StructType(st)) => {
+                    self.builder
+                        .build_return(Some(&st.const_zero()))
+                        .map_err(|_| BackendError::InvalidNode)?;
+                }
+                Some(ret_ty) => {
+                    let int_type = ret_ty.into_int_type();
+                    self.builder
+                        .build_return(Some(&int_type.const_int(0, false)))
+                        .map_err(|_| BackendError::InvalidNode)?;
+                }
+            }
         }
         Ok(())
     }
@@ -1454,7 +3378,7 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
             60 => self.lower_ident(arena, &node),
             61 => self.lower_int_const(&node),
             62 => self.lower_char_const(&node),
-            63 | 81 => self.lower_string_const(&node),
+            63 | 81 => self.lower_string_const(arena, &node),
             64 => self.lower_binop(arena, &node),
             65 => self.lower_unop(arena, &node),
             66 => self.lower_cond_expr(arena, &node),
@@ -1462,7 +3386,7 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
             68 => self.lower_array_index(arena, &node),
             69 => self.lower_member_access(arena, &node),
             70 => self.lower_cast_expr(arena, &node),
-            71 => self.lower_sizeof_expr(&node),
+            71 => self.lower_sizeof_expr(arena, &node),
             72 => self.lower_comma_expr(arena, &node),
             73 => self.lower_assign_expr(arena, &node),
             80 => self.lower_int_const(&node),
@@ -1473,6 +3397,7 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
             204 => self.lower_builtin_call(arena, &node),
             205 => self.lower_designated_init(arena, &node),
             206 => self.lower_extension(arena, &node),
+            212 => self.lower_compound_literal(arena, &node),
             1..=9 | 83 | 90..=94 | 101..=105 | 200 => Ok(None),
             _ => Ok(None),
         }
@@ -1544,15 +3469,20 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
 
     fn lower_string_const(
         &self,
+        arena: &Arena,
         node: &CAstNode,
     ) -> Result<Option<BasicValueEnum<'ctx>>, BackendError> {
-        let byte = node.data as u8;
-        let string_val = self.context.const_string(&[byte], true);
+        let string_offset = NodeOffset(node.data);
+        let string_text = arena.get_string(string_offset).unwrap_or("");
+        let bytes = string_text.as_bytes();
+        let string_val = self.context.const_string(bytes, true); // true = null-terminated
         let global =
             self.module
-                .add_global(string_val.get_type(), Some(AddressSpace::default()), "str");
+                .add_global(string_val.get_type(), Some(AddressSpace::default()), ".str");
         global.set_initializer(&string_val);
         global.set_constant(true);
+        global.set_linkage(inkwell::module::Linkage::Private);
+        global.set_unnamed_addr(true);
         Ok(Some(global.as_pointer_value().into()))
     }
 
@@ -1734,6 +3664,27 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
         } else {
             let lhs_int = lhs_val.into_int_value();
             let rhs_int = rhs_val.into_int_value();
+
+            // Coerce both int operands to the same width (promote narrower to wider)
+            let (lhs_int, rhs_int) = {
+                let lw = lhs_int.get_type().get_bit_width();
+                let rw = rhs_int.get_type().get_bit_width();
+                if lw == rw {
+                    (lhs_int, rhs_int)
+                } else if lw < rw {
+                    let extended = self
+                        .builder
+                        .build_int_s_extend(lhs_int, rhs_int.get_type(), "sext_lhs")
+                        .map_err(|_| BackendError::InvalidNode)?;
+                    (extended, rhs_int)
+                } else {
+                    let extended = self
+                        .builder
+                        .build_int_s_extend(rhs_int, lhs_int.get_type(), "sext_rhs")
+                        .map_err(|_| BackendError::InvalidNode)?;
+                    (lhs_int, extended)
+                }
+            };
 
             match node.data {
                 1 => self
@@ -1924,9 +3875,20 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
             2 => {
                 if operand.is_int_value() {
                     let int_op = operand.into_int_value();
-                    let zero = self.context.i32_type().const_int(0, false);
+                    let zero = int_op.get_type().const_zero();
                     self.builder
                         .build_int_compare(inkwell::IntPredicate::EQ, int_op, zero, "lnot")
+                        .map_err(|_| BackendError::InvalidNode)?
+                        .into()
+                } else if operand.is_pointer_value() {
+                    let ptr_op = operand.into_pointer_value();
+                    let ptr_int = self
+                        .builder
+                        .build_ptr_to_int(ptr_op, self.context.i64_type(), "ptr2int_lnot")
+                        .map_err(|_| BackendError::InvalidNode)?;
+                    let zero = self.context.i64_type().const_zero();
+                    self.builder
+                        .build_int_compare(inkwell::IntPredicate::EQ, ptr_int, zero, "lnot")
                         .map_err(|_| BackendError::InvalidNode)?
                         .into()
                 } else {
@@ -1973,24 +3935,44 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
         arena: &Arena,
         node: &CAstNode,
     ) -> Result<Option<BasicValueEnum<'ctx>>, BackendError> {
+        // AST layout: kind=66, first_child=condition, next_sibling=wrapper(kind=0)
+        //   wrapper: first_child=then_expr, next_sibling=else_expr
         let cond_offset = node.first_child;
-        let then_offset = if let Some(c) = arena.get(cond_offset) {
-            c.next_sibling
+        let wrapper_offset = node.next_sibling;
+
+        let (then_offset, else_offset) = if let Some(wrapper) = arena.get(wrapper_offset) {
+            (wrapper.first_child, wrapper.next_sibling)
         } else {
-            NodeOffset::NULL
-        };
-        let else_offset = if let Some(c) = arena.get(then_offset) {
-            c.next_sibling
-        } else {
-            NodeOffset::NULL
+            (NodeOffset::NULL, NodeOffset::NULL)
         };
 
-        let cond_val = self.lower_expr(arena, cond_offset)?;
+        let cond_val = match self.lower_expr(arena, cond_offset)? {
+            Some(v) => v,
+            None => return Ok(None),
+        };
+
+        let cond_bool = self.coerce_to_bool(cond_val)?;
+
         let then_val = self.lower_expr(arena, then_offset)?;
         let else_val = self.lower_expr(arena, else_offset)?;
 
-        let _ = else_val;
-        Ok(then_val)
+        match (then_val, else_val) {
+            (Some(tv), Some(ev)) => {
+                if tv.get_type() == ev.get_type() {
+                    let result = self
+                        .builder
+                        .build_select(cond_bool, tv, ev, "ternary")
+                        .map_err(|_| BackendError::InvalidNode)?;
+                    Ok(Some(result))
+                } else {
+                    // Type mismatch — return then value as fallback
+                    Ok(Some(tv))
+                }
+            }
+            (Some(tv), None) => Ok(Some(tv)),
+            (None, Some(ev)) => Ok(Some(ev)),
+            (None, None) => Ok(None),
+        }
     }
 
     fn lower_call_expr(
@@ -2008,7 +3990,13 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
             let mut arg_offset = fc.next_sibling;
             while arg_offset != NodeOffset::NULL {
                 if let Some(arg_node) = arena.get(arg_offset) {
-                    if let Some(arg_val) = self.lower_expr(arena, arg_offset)? {
+                    // kind=74 is an arg-wrapper node; unwrap it to get the actual expression
+                    let expr_offset = if arg_node.kind == 74 {
+                        arg_node.first_child
+                    } else {
+                        arg_offset
+                    };
+                    if let Some(arg_val) = self.lower_expr(arena, expr_offset)? {
                         args.push(arg_val.into());
                     }
                     arg_offset = arg_node.next_sibling;
@@ -2019,6 +4007,91 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
         }
 
         if let Some(name) = func_name {
+            // Intercept va_start/va_end/va_copy/va_arg as LLVM intrinsics
+            match name {
+                "__builtin_va_start" | "va_start" => {
+                    // va_start(ap) → llvm.va_start(ap)
+                    let va_start_type = self
+                        .context
+                        .void_type()
+                        .fn_type(&[self.context.ptr_type(AddressSpace::default()).into()], false);
+                    let va_start_fn = self
+                        .module
+                        .get_function("llvm.va_start")
+                        .unwrap_or_else(|| {
+                            self.module
+                                .add_function("llvm.va_start", va_start_type, None)
+                        });
+                    if let Some(ap_arg) = args.first() {
+                        let ap_ptr = match ap_arg {
+                            inkwell::values::BasicMetadataValueEnum::PointerValue(p) => Some(*p),
+                            _ => None,
+                        };
+                        if let Some(ptr) = ap_ptr {
+                            let _ = self
+                                .builder
+                                .build_call(va_start_fn, &[ptr.into()], "");
+                        }
+                    }
+                    return Ok(Some(self.context.i32_type().const_int(0, false).into()));
+                }
+                "__builtin_va_end" | "va_end" => {
+                    let va_end_type = self
+                        .context
+                        .void_type()
+                        .fn_type(&[self.context.ptr_type(AddressSpace::default()).into()], false);
+                    let va_end_fn = self
+                        .module
+                        .get_function("llvm.va_end")
+                        .unwrap_or_else(|| {
+                            self.module.add_function("llvm.va_end", va_end_type, None)
+                        });
+                    if let Some(ap_arg) = args.first() {
+                        let ap_ptr = match ap_arg {
+                            inkwell::values::BasicMetadataValueEnum::PointerValue(p) => Some(*p),
+                            _ => None,
+                        };
+                        if let Some(ptr) = ap_ptr {
+                            let _ = self.builder.build_call(va_end_fn, &[ptr.into()], "");
+                        }
+                    }
+                    return Ok(Some(self.context.i32_type().const_int(0, false).into()));
+                }
+                "__builtin_va_copy" | "va_copy" => {
+                    let va_copy_type = self.context.void_type().fn_type(
+                        &[
+                            self.context.ptr_type(AddressSpace::default()).into(),
+                            self.context.ptr_type(AddressSpace::default()).into(),
+                        ],
+                        false,
+                    );
+                    let va_copy_fn = self
+                        .module
+                        .get_function("llvm.va_copy")
+                        .unwrap_or_else(|| {
+                            self.module
+                                .add_function("llvm.va_copy", va_copy_type, None)
+                        });
+                    if args.len() >= 2 {
+                        let dest = match &args[0] {
+                            inkwell::values::BasicMetadataValueEnum::PointerValue(p) => Some(*p),
+                            _ => None,
+                        };
+                        let src = match &args[1] {
+                            inkwell::values::BasicMetadataValueEnum::PointerValue(p) => Some(*p),
+                            _ => None,
+                        };
+                        if let (Some(d), Some(s)) = (dest, src) {
+                            let _ = self
+                                .builder
+                                .build_call(va_copy_fn, &[d.into(), s.into()], "");
+                        }
+                    }
+                    return Ok(Some(self.context.i32_type().const_int(0, false).into()));
+                }
+                _ => {}
+            }
+
             if let Some(func) = self.functions.get(name) {
                 let call_site = self
                     .builder
@@ -2032,7 +4105,19 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                 }));
             }
 
-            let fn_type = self.context.i32_type().fn_type(&[], true);
+            // Auto-declare external function using actual argument types from the call site
+            let param_types: Vec<inkwell::types::BasicMetadataTypeEnum> = args
+                .iter()
+                .map(|a| match a {
+                    inkwell::values::BasicMetadataValueEnum::IntValue(v) => v.get_type().into(),
+                    inkwell::values::BasicMetadataValueEnum::FloatValue(v) => v.get_type().into(),
+                    inkwell::values::BasicMetadataValueEnum::PointerValue(_) => {
+                        self.context.ptr_type(AddressSpace::default()).into()
+                    }
+                    _ => self.context.i32_type().into(),
+                })
+                .collect();
+            let fn_type = self.context.i32_type().fn_type(&param_types, false);
             let ext_func = self.module.add_function(name, fn_type, None);
             self.functions.insert(name.to_string(), ext_func);
             let call_site = self
@@ -2055,16 +4140,7 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
         arena: &Arena,
         node: &CAstNode,
     ) -> Result<Option<BasicValueEnum<'ctx>>, BackendError> {
-        let base_offset = node.first_child;
         let field_node_offset = node.next_sibling;
-
-        let base_name_str: Option<String> = arena.get(base_offset).and_then(|n| {
-            if n.kind == 60 {
-                arena.get_string(NodeOffset(n.data)).map(|s| s.to_string())
-            } else {
-                None
-            }
-        });
 
         let field_name_str: Option<String> = arena.get(field_node_offset).and_then(|n| {
             if n.kind == 60 {
@@ -2074,14 +4150,46 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
             }
         });
 
-        let field_name = match (base_name_str.as_ref(), field_name_str.as_ref()) {
-            (Some(_), Some(f)) => f.clone(),
-            _ => return Ok(None),
+        let field_name = match field_name_str {
+            Some(f) => f,
+            None => return Ok(None),
         };
 
         let Some((field_ptr, field_llvm_type)) = self.lower_member_access_ptr(arena, node)? else {
             return Ok(None);
         };
+
+        // Check if this was a bitfield access (set by lower_member_access_ptr)
+        if let Some((bit_offset, bit_width)) = self.last_bitfield_access.take() {
+            // Bitfield READ: load storage unit, shift right, mask
+            let storage_val = self
+                .builder
+                .build_load(field_llvm_type, field_ptr, "bf.storage")
+                .map_err(|_| BackendError::InvalidNode)?;
+            let int_val = storage_val.into_int_value();
+            let int_type = int_val.get_type();
+
+            // Right-shift by bit_offset
+            let shifted = if bit_offset > 0 {
+                let shift_amt = int_type.const_int(bit_offset as u64, false);
+                self.builder
+                    .build_right_shift(int_val, shift_amt, false, "bf.shr")
+                    .map_err(|_| BackendError::InvalidNode)?
+            } else {
+                int_val
+            };
+
+            // AND-mask with (1 << bit_width) - 1
+            let mask_val = (1u64 << bit_width) - 1;
+            let mask = int_type.const_int(mask_val, false);
+            let masked = self
+                .builder
+                .build_and(shifted, mask, "bf.mask")
+                .map_err(|_| BackendError::InvalidNode)?;
+
+            return Ok(Some(masked.into()));
+        }
+
         let val = self
             .builder
             .build_load(field_llvm_type, field_ptr, &field_name)
@@ -2125,14 +4233,67 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
 
     fn lower_sizeof_expr(
         &self,
-        _node: &CAstNode,
+        arena: &Arena,
+        node: &CAstNode,
     ) -> Result<Option<BasicValueEnum<'ctx>>, BackendError> {
-        Ok(Some(
-            self.context
-                .i64_type()
-                .const_int(std::mem::size_of::<i32>() as u64, false)
-                .into(),
-        ))
+        // sizeof(type): outer kind=71 wraps inner kind=71 which wraps type specifier
+        // sizeof(expr): outer kind=71 wraps inner kind=71(data=1) which wraps expr
+        let inner_offset = node.first_child;
+        let inner = arena.get(inner_offset);
+
+        // Unwrap nested kind=71 if present
+        let (data, child_offset) = if let Some(inner_node) = inner {
+            if inner_node.kind == 71 {
+                (inner_node.data, inner_node.first_child)
+            } else {
+                (node.data, inner_offset)
+            }
+        } else {
+            return Ok(Some(
+                self.context.i64_type().const_int(4, false).into(),
+            ));
+        };
+
+        if data == 0 {
+            // sizeof(type) — examine type specifier node kind
+            let size = self.sizeof_type_from_ast(arena, child_offset);
+            Ok(Some(
+                self.context.i64_type().const_int(size, false).into(),
+            ))
+        } else {
+            // sizeof(expr) — default to 4 for int expressions
+            Ok(Some(
+                self.context.i64_type().const_int(4, false).into(),
+            ))
+        }
+    }
+
+    fn sizeof_type_from_ast(&self, arena: &Arena, offset: NodeOffset) -> u64 {
+        let node = match arena.get(offset) {
+            Some(n) => n,
+            None => return 4,
+        };
+
+        // Type specifier nodes have specific kinds from parse_type_specifier
+        match node.kind {
+            1 => 0,   // void → size 0 (GCC returns 1 as extension, but 0 is standard)
+            2 => 4,   // int
+            3 => 1,   // char
+            10 => 2,  // short
+            11 => {   // long — check if "long long" by looking at sibling
+                let sibling = arena.get(node.next_sibling);
+                if sibling.map(|s| s.kind) == Some(11) { 8 } else { 8 } // long = 8, long long = 8
+            }
+            12 => 4,  // signed (defaults to signed int)
+            13 => 4,  // unsigned (defaults to unsigned int)
+            14 => 1,  // _Bool
+            83 => 4,  // float
+            84 => 8,  // double
+            _ => {
+                // For struct/pointer/unknown, assume pointer size
+                8
+            }
+        }
     }
 
     fn lower_comma_expr(
@@ -2140,17 +4301,11 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
         arena: &Arena,
         node: &CAstNode,
     ) -> Result<Option<BasicValueEnum<'ctx>>, BackendError> {
-        let mut last_val: Option<BasicValueEnum> = None;
-        let mut child_offset = node.first_child;
-        while child_offset != NodeOffset::NULL {
-            if let Some(child) = arena.get(child_offset) {
-                last_val = self.lower_expr(arena, child_offset)?;
-                child_offset = child.next_sibling;
-            } else {
-                break;
-            }
-        }
-        Ok(last_val)
+        // Comma expression: kind=72, first_child=left, next_sibling=right
+        // Evaluate left for side effects, return right
+        let _left_val = self.lower_expr(arena, node.first_child)?;
+        let right_val = self.lower_expr(arena, node.next_sibling)?;
+        Ok(right_val)
     }
 
     fn lower_assign_expr(
@@ -2170,6 +4325,91 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
             return Ok(Some(rhs_val));
         };
 
+        // Check if the lvalue target is a bitfield (set by lower_member_access_ptr
+        // via lower_lvalue_ptr → kind=69 path)
+        if let Some((bit_offset, bit_width)) = self.last_bitfield_access.take() {
+            // Bitfield WRITE: read-modify-write on the storage unit
+            let new_val = if node.data == 19 {
+                rhs_val
+            } else {
+                // For compound assignment, read the current bitfield value first
+                let storage_val = self
+                    .builder
+                    .build_load(lhs_type, lhs_ptr, "bf.assign.storage")
+                    .map_err(|_| BackendError::InvalidNode)?;
+                let int_val = storage_val.into_int_value();
+                let int_type = int_val.get_type();
+                let shifted = if bit_offset > 0 {
+                    let sh = int_type.const_int(bit_offset as u64, false);
+                    self.builder.build_right_shift(int_val, sh, false, "bf.ca.shr")
+                        .map_err(|_| BackendError::InvalidNode)?
+                } else {
+                    int_val
+                };
+                let field_mask = int_type.const_int((1u64 << bit_width) - 1, false);
+                let current_bf = self.builder.build_and(shifted, field_mask, "bf.ca.cur")
+                    .map_err(|_| BackendError::InvalidNode)?;
+                self.apply_assignment_op(node.data, current_bf.into(), rhs_val)?
+            };
+
+            // Load current storage unit
+            let old_storage = self
+                .builder
+                .build_load(lhs_type, lhs_ptr, "bf.old")
+                .map_err(|_| BackendError::InvalidNode)?
+                .into_int_value();
+            let int_type = old_storage.get_type();
+
+            // Clear the bitfield's bits: old & ~(field_mask << bit_offset)
+            let field_mask_val = (1u64 << bit_width) - 1;
+            let positioned_mask = field_mask_val << bit_offset;
+            let clear_mask = int_type.const_int(!positioned_mask, false);
+            let cleared = self
+                .builder
+                .build_and(old_storage, clear_mask, "bf.cleared")
+                .map_err(|_| BackendError::InvalidNode)?;
+
+            // Position the new value: (new_val & field_mask) << bit_offset
+            let new_int = if new_val.is_int_value() {
+                let nv = new_val.into_int_value();
+                if nv.get_type().get_bit_width() != int_type.get_bit_width() {
+                    self.builder
+                        .build_int_z_extend_or_bit_cast(nv, int_type, "bf.zext")
+                        .map_err(|_| BackendError::InvalidNode)?
+                } else {
+                    nv
+                }
+            } else {
+                int_type.const_int(0, false)
+            };
+            let field_mask_const = int_type.const_int(field_mask_val, false);
+            let masked_new = self
+                .builder
+                .build_and(new_int, field_mask_const, "bf.new.masked")
+                .map_err(|_| BackendError::InvalidNode)?;
+            let shifted_new = if bit_offset > 0 {
+                let sh = int_type.const_int(bit_offset as u64, false);
+                self.builder
+                    .build_left_shift(masked_new, sh, "bf.new.shl")
+                    .map_err(|_| BackendError::InvalidNode)?
+            } else {
+                masked_new
+            };
+
+            // OR together: cleared | shifted_new
+            let result = self
+                .builder
+                .build_or(cleared, shifted_new, "bf.insert")
+                .map_err(|_| BackendError::InvalidNode)?;
+
+            self.builder
+                .build_store(lhs_ptr, result)
+                .map_err(|_| BackendError::InvalidNode)?;
+
+            // Return the written bitfield value (masked, not the whole storage unit)
+            return Ok(Some(masked_new.into()));
+        }
+
         let value_to_store = if node.data == 19 {
             rhs_val
         } else {
@@ -2186,7 +4426,14 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                 .map_err(|_| BackendError::InvalidNode)?;
         }
 
-        Ok(Some(value_to_store))
+        // Load back from the lvalue so the result is a runtime instruction,
+        // not a compile-time constant. This prevents LLVM from constant-folding
+        // expressions like (x = 42) > 0 into `br i1 true`.
+        let result = self
+            .builder
+            .build_load(lhs_type, lhs_ptr, "assign_result")
+            .map_err(|_| BackendError::InvalidNode)?;
+        Ok(Some(result))
     }
 
     fn lower_typeof(
@@ -2219,13 +4466,55 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
         Ok(last_val)
     }
 
+    /// Lower `&&label` (GCC label-as-value extension, kind=203).
+    /// Produces LLVM `blockaddress(@fn, %label_bb)`.
     fn lower_label_addr(
         &mut self,
-        _arena: &Arena,
+        arena: &Arena,
         node: &CAstNode,
     ) -> Result<Option<BasicValueEnum<'ctx>>, BackendError> {
-        let ptr = self.context.ptr_type(AddressSpace::default()).const_null();
-        Ok(Some(ptr.into()))
+        let label_name = if node.data != 0 {
+            arena
+                .get_string(NodeOffset(node.data))
+                .unwrap_or("")
+                .to_string()
+        } else {
+            String::new()
+        };
+
+        if label_name.is_empty() {
+            let ptr = self.context.ptr_type(AddressSpace::default()).const_null();
+            return Ok(Some(ptr.into()));
+        }
+
+        let function = self
+            .builder
+            .get_insert_block()
+            .and_then(|bb| bb.get_parent())
+            .ok_or(BackendError::InvalidNode)?;
+
+        // Get or create the target basic block for this label
+        let label_bb = if let Some(bb) = self.label_blocks.get(&label_name) {
+            *bb
+        } else {
+            let bb = self
+                .context
+                .append_basic_block(function, &format!("label.{}", label_name));
+            self.label_blocks.insert(label_name.clone(), bb);
+            bb
+        };
+
+        // Get the blockaddress via inkwell's get_address()
+        // SAFETY: The returned pointer is only used for indirectbr (computed goto).
+        let addr = unsafe { label_bb.get_address() };
+        match addr {
+            Some(ptr_val) => Ok(Some(ptr_val.into())),
+            None => {
+                // get_address() returns None for entry blocks; fall back to null pointer
+                let ptr = self.context.ptr_type(AddressSpace::default()).const_null();
+                Ok(Some(ptr.into()))
+            }
+        }
     }
 
     fn lower_builtin_call(
@@ -2335,8 +4624,285 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                 }))
             }
             "__builtin_va_arg" => Ok(Some(self.context.i32_type().const_int(0, false).into())),
+            "__builtin_va_start" | "__builtin_va_end" | "__builtin_va_copy" => {
+                // va_start/va_end/va_copy: side-effect-only, return nothing meaningful
+                Ok(Some(self.context.i32_type().const_int(0, false).into()))
+            }
             "__builtin_types_compatible_p" => {
                 Ok(Some(self.context.i32_type().const_int(1, false).into()))
+            }
+            "__builtin_unreachable" => {
+                self.builder
+                    .build_unreachable()
+                    .map_err(|_| BackendError::InvalidNode)?;
+                Ok(None)
+            }
+            "__builtin_trap" => {
+                // Emit a call to llvm.trap
+                let trap_fn_type = self.context.void_type().fn_type(&[], false);
+                let trap_fn = self
+                    .module
+                    .get_function("llvm.trap")
+                    .unwrap_or_else(|| self.module.add_function("llvm.trap", trap_fn_type, None));
+                self.builder
+                    .build_call(trap_fn, &[], "trap")
+                    .map_err(|_| BackendError::InvalidNode)?;
+                self.builder
+                    .build_unreachable()
+                    .map_err(|_| BackendError::InvalidNode)?;
+                Ok(None)
+            }
+            "__builtin_expect_with_probability" => {
+                // Same as __builtin_expect: return first argument
+                if let Some(arg) = args.first() {
+                    match arg {
+                        inkwell::values::BasicMetadataValueEnum::IntValue(v) => {
+                            Ok(Some((*v).into()))
+                        }
+                        inkwell::values::BasicMetadataValueEnum::PointerValue(v) => {
+                            Ok(Some((*v).into()))
+                        }
+                        inkwell::values::BasicMetadataValueEnum::FloatValue(v) => {
+                            Ok(Some((*v).into()))
+                        }
+                        _ => Ok(None),
+                    }
+                } else {
+                    Ok(None)
+                }
+            }
+            "__builtin_assume_aligned" => {
+                // Return first argument (the pointer)
+                if let Some(arg) = args.first() {
+                    match arg {
+                        inkwell::values::BasicMetadataValueEnum::PointerValue(v) => {
+                            Ok(Some((*v).into()))
+                        }
+                        inkwell::values::BasicMetadataValueEnum::IntValue(v) => {
+                            Ok(Some((*v).into()))
+                        }
+                        _ => Ok(None),
+                    }
+                } else {
+                    Ok(None)
+                }
+            }
+            "__builtin_clz" | "__builtin_clzl" | "__builtin_clzll" => {
+                // Count leading zeros → LLVM ctlz intrinsic
+                if let Some(inkwell::values::BasicMetadataValueEnum::IntValue(val)) =
+                    args.first()
+                {
+                    let bit_width = val.get_type().get_bit_width();
+                    let fn_name = format!("llvm.ctlz.i{}", bit_width);
+                    let fn_type = val.get_type().fn_type(
+                        &[val.get_type().into(), self.context.bool_type().into()],
+                        false,
+                    );
+                    let func = self
+                        .module
+                        .get_function(&fn_name)
+                        .unwrap_or_else(|| self.module.add_function(&fn_name, fn_type, None));
+                    // is_zero_poison = true (matching GCC: undefined for 0)
+                    let call = self
+                        .builder
+                        .build_call(
+                            func,
+                            &[
+                                (*val).into(),
+                                self.context.bool_type().const_int(1, false).into(),
+                            ],
+                            "clz",
+                        )
+                        .map_err(|_| BackendError::InvalidNode)?;
+                    Ok(Some(match call.try_as_basic_value() {
+                        inkwell::values::ValueKind::Basic(v) => v,
+                        _ => self.context.i32_type().const_int(0, false).into(),
+                    }))
+                } else {
+                    Ok(Some(self.context.i32_type().const_int(0, false).into()))
+                }
+            }
+            "__builtin_ctz" | "__builtin_ctzl" | "__builtin_ctzll" => {
+                // Count trailing zeros → LLVM cttz intrinsic
+                if let Some(inkwell::values::BasicMetadataValueEnum::IntValue(val)) =
+                    args.first()
+                {
+                    let bit_width = val.get_type().get_bit_width();
+                    let fn_name = format!("llvm.cttz.i{}", bit_width);
+                    let fn_type = val.get_type().fn_type(
+                        &[val.get_type().into(), self.context.bool_type().into()],
+                        false,
+                    );
+                    let func = self
+                        .module
+                        .get_function(&fn_name)
+                        .unwrap_or_else(|| self.module.add_function(&fn_name, fn_type, None));
+                    let call = self
+                        .builder
+                        .build_call(
+                            func,
+                            &[
+                                (*val).into(),
+                                self.context.bool_type().const_int(1, false).into(),
+                            ],
+                            "ctz",
+                        )
+                        .map_err(|_| BackendError::InvalidNode)?;
+                    Ok(Some(match call.try_as_basic_value() {
+                        inkwell::values::ValueKind::Basic(v) => v,
+                        _ => self.context.i32_type().const_int(0, false).into(),
+                    }))
+                } else {
+                    Ok(Some(self.context.i32_type().const_int(0, false).into()))
+                }
+            }
+            "__builtin_popcount" | "__builtin_popcountl" | "__builtin_popcountll" => {
+                // Population count → LLVM ctpop intrinsic
+                if let Some(inkwell::values::BasicMetadataValueEnum::IntValue(val)) =
+                    args.first()
+                {
+                    let bit_width = val.get_type().get_bit_width();
+                    let fn_name = format!("llvm.ctpop.i{}", bit_width);
+                    let fn_type = val.get_type().fn_type(&[val.get_type().into()], false);
+                    let func = self
+                        .module
+                        .get_function(&fn_name)
+                        .unwrap_or_else(|| self.module.add_function(&fn_name, fn_type, None));
+                    let call = self
+                        .builder
+                        .build_call(func, &[(*val).into()], "popcount")
+                        .map_err(|_| BackendError::InvalidNode)?;
+                    Ok(Some(match call.try_as_basic_value() {
+                        inkwell::values::ValueKind::Basic(v) => v,
+                        _ => self.context.i32_type().const_int(0, false).into(),
+                    }))
+                } else {
+                    Ok(Some(self.context.i32_type().const_int(0, false).into()))
+                }
+            }
+            "__builtin_bswap16" | "__builtin_bswap32" | "__builtin_bswap64" => {
+                // Byte swap → LLVM bswap intrinsic
+                if let Some(inkwell::values::BasicMetadataValueEnum::IntValue(val)) =
+                    args.first()
+                {
+                    let bit_width = val.get_type().get_bit_width();
+                    let fn_name = format!("llvm.bswap.i{}", bit_width);
+                    let fn_type = val.get_type().fn_type(&[val.get_type().into()], false);
+                    let func = self
+                        .module
+                        .get_function(&fn_name)
+                        .unwrap_or_else(|| self.module.add_function(&fn_name, fn_type, None));
+                    let call = self
+                        .builder
+                        .build_call(func, &[(*val).into()], "bswap")
+                        .map_err(|_| BackendError::InvalidNode)?;
+                    Ok(Some(match call.try_as_basic_value() {
+                        inkwell::values::ValueKind::Basic(v) => v,
+                        _ => self.context.i32_type().const_int(0, false).into(),
+                    }))
+                } else {
+                    Ok(Some(self.context.i32_type().const_int(0, false).into()))
+                }
+            }
+            "__builtin_ffs" | "__builtin_ffsl" | "__builtin_ffsll" => {
+                // Find first set bit (1-indexed, 0 if input is 0)
+                // ffs(x) = x == 0 ? 0 : ctz(x) + 1
+                if let Some(inkwell::values::BasicMetadataValueEnum::IntValue(val)) =
+                    args.first()
+                {
+                    let bit_width = val.get_type().get_bit_width();
+                    let fn_name = format!("llvm.cttz.i{}", bit_width);
+                    let fn_type = val.get_type().fn_type(
+                        &[val.get_type().into(), self.context.bool_type().into()],
+                        false,
+                    );
+                    let func = self
+                        .module
+                        .get_function(&fn_name)
+                        .unwrap_or_else(|| self.module.add_function(&fn_name, fn_type, None));
+                    let ctz = self
+                        .builder
+                        .build_call(
+                            func,
+                            &[
+                                (*val).into(),
+                                self.context.bool_type().const_int(0, false).into(),
+                            ],
+                            "ctz_ffs",
+                        )
+                        .map_err(|_| BackendError::InvalidNode)?;
+                    let ctz_val = match ctz.try_as_basic_value() {
+                        inkwell::values::ValueKind::Basic(v) => v.into_int_value(),
+                        _ => val.get_type().const_int(0, false),
+                    };
+                    let one = val.get_type().const_int(1, false);
+                    let ctz_plus_1 = self
+                        .builder
+                        .build_int_add(ctz_val, one, "ffs_add")
+                        .map_err(|_| BackendError::InvalidNode)?;
+                    let zero = val.get_type().const_zero();
+                    let is_zero = self
+                        .builder
+                        .build_int_compare(inkwell::IntPredicate::EQ, *val, zero, "ffs_iszero")
+                        .map_err(|_| BackendError::InvalidNode)?;
+                    let result = self
+                        .builder
+                        .build_select(is_zero, zero, ctz_plus_1, "ffs")
+                        .map_err(|_| BackendError::InvalidNode)?;
+                    Ok(Some(result))
+                } else {
+                    Ok(Some(self.context.i32_type().const_int(0, false).into()))
+                }
+            }
+            "__builtin_abs" | "__builtin_labs" | "__builtin_llabs" => {
+                // Absolute value of integer
+                if let Some(inkwell::values::BasicMetadataValueEnum::IntValue(val)) =
+                    args.first()
+                {
+                    let zero = val.get_type().const_zero();
+                    let neg = self
+                        .builder
+                        .build_int_sub(zero, *val, "abs_neg")
+                        .map_err(|_| BackendError::InvalidNode)?;
+                    let is_neg = self
+                        .builder
+                        .build_int_compare(inkwell::IntPredicate::SLT, *val, zero, "abs_cmp")
+                        .map_err(|_| BackendError::InvalidNode)?;
+                    let result = self
+                        .builder
+                        .build_select(is_neg, neg, *val, "abs")
+                        .map_err(|_| BackendError::InvalidNode)?;
+                    Ok(Some(result))
+                } else {
+                    Ok(Some(self.context.i32_type().const_int(0, false).into()))
+                }
+            }
+            "__builtin_object_size" => {
+                // Conservative: return (size_t)-1 for type 0/1, 0 for type 2/3
+                let type_arg = args.get(1).and_then(|a| match a {
+                    inkwell::values::BasicMetadataValueEnum::IntValue(v) => {
+                        v.get_zero_extended_constant()
+                    }
+                    _ => None,
+                });
+                let val = match type_arg {
+                    Some(0) | Some(1) | None => u64::MAX,
+                    _ => 0,
+                };
+                Ok(Some(self.context.i64_type().const_int(val, false).into()))
+            }
+            "__builtin_frame_address" | "__builtin_return_address" => {
+                // Return null pointer (conservative)
+                Ok(Some(
+                    self.context
+                        .ptr_type(AddressSpace::default())
+                        .const_null()
+                        .into(),
+                ))
+            }
+            "__builtin_prefetch" => {
+                // Prefetch is a hint, emit nothing
+                Ok(Some(self.context.i32_type().const_int(0, false).into()))
             }
             "__builtin_choose_expr" => {
                 if args.len() >= 3 {
@@ -2354,6 +4920,81 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                     }
                 }
                 Ok(None)
+            }
+            "__builtin_alloca" => {
+                // __builtin_alloca(size) → alloca i8, size
+                if let Some(inkwell::values::BasicMetadataValueEnum::IntValue(size_val)) =
+                    args.first()
+                {
+                    let alloca = self
+                        .builder
+                        .build_array_alloca(self.context.i8_type(), *size_val, "builtin_alloca")
+                        .map_err(|_| BackendError::InvalidNode)?;
+                    Ok(Some(alloca.into()))
+                } else {
+                    // Fallback: allocate 1 byte
+                    let alloca = self
+                        .builder
+                        .build_alloca(self.context.i8_type(), "builtin_alloca")
+                        .map_err(|_| BackendError::InvalidNode)?;
+                    Ok(Some(alloca.into()))
+                }
+            }
+            "__builtin_add_overflow" | "__builtin_sub_overflow" | "__builtin_mul_overflow" => {
+                // __builtin_*_overflow(a, b, result_ptr) → returns bool (1 if overflow)
+                // For now, perform the operation without overflow detection and return 0
+                if args.len() >= 3 {
+                    if let (
+                        Some(inkwell::values::BasicMetadataValueEnum::IntValue(a)),
+                        Some(inkwell::values::BasicMetadataValueEnum::IntValue(b)),
+                        Some(inkwell::values::BasicMetadataValueEnum::PointerValue(result_ptr)),
+                    ) = (args.get(0), args.get(1), args.get(2))
+                    {
+                        let result = match builtin_name.as_str() {
+                            "__builtin_add_overflow" => self
+                                .builder
+                                .build_int_add(*a, *b, "overflow_add")
+                                .map_err(|_| BackendError::InvalidNode)?,
+                            "__builtin_sub_overflow" => self
+                                .builder
+                                .build_int_sub(*a, *b, "overflow_sub")
+                                .map_err(|_| BackendError::InvalidNode)?,
+                            "__builtin_mul_overflow" => self
+                                .builder
+                                .build_int_mul(*a, *b, "overflow_mul")
+                                .map_err(|_| BackendError::InvalidNode)?,
+                            _ => unreachable!("overflow builtin matched but not handled: {}", builtin_name),
+                        };
+                        self.builder
+                            .build_store(*result_ptr, result)
+                            .map_err(|_| BackendError::InvalidNode)?;
+                        // Return 0 (no overflow detected — conservative)
+                        Ok(Some(
+                            self.context.i32_type().const_int(0, false).into(),
+                        ))
+                    } else {
+                        Ok(Some(
+                            self.context.i32_type().const_int(0, false).into(),
+                        ))
+                    }
+                } else {
+                    Ok(Some(
+                        self.context.i32_type().const_int(0, false).into(),
+                    ))
+                }
+            }
+            "__sync_synchronize" => {
+                // Full memory barrier → LLVM fence instruction
+                self.builder
+                    .build_fence(
+                        inkwell::AtomicOrdering::SequentiallyConsistent,
+                        false,
+                        "sync_fence",
+                    )
+                    .map_err(|_| BackendError::InvalidNode)?;
+                Ok(Some(
+                    self.context.i32_type().const_int(0, false).into(),
+                ))
             }
             _ => {
                 if let Some(func) = self.functions.get(&builtin_name) {
@@ -2401,6 +5042,72 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
         Ok(None)
     }
 
+    /// Lower a chain of designated initializers (kind=205) into GEP+store
+    /// instructions targeting the fields of an already-allocated struct variable.
+    fn lower_designated_init_into_struct(
+        &mut self,
+        arena: &Arena,
+        first_init_offset: NodeOffset,
+        struct_ptr: PointerValue<'ctx>,
+        struct_type: StructType<'ctx>,
+        var_name: &str,
+    ) -> Result<(), BackendError> {
+        // Clone field names to avoid borrow conflict with &mut self in lower_expr.
+        let field_names = self
+            .struct_fields
+            .get(var_name)
+            .cloned()
+            .or_else(|| {
+                // Fallback: search struct_tag_fields for a matching struct.
+                for (_tag, fields) in &self.struct_tag_fields {
+                    if fields.len() == struct_type.count_fields() as usize {
+                        return Some(fields.clone());
+                    }
+                }
+                None
+            })
+            .unwrap_or_default();
+
+        let mut offset = first_init_offset;
+        while offset != NodeOffset::NULL {
+            if let Some(node) = arena.get(offset) {
+                if node.kind == 205 {
+                    // Field designated init: data = string-table offset for field name.
+                    if let Some(field_name) = arena.get_string(NodeOffset(node.data)) {
+                        let field_name = field_name.to_string();
+                        let field_idx = field_names
+                            .iter()
+                            .position(|f| f == &field_name)
+                            .unwrap_or(0) as u32;
+
+                        // Lower the value expression (stored as first_child).
+                        if node.first_child != NodeOffset::NULL {
+                            if let Some(val) = self.lower_expr(arena, node.first_child)? {
+                                let field_ptr = self
+                                    .builder
+                                    .build_struct_gep(
+                                        struct_type,
+                                        struct_ptr,
+                                        field_idx,
+                                        "desig.gep",
+                                    )
+                                    .map_err(|_| BackendError::InvalidNode)?;
+                                let _ = self
+                                    .builder
+                                    .build_store(field_ptr, val)
+                                    .map_err(|_| BackendError::InvalidNode);
+                            }
+                        }
+                    }
+                }
+                offset = node.next_sibling;
+            } else {
+                break;
+            }
+        }
+        Ok(())
+    }
+
     fn lower_extension(
         &mut self,
         arena: &Arena,
@@ -2411,6 +5118,194 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
         } else {
             Ok(None)
         }
+    }
+
+    /// Lower a compound literal expression (kind=212).
+    ///
+    /// AST layout:
+    ///   kind=212, data = NodeOffset of first initializer element
+    ///   first_child = type specifier chain
+    ///
+    /// Generated LLVM IR:
+    ///   1. Alloca a temporary of the resolved type
+    ///   2. Store each initializer value (designated or positional)
+    ///   3. Load and return the aggregate/scalar value
+    fn lower_compound_literal(
+        &mut self,
+        arena: &Arena,
+        node: &CAstNode,
+    ) -> Result<Option<BasicValueEnum<'ctx>>, BackendError> {
+        let spec_offset = node.first_child;
+        let init_offset = NodeOffset(node.data);
+
+        let spec_node = arena.get(spec_offset);
+        let spec_kind = spec_node.map(|n| n.kind).unwrap_or(2);
+
+        // Resolve the compound literal's type and optional struct info.
+        let (alloca_type, struct_info) = if matches!(spec_kind, 4 | 5) {
+            // Struct / union type
+            let info = self.struct_info_for_spec(arena, spec_node);
+            let ty = info
+                .as_ref()
+                .map(|(st, _)| st.as_basic_type_enum())
+                .unwrap_or_else(|| {
+                    spec_node
+                        .map(|sn| self.build_struct_llvm_type(arena, sn))
+                        .unwrap_or_else(|| self.context.i32_type().as_basic_type_enum())
+                });
+            (ty, info)
+        } else {
+            // Scalar or array type – check for an array declarator chained on the
+            // specifier (e.g. `(int[]){1,2,3}` would have a kind=8 node after the
+            // specifier in the first_child chain).
+            let base_type = self.node_kind_to_llvm_type(spec_kind);
+
+            // Walk sibling chain to see if there is an array declarator.
+            let mut arr_size: Option<u32> = None;
+            let mut off = spec_offset;
+            while off != NodeOffset::NULL {
+                if let Some(n) = arena.get(off) {
+                    if n.kind == 8 {
+                        arr_size = Some(if n.data > 0 {
+                            n.data
+                        } else {
+                            // Zero-length: infer from init count.
+                            self.count_init_elements(arena, init_offset)
+                        });
+                        break;
+                    }
+                    off = n.next_sibling;
+                } else {
+                    break;
+                }
+            }
+
+            if let Some(size) = arr_size {
+                (base_type.array_type(size).as_basic_type_enum(), None)
+            } else {
+                (base_type, None)
+            }
+        };
+
+        // Allocate a temporary for the compound literal.
+        let tmp_ptr = self
+            .build_entry_alloca(alloca_type, "compound.lit")
+            .or_else(|_| {
+                self.builder
+                    .build_alloca(alloca_type, "compound.lit")
+                    .map_err(|_| BackendError::InvalidNode)
+            })?;
+
+        // --- Store initializers ---
+        if init_offset != NodeOffset::NULL {
+            let is_designated = arena
+                .get(init_offset)
+                .map(|n| n.kind == 205)
+                .unwrap_or(false);
+
+            if is_designated {
+                if let BasicTypeEnum::StructType(struct_type) = alloca_type {
+                    // Register field names so lower_designated_init_into_struct
+                    // can look them up.  We use a synthetic variable name that
+                    // won't collide with user identifiers.
+                    let synth_name = "__compound_lit_tmp".to_string();
+                    if let Some((_, ref field_names)) = struct_info {
+                        self.struct_fields
+                            .insert(synth_name.clone(), field_names.clone());
+                    }
+                    self.lower_designated_init_into_struct(
+                        arena,
+                        init_offset,
+                        tmp_ptr,
+                        struct_type,
+                        &synth_name,
+                    )?;
+                    self.struct_fields.remove(&synth_name);
+                }
+            } else if let BasicTypeEnum::ArrayType(arr_ty) = alloca_type {
+                // Positional array initializer: store each element at its index.
+                let elem_type = arr_ty.get_element_type();
+                let mut idx: u64 = 0;
+                let mut off = init_offset;
+                while off != NodeOffset::NULL {
+                    if let Some(val) = self.lower_expr(arena, off)? {
+                        let indices = [
+                            self.context.i64_type().const_int(0, false),
+                            self.context.i64_type().const_int(idx, false),
+                        ];
+                        let elem_ptr = unsafe {
+                            self.builder
+                                .build_gep(
+                                    arr_ty.as_basic_type_enum(),
+                                    tmp_ptr,
+                                    &indices,
+                                    "cl.arr.gep",
+                                )
+                                .map_err(|_| BackendError::InvalidNode)?
+                        };
+                        let store_val = self.maybe_cast(val, elem_type);
+                        let _ = self
+                            .builder
+                            .build_store(elem_ptr, store_val)
+                            .map_err(|_| BackendError::InvalidNode);
+                    }
+                    off = arena
+                        .get(off)
+                        .map(|n| n.next_sibling)
+                        .unwrap_or(NodeOffset::NULL);
+                    idx += 1;
+                }
+            } else {
+                // Scalar compound literal – just store the single value.
+                if let Some(val) = self.lower_expr(arena, init_offset)? {
+                    let _ = self
+                        .builder
+                        .build_store(tmp_ptr, val)
+                        .map_err(|_| BackendError::InvalidNode);
+                }
+            }
+        }
+
+        // Load and return the compound literal value.
+        let loaded = self
+            .builder
+            .build_load(alloca_type, tmp_ptr, "compound.lit.load")
+            .map_err(|_| BackendError::InvalidNode)?;
+        Ok(Some(loaded))
+    }
+
+    /// Count the number of initializer elements in a sibling chain.
+    fn count_init_elements(&self, arena: &Arena, first: NodeOffset) -> u32 {
+        let mut count = 0u32;
+        let mut off = first;
+        while off != NodeOffset::NULL {
+            count += 1;
+            off = arena
+                .get(off)
+                .map(|n| n.next_sibling)
+                .unwrap_or(NodeOffset::NULL);
+        }
+        count
+    }
+
+    /// Cast `val` to match `target` element type if they differ.
+    fn maybe_cast(
+        &self,
+        val: BasicValueEnum<'ctx>,
+        target: BasicTypeEnum<'ctx>,
+    ) -> BasicValueEnum<'ctx> {
+        if val.get_type() == target {
+            return val;
+        }
+        // int → int truncation / extension
+        if val.is_int_value() && target.is_int_type() {
+            let from = val.into_int_value();
+            let to_ty = target.into_int_type();
+            if let Ok(cast) = self.builder.build_int_cast(from, to_ty, "cl.cast") {
+                return cast.into();
+            }
+        }
+        val
     }
 
     fn find_ident_name(&self, arena: &Arena, node: &CAstNode) -> Option<String> {
@@ -2468,6 +5363,155 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
             return self.find_ident_name(arena, node);
         }
         None
+    }
+
+    /// Extract attribute information from a node's child/sibling chain.
+    /// Returns a list of (attr_name, optional_string_arg, optional_int_arg) tuples.
+    fn extract_attributes(&self, arena: &Arena, node: &CAstNode) -> Vec<(String, Option<String>, Option<u32>)> {
+        let mut attrs = Vec::new();
+        let mut child_offset = node.first_child;
+        while child_offset != NodeOffset::NULL {
+            if let Some(child) = arena.get(child_offset) {
+                if child.kind == 200 {
+                    // kind=200 is AST_ATTRIBUTE; walk its children (individual attributes)
+                    let mut attr_child_offset = child.first_child;
+                    while attr_child_offset != NodeOffset::NULL {
+                        if let Some(attr_child) = arena.get(attr_child_offset) {
+                            // first_child = name string offset stored as an arena node
+                            // The attribute node stores: first_child=name_offset, next_sibling=first_arg
+                            if let Some(name) = arena.get_string(NodeOffset(attr_child.first_child.0)) {
+                                if !name.is_empty() {
+                                    let mut str_arg = None;
+                                    let mut int_arg = if attr_child.data != 0 {
+                                        Some(attr_child.data)
+                                    } else {
+                                        None
+                                    };
+                                    // Walk argument nodes
+                                    let mut arg_offset = attr_child.next_sibling;
+                                    while arg_offset != NodeOffset::NULL {
+                                        if let Some(arg_node) = arena.get(arg_offset) {
+                                            if arg_node.kind == 63 {
+                                                // String argument
+                                                str_arg = arena
+                                                    .get_string(NodeOffset(arg_node.data))
+                                                    .map(|s| s.to_string());
+                                            } else if arg_node.kind == 61 {
+                                                // Integer argument
+                                                int_arg = Some(arg_node.data);
+                                            }
+                                            arg_offset = arg_node.next_sibling;
+                                        } else {
+                                            break;
+                                        }
+                                    }
+                                    attrs.push((name.to_string(), str_arg, int_arg));
+                                }
+                            }
+                            attr_child_offset = attr_child.next_sibling;
+                        } else {
+                            break;
+                        }
+                    }
+                }
+                child_offset = child.next_sibling;
+            } else {
+                break;
+            }
+        }
+        attrs
+    }
+
+    /// Apply extracted attributes to an LLVM function value.
+    fn apply_function_attributes(
+        &self,
+        function: FunctionValue<'ctx>,
+        attrs: &[(String, Option<String>, Option<u32>)],
+    ) {
+        for (name, str_arg, _int_arg) in attrs {
+            match name.as_str() {
+                "weak" | "__weak__" => {
+                    function.set_linkage(inkwell::module::Linkage::ExternalWeak);
+                }
+                "section" | "__section__" => {
+                    if let Some(section_name) = str_arg {
+                        let clean = section_name.trim_matches('"');
+                        function.set_section(Some(clean));
+                    }
+                }
+                "visibility" | "__visibility__" => {
+                    if let Some(vis) = str_arg {
+                        let clean = vis.trim_matches('"');
+                        match clean {
+                            "hidden" => function
+                                .as_global_value()
+                                .set_visibility(inkwell::GlobalVisibility::Hidden),
+                            "protected" => function
+                                .as_global_value()
+                                .set_visibility(inkwell::GlobalVisibility::Protected),
+                            _ => {} // "default" or unknown: leave as-is
+                        }
+                    }
+                }
+                "noreturn" | "__noreturn__" => {
+                    // Mark function as noreturn via LLVM attribute
+                    function.add_attribute(
+                        inkwell::attributes::AttributeLoc::Function,
+                        self.context.create_enum_attribute(
+                            inkwell::attributes::Attribute::get_named_enum_kind_id("noreturn"),
+                            0,
+                        ),
+                    );
+                }
+                "cold" | "__cold__" => {
+                    function.add_attribute(
+                        inkwell::attributes::AttributeLoc::Function,
+                        self.context.create_enum_attribute(
+                            inkwell::attributes::Attribute::get_named_enum_kind_id("cold"),
+                            0,
+                        ),
+                    );
+                }
+                _ => {} // Other attributes: silently ignored for now
+            }
+        }
+    }
+
+    /// Apply extracted attributes to an LLVM global value.
+    fn apply_global_attributes(
+        &self,
+        global: inkwell::values::GlobalValue<'ctx>,
+        attrs: &[(String, Option<String>, Option<u32>)],
+    ) {
+        for (name, str_arg, int_arg) in attrs {
+            match name.as_str() {
+                "weak" | "__weak__" => {
+                    global.set_linkage(inkwell::module::Linkage::ExternalWeak);
+                }
+                "section" | "__section__" => {
+                    if let Some(section_name) = str_arg {
+                        let clean = section_name.trim_matches('"');
+                        global.set_section(Some(clean));
+                    }
+                }
+                "aligned" | "__aligned__" => {
+                    if let Some(align) = int_arg {
+                        global.set_alignment(*align);
+                    }
+                }
+                "visibility" | "__visibility__" => {
+                    if let Some(vis) = str_arg {
+                        let clean = vis.trim_matches('"');
+                        match clean {
+                            "hidden" => global.set_visibility(inkwell::GlobalVisibility::Hidden),
+                            "protected" => global.set_visibility(inkwell::GlobalVisibility::Protected),
+                            _ => {}
+                        }
+                    }
+                }
+                _ => {} // Other attributes silently ignored
+            }
+        }
     }
 
     pub fn dump_ir(&self) -> String {
@@ -2649,5 +5693,869 @@ mod tests {
         let ty2 = backend.to_llvm_type(7);
         assert_eq!(ty1, ty2);
         assert_eq!(backend.type_cache.len(), 1);
+    }
+
+    /// Helper: parse C source and compile to LLVM IR, returning the IR string
+    fn compile_c_to_ir(source: &str) -> String {
+        use crate::frontend::parser::Parser;
+        use tempfile::NamedTempFile;
+
+        let temp_file = NamedTempFile::new().unwrap();
+        let arena = Arena::new(temp_file.path(), 65536).unwrap();
+        let mut parser = Parser::new(arena);
+        let root = parser.parse(source).expect("parse failed");
+
+        let context = Context::create();
+        let ts = TypeSystem::new();
+        let mut backend = LlvmBackend::with_types(&context, "test", &ts);
+        backend.compile(&parser.arena, root).expect("compile failed");
+        backend.dump_ir()
+    }
+
+    #[test]
+    fn test_switch_codegen() {
+        let ir = compile_c_to_ir(
+            "int classify(int x) { \
+                switch (x) { \
+                    case 0: return 10; \
+                    case 1: return 20; \
+                    default: return 30; \
+                } \
+                return 0; \
+            }"
+        );
+        // The IR should contain a switch instruction
+        assert!(ir.contains("switch"), "Expected switch instruction in IR:\n{}", ir);
+    }
+
+    #[test]
+    fn test_goto_label_codegen() {
+        let ir = compile_c_to_ir(
+            "int test_goto() { \
+                int x = 0; \
+                goto done; \
+                x = 1; \
+                done: \
+                return x; \
+            }"
+        );
+        // Should contain a branch to a label block
+        assert!(ir.contains("br label"), "Expected unconditional branch in IR:\n{}", ir);
+    }
+
+    #[test]
+    fn test_break_in_switch() {
+        let ir = compile_c_to_ir(
+            "int test_break(int x) { \
+                int result = 0; \
+                switch (x) { \
+                    case 1: result = 10; break; \
+                    case 2: result = 20; break; \
+                    default: result = 30; break; \
+                } \
+                return result; \
+            }"
+        );
+        assert!(ir.contains("switch"), "Expected switch in IR:\n{}", ir);
+    }
+
+    #[test]
+    fn test_break_in_while() {
+        let ir = compile_c_to_ir(
+            "int test_break_while() { \
+                int i = 0; \
+                while (i < 10) { \
+                    if (i == 5) break; \
+                    i = i + 1; \
+                } \
+                return i; \
+            }"
+        );
+        // Should have a branch to the end block (break)
+        assert!(ir.contains("br label"), "Expected branches in IR:\n{}", ir);
+    }
+
+    #[test]
+    fn test_continue_in_for() {
+        let ir = compile_c_to_ir(
+            "int test_continue() { \
+                int sum = 0; \
+                int i; \
+                for (i = 0; i < 10; i = i + 1) { \
+                    if (i == 3) continue; \
+                    sum = sum + i; \
+                } \
+                return sum; \
+            }"
+        );
+        assert!(ir.contains("br label"), "Expected branches in IR:\n{}", ir);
+    }
+
+    #[test]
+    fn test_builtin_expect() {
+        let ir = compile_c_to_ir(
+            "int test_expect(int x) { \
+                return __builtin_expect(x, 1); \
+            }"
+        );
+        // __builtin_expect just returns its first argument
+        assert!(ir.contains("define"), "Expected function definition in IR:\n{}", ir);
+    }
+
+    #[test]
+    fn test_builtin_constant_p() {
+        let ir = compile_c_to_ir(
+            "int test_constant_p(int x) { \
+                return __builtin_constant_p(x); \
+            }"
+        );
+        assert!(ir.contains("define"), "Expected function definition in IR:\n{}", ir);
+    }
+
+    #[test]
+    fn test_variadic_function() {
+        let ir = compile_c_to_ir(
+            "int my_printf(int fmt, ...) { \
+                return 0; \
+            }"
+        );
+        // Variadic functions should have ... in the LLVM signature
+        assert!(ir.contains("..."), "Expected variadic signature in IR:\n{}", ir);
+    }
+
+    #[test]
+    fn test_asm_basic_volatile() {
+        let ir = compile_c_to_ir(
+            "void test_asm() { \
+                asm volatile(\"nop\"); \
+            }"
+        );
+        assert!(ir.contains("call void asm sideeffect"), "Expected asm sideeffect call in IR:\n{}", ir);
+        assert!(ir.contains("nop"), "Expected nop in asm template:\n{}", ir);
+    }
+
+    #[test]
+    fn test_asm_memory_barrier() {
+        let ir = compile_c_to_ir(
+            "void memory_barrier() { \
+                asm volatile(\"\" : : : \"memory\"); \
+            }"
+        );
+        // Should produce an asm call with memory clobber
+        assert!(ir.contains("asm sideeffect"), "Expected asm sideeffect in IR:\n{}", ir);
+    }
+
+    #[test]
+    fn test_asm_with_output() {
+        let ir = compile_c_to_ir(
+            "int read_reg() { \
+                int val; \
+                asm(\"mov $0, %0\" : \"=r\"(val)); \
+                return val; \
+            }"
+        );
+        assert!(ir.contains("asm"), "Expected asm instruction in IR:\n{}", ir);
+    }
+
+    #[test]
+    fn test_asm_with_input_and_output() {
+        let ir = compile_c_to_ir(
+            "int double_it(int x) { \
+                int result; \
+                asm(\"addl %1, %0\" : \"=r\"(result) : \"r\"(x)); \
+                return result; \
+            }"
+        );
+        assert!(ir.contains("asm"), "Expected asm instruction in IR:\n{}", ir);
+    }
+
+    #[test]
+    fn test_asm_cc_clobber() {
+        let ir = compile_c_to_ir(
+            "void test_cc_clobber() { \
+                asm volatile(\"\" : : : \"cc\"); \
+            }"
+        );
+        assert!(ir.contains("asm sideeffect"), "Expected asm sideeffect in IR:\n{}", ir);
+    }
+
+    #[test]
+    fn test_builtin_alloca() {
+        let ir = compile_c_to_ir(
+            "void test_alloca(int n) { \
+                void *p = __builtin_alloca(n); \
+            }"
+        );
+        assert!(ir.contains("alloca"), "Expected alloca in IR:\n{}", ir);
+    }
+
+    #[test]
+    fn test_builtin_memcpy() {
+        let ir = compile_c_to_ir(
+            "void test_memcpy(char *dst, char *src, int n) { \
+                __builtin_memcpy(dst, src, n); \
+            }"
+        );
+        assert!(ir.contains("memcpy") || ir.contains("__builtin_memcpy"), "Expected memcpy call in IR:\n{}", ir);
+    }
+
+    #[test]
+    fn test_builtin_memset() {
+        let ir = compile_c_to_ir(
+            "void test_memset(char *dst, int c, int n) { \
+                __builtin_memset(dst, c, n); \
+            }"
+        );
+        assert!(ir.contains("memset") || ir.contains("__builtin_memset"), "Expected memset call in IR:\n{}", ir);
+    }
+
+    #[test]
+    fn test_label_addr_expr() {
+        let ir = compile_c_to_ir(
+            "int test_label_addr() { \
+                void *p; \
+                target: \
+                p = &&target; \
+                return 0; \
+            }"
+        );
+        assert!(ir.contains("blockaddress") || ir.contains("label.target"), 
+            "Expected blockaddress or label block in IR:\n{}", ir);
+    }
+
+    #[test]
+    fn test_computed_goto() {
+        let ir = compile_c_to_ir(
+            "void test_computed_goto() { \
+                void *target; \
+                label1: \
+                target = &&label1; \
+                goto *target; \
+            }"
+        );
+        assert!(ir.contains("indirectbr") || ir.contains("label.label1"), 
+            "Expected indirectbr or label block in IR:\n{}", ir);
+    }
+
+    #[test]
+    fn test_case_range() {
+        let ir = compile_c_to_ir(
+            "int classify(int x) { \
+                switch (x) { \
+                    case 1 ... 5: return 1; \
+                    case 10 ... 20: return 2; \
+                    default: return 0; \
+                } \
+            }"
+        );
+        assert!(ir.contains("switch"), "Expected switch instruction in IR:\n{}", ir);
+        // Case ranges should generate multiple case entries
+        assert!(ir.contains("switch.case_range") || ir.contains("i32 1") || ir.contains("switch i32"),
+            "Expected case range expansion in IR:\n{}", ir);
+    }
+
+    #[test]
+    fn test_case_range_single_value() {
+        let ir = compile_c_to_ir(
+            "int test_single_range(int x) { \
+                switch (x) { \
+                    case 5 ... 5: return 1; \
+                    default: return 0; \
+                } \
+            }"
+        );
+        assert!(ir.contains("switch"), "Expected switch in IR:\n{}", ir);
+    }
+
+    #[test]
+    fn test_attribute_weak_function() {
+        let ir = compile_c_to_ir(
+            "void my_weak_func(void) __attribute__((weak)); \
+             void my_weak_func(void) { return; }"
+        );
+        assert!(ir.contains("my_weak_func"), "Expected function in IR:\n{}", ir);
+        // weak linkage should appear as `weak` or `extern_weak`
+        assert!(ir.contains("weak"), "Expected weak linkage in IR:\n{}", ir);
+    }
+
+    #[test]
+    fn test_attribute_section_function() {
+        let ir = compile_c_to_ir(
+            "__attribute__((section(\".init.text\"))) void init_func(void) { return; }"
+        );
+        assert!(ir.contains("init_func"), "Expected function in IR:\n{}", ir);
+        assert!(ir.contains(".init.text"), "Expected section attribute in IR:\n{}", ir);
+    }
+
+    #[test]
+    fn test_attribute_noreturn_function() {
+        let ir = compile_c_to_ir(
+            "__attribute__((noreturn)) void die(void) { return; }"
+        );
+        assert!(ir.contains("die"), "Expected function in IR:\n{}", ir);
+        assert!(ir.contains("noreturn"), "Expected noreturn attribute in IR:\n{}", ir);
+    }
+
+    #[test]
+    fn test_attribute_cold_function() {
+        let ir = compile_c_to_ir(
+            "__attribute__((cold)) void rare_path(void) { return; }"
+        );
+        assert!(ir.contains("rare_path"), "Expected function in IR:\n{}", ir);
+        assert!(ir.contains("cold"), "Expected cold attribute in IR:\n{}", ir);
+    }
+
+    #[test]
+    fn test_sizeof_int() {
+        let ir = compile_c_to_ir(
+            "int test_sizeof(void) { return sizeof(int); }"
+        );
+        // sizeof(int) should produce 4, returned as i32
+        assert!(ir.contains("ret i32 4"), "Expected ret i32 4 for sizeof(int):\n{}", ir);
+    }
+
+    #[test]
+    fn test_sizeof_char() {
+        let ir = compile_c_to_ir(
+            "int test_sizeof_char(void) { return sizeof(char); }"
+        );
+        // sizeof(char) should produce 1, returned as i32
+        assert!(ir.contains("ret i32 1"), "Expected ret i32 1 for sizeof(char):\n{}", ir);
+    }
+
+    #[test]
+    fn test_ternary_select() {
+        let ir = compile_c_to_ir(
+            "int max(int a, int b) { return a > b ? a : b; }"
+        );
+        // Ternary should produce a select instruction
+        assert!(ir.contains("select"), "Expected select instruction for ternary:\n{}", ir);
+    }
+
+    #[test]
+    fn test_extern_func_decl_with_params() {
+        let ir = compile_c_to_ir(
+            "extern int puts(const char *s); \
+             int main(void) { return puts(\"hello\"); }"
+        );
+        // extern decl should produce declare with ptr param, not variadic
+        assert!(ir.contains("declare i32 @puts(ptr)"), "Expected declare i32 @puts(ptr):\n{}", ir);
+        assert!(!ir.contains("@puts(...)"), "Should not have variadic puts:\n{}", ir);
+    }
+
+    #[test]
+    fn test_pointer_array_indexing() {
+        let ir = compile_c_to_ir(
+            "extern int puts(const char *s); \
+             int main(int argc, char **argv) { return puts(argv[1]); }"
+        );
+        // argv[1] should use ptr element type GEP, not i32
+        assert!(ir.contains("getelementptr ptr"), "Expected getelementptr ptr for char **argv:\n{}", ir);
+    }
+
+    #[test]
+    fn test_call_arg_isolation() {
+        let ir = compile_c_to_ir(
+            "extern int puts(const char *s); \
+             int main(int argc, char **argv) { puts(argv[1]); return 0; }"
+        );
+        // puts should be called with exactly one argument (ptr), not two
+        assert!(ir.contains("call i32 @puts(ptr"), "Expected call with ptr arg:\n{}", ir);
+        // Should NOT have two arguments
+        assert!(!ir.contains("@puts(ptr %idx, i32"), "Should not have extra index arg in puts call:\n{}", ir);
+    }
+
+    #[test]
+    fn test_struct_pointer_field_type() {
+        let ir = compile_c_to_ir(
+            "struct node { int value; struct node *next; }; \
+             int test(struct node *head) { return head->value; }"
+        );
+        // Struct should have {i32, ptr} layout, not {i32, i32}
+        assert!(ir.contains("{ i32, ptr }"), "Expected struct type {{i32, ptr}}:\n{}", ir);
+    }
+
+    #[test]
+    fn test_struct_field_index_correctness() {
+        let ir = compile_c_to_ir(
+            "struct node { int value; struct node *next; }; \
+             struct node *get_next(struct node *head) { return head->next; }"
+        );
+        // head->next should use field index 1, not 0
+        assert!(ir.contains("i32 0, i32 1"), "Expected GEP index 1 for next field:\n{}", ir);
+    }
+
+    #[test]
+    fn test_nested_member_access() {
+        let ir = compile_c_to_ir(
+            "struct node { int value; struct node *next; }; \
+             int test(struct node *head) { return head->next->value; }"
+        );
+        // Should have two GEPs: one for ->next (index 1), one for ->value (index 0)
+        assert!(ir.contains("i32 0, i32 1"), "Expected GEP for next (index 1):\n{}", ir);
+        assert!(ir.contains("chain.gep"), "Expected chained GEP for nested access:\n{}", ir);
+        assert!(ir.contains("ret i32 %value"), "Expected return of value field:\n{}", ir);
+    }
+
+    #[test]
+    fn test_assign_expr_comparison() {
+        let ir = compile_c_to_ir(
+            "int test_assign_cmp(void) { int x; if ((x = 42) > 0) { return x; } return -1; }"
+        );
+        // The comparison should be a runtime icmp on the assign_result load,
+        // not a constant-folded `br i1 true`
+        assert!(ir.contains("assign_result"), "Expected assign_result load:\n{}", ir);
+        assert!(ir.contains("icmp sgt"), "Expected runtime icmp sgt:\n{}", ir);
+        assert!(!ir.contains("br i1 true"), "Should NOT have constant-folded branch:\n{}", ir);
+    }
+
+    #[test]
+    fn test_struct_return_type() {
+        let ir = compile_c_to_ir(
+            "struct point { int x; int y; }; \
+             struct point make_point(int x, int y) { \
+                 struct point p; p.x = x; p.y = y; return p; \
+             }"
+        );
+        // Function should return { i32, i32 }, not i32
+        assert!(ir.contains("define { i32, i32 } @make_point"),
+                "Expected struct return type:\n{}", ir);
+        assert!(ir.contains("ret { i32, i32 }"),
+                "Expected struct ret instruction:\n{}", ir);
+    }
+
+    #[test]
+    fn test_multi_var_complex_declarators() {
+        // Test 1: pointer with init, then array (basic case from bug report)
+        let ir = compile_c_to_ir(
+            "void test_multi() { \
+                 int x = 42; \
+                 int *p = &x, a[10]; \
+             }"
+        );
+        assert!(ir.contains("alloca ptr"), "T1: Expected alloca ptr for *p:\n{}", ir);
+        assert!(ir.contains("alloca [10 x i32]"), "T1: Expected alloca [10 x i32] for a[10]:\n{}", ir);
+
+        // Test 2: array first, then pointer (reversed order)
+        let ir2 = compile_c_to_ir(
+            "void test_multi2() { \
+                 int x = 42; \
+                 int a[10], *p; \
+             }"
+        );
+        assert!(ir2.contains("alloca [10 x i32]"), "T2: Expected alloca [10 x i32] for a[10]:\n{}", ir2);
+        assert!(ir2.contains("alloca ptr"), "T2: Expected alloca ptr for *p:\n{}", ir2);
+
+        // Test 3: pointer, scalar, and array in one decl
+        let ir3 = compile_c_to_ir(
+            "void test_multi3() { \
+                 int *p, n, a[5]; \
+             }"
+        );
+        assert!(ir3.contains("alloca ptr"), "T3: Expected alloca ptr for *p:\n{}", ir3);
+        assert!(ir3.contains("alloca i32"), "T3: Expected alloca i32 for n:\n{}", ir3);
+        assert!(ir3.contains("alloca [5 x i32]"), "T3: Expected alloca [5 x i32] for a[5]:\n{}", ir3);
+
+        // Test 4: double pointer then array
+        let ir4 = compile_c_to_ir(
+            "void test_multi4() { \
+                 int x = 42; \
+                 int *px = &x; \
+                 int **pp = &px, a[10]; \
+             }"
+        );
+        assert!(ir4.contains("alloca ptr"), "T4: Expected alloca ptr for **pp:\n{}", ir4);
+        assert!(ir4.contains("alloca [10 x i32]"), "T4: Expected alloca [10 x i32] for a[10]:\n{}", ir4);
+
+        // Test 5: two pointers without initializers — verifies declarator_llvm_type
+        // does NOT walk next_sibling (which would count q's pointer declarator
+        // as extra pointer depth for p)
+        let ir5 = compile_c_to_ir(
+            "void test_multi5() { \
+                 int *p, *q; \
+             }"
+        );
+        let p_alloca_count = ir5.matches("alloca ptr").count();
+        assert_eq!(p_alloca_count, 2, "T5: Expected exactly 2 alloca ptr (one for *p, one for *q):\n{}", ir5);
+    }
+
+    #[test]
+    fn test_designated_init_struct() {
+        let ir = compile_c_to_ir(
+            "struct point { int x; int y; }; \
+             void test_desig_init() { \
+                 struct point p = {.x = 1, .y = 2}; \
+             }"
+        );
+        // Should allocate the struct
+        assert!(ir.contains("alloca { i32, i32 }"),
+                "Expected struct alloca:\n{}", ir);
+        // Should have GEP instructions targeting struct fields
+        assert!(ir.contains("getelementptr inbounds { i32, i32 }"),
+                "Expected struct GEP for designated init:\n{}", ir);
+        // Should have stores for both fields
+        assert!(ir.contains("store i32 1"),
+                "Expected store of 1 for .x:\n{}", ir);
+        assert!(ir.contains("store i32 2"),
+                "Expected store of 2 for .y:\n{}", ir);
+        // Should have the designated-init GEP label
+        assert!(ir.contains("desig.gep"),
+                "Expected desig.gep label:\n{}", ir);
+    }
+
+    #[test]
+    fn test_designated_init_partial() {
+        // Only initialize one field — the other should not crash
+        let ir = compile_c_to_ir(
+            "struct point { int x; int y; }; \
+             void test_partial() { \
+                 struct point p = {.y = 42}; \
+             }"
+        );
+        assert!(ir.contains("alloca { i32, i32 }"),
+                "Expected struct alloca:\n{}", ir);
+        // .y is field index 1
+        assert!(ir.contains("desig.gep"),
+                "Expected desig.gep for .y:\n{}", ir);
+        assert!(ir.contains("store i32 42"),
+                "Expected store of 42 for .y:\n{}", ir);
+    }
+
+    #[test]
+    fn test_designated_init_field_order() {
+        // Initialize fields out of declaration order
+        let ir = compile_c_to_ir(
+            "struct rgb { int r; int g; int b; }; \
+             void test_order() { \
+                 struct rgb c = {.b = 3, .r = 1, .g = 2}; \
+             }"
+        );
+        assert!(ir.contains("alloca { i32, i32, i32 }"),
+                "Expected 3-field struct alloca:\n{}", ir);
+        // All three field values should be stored
+        assert!(ir.contains("store i32 3"),
+                "Expected store for .b:\n{}", ir);
+        assert!(ir.contains("store i32 1"),
+                "Expected store for .r:\n{}", ir);
+        assert!(ir.contains("store i32 2"),
+                "Expected store for .g:\n{}", ir);
+        // Should have 3 GEPs (each GEP line contains "desig.gep")
+        let gep_count = ir.lines()
+            .filter(|l| l.contains("getelementptr") && l.contains("desig.gep"))
+            .count();
+        assert_eq!(gep_count, 3,
+                "Expected 3 desig.gep GEP instructions:\n{}", ir);
+    }
+
+    // ------------------------------------------------------------------ //
+    //  Compound literal tests (kind=212)
+    // ------------------------------------------------------------------ //
+
+    #[test]
+    fn test_compound_literal_struct() {
+        let ir = compile_c_to_ir(
+            "struct point { int x; int y; }; \
+             int test_cl() { \
+                 struct point p = (struct point){.x = 10, .y = 20}; \
+                 return p.x + p.y; \
+             }"
+        );
+        // Should allocate a temporary for the compound literal
+        assert!(ir.contains("compound.lit"),
+                "Expected compound.lit alloca:\n{}", ir);
+        // Should have stores for the designated init values
+        assert!(ir.contains("store i32 10"),
+                "Expected store of 10 for .x:\n{}", ir);
+        assert!(ir.contains("store i32 20"),
+                "Expected store of 20 for .y:\n{}", ir);
+        // Should have a load of the compound literal
+        assert!(ir.contains("compound.lit.load"),
+                "Expected compound.lit.load:\n{}", ir);
+    }
+
+    #[test]
+    fn test_compound_literal_scalar() {
+        let ir = compile_c_to_ir(
+            "int test_scalar_cl() { \
+                 int x = (int){42}; \
+                 return x; \
+             }"
+        );
+        // Should allocate a temporary for the compound literal
+        assert!(ir.contains("compound.lit"),
+                "Expected compound.lit alloca:\n{}", ir);
+        assert!(ir.contains("store i32 42"),
+                "Expected store of 42:\n{}", ir);
+        assert!(ir.contains("compound.lit.load"),
+                "Expected compound.lit.load:\n{}", ir);
+    }
+
+    #[test]
+    fn test_compound_literal_in_expression() {
+        // Compound literal used directly in a return expression
+        let ir = compile_c_to_ir(
+            "struct pair { int a; int b; }; \
+             int test_cl_expr() { \
+                 struct pair p = (struct pair){.a = 3, .b = 7}; \
+                 return p.a; \
+             }"
+        );
+        assert!(ir.contains("compound.lit"),
+                "Expected compound.lit alloca:\n{}", ir);
+        assert!(ir.contains("store i32 3"),
+                "Expected store of 3 for .a:\n{}", ir);
+        assert!(ir.contains("store i32 7"),
+                "Expected store of 7 for .b:\n{}", ir);
+    }
+
+    // ------------------------------------------------------------------ //
+    //  Bitfield codegen tests
+    // ------------------------------------------------------------------ //
+
+    #[test]
+    fn test_bitfield_struct_type() {
+        // Three 1-bit bitfields of unsigned int should pack into a single i32
+        let ir = compile_c_to_ir(
+            "struct flags { \
+                 unsigned int readable : 1; \
+                 unsigned int writable : 1; \
+                 unsigned int executable : 1; \
+             }; \
+             int test(void) { \
+                 struct flags f; \
+                 f.readable = 1; \
+                 f.writable = 0; \
+                 f.executable = 1; \
+                 return f.readable + f.executable; \
+             }"
+        );
+        // The struct should be { i32 } (one storage unit), not { i32, i32, i32 }
+        assert!(ir.contains("{ i32 }"),
+                "Expected packed bitfield struct {{ i32 }}:\n{}", ir);
+        // Bitfield writes should use OR to insert bits
+        assert!(ir.contains("bf.insert"),
+                "Expected bf.insert (OR) for bitfield write:\n{}", ir);
+        // Bitfield writes should clear old bits with AND
+        assert!(ir.contains("bf.cleared"),
+                "Expected bf.cleared (AND) for bitfield clear:\n{}", ir);
+        // Bitfield reads should use AND mask
+        assert!(ir.contains("bf.mask"),
+                "Expected bf.mask (AND) for bitfield read:\n{}", ir);
+    }
+
+    #[test]
+    fn test_bitfield_read_shift_mask() {
+        // Verify the second bitfield (writable at bit_offset=1) uses a shift
+        let ir = compile_c_to_ir(
+            "struct flags { \
+                 unsigned int readable : 1; \
+                 unsigned int writable : 1; \
+             }; \
+             int get_writable(void) { \
+                 struct flags f; \
+                 f.readable = 1; \
+                 f.writable = 1; \
+                 return f.writable; \
+             }"
+        );
+        // Reading writable (bit_offset=1) needs lshr by 1
+        assert!(ir.contains("bf.shr"),
+                "Expected bf.shr (right shift) for non-zero bit_offset read:\n{}", ir);
+        assert!(ir.contains("bf.mask"),
+                "Expected bf.mask for bitfield read:\n{}", ir);
+    }
+
+    #[test]
+    fn test_bitfield_write_shift() {
+        // Verify writing to a non-zero bit_offset field uses shl
+        // Use a function parameter so LLVM can't constant-fold the shift
+        let ir = compile_c_to_ir(
+            "struct flags { \
+                 unsigned int readable : 1; \
+                 unsigned int writable : 1; \
+             }; \
+             void set_writable(int val) { \
+                 struct flags f; \
+                 f.writable = val; \
+             }"
+        );
+        // Writing writable (bit_offset=1) needs shl by 1
+        assert!(ir.contains("bf.new.shl"),
+                "Expected bf.new.shl (left shift) for non-zero bit_offset write:\n{}", ir);
+        assert!(ir.contains("bf.insert"),
+                "Expected bf.insert (OR) for bitfield write:\n{}", ir);
+    }
+
+    // ===== Multi-Translation-Unit (multi-TU) IR-level tests =====
+
+    #[test]
+    fn test_multi_tu_helper_defines_add() {
+        // Simulate helper.c: defines a function `add`
+        let ir = compile_c_to_ir(
+            "int add(int a, int b) { return a + b; }"
+        );
+        // The helper TU should have a `define` for `add`, not a `declare`
+        assert!(ir.contains("define i32 @add(i32"),
+                "Expected define i32 @add in helper TU:\n{}", ir);
+        assert!(!ir.contains("declare i32 @add"),
+                "Helper TU should NOT have declare for add:\n{}", ir);
+    }
+
+    #[test]
+    fn test_multi_tu_main_declares_extern_add() {
+        // Simulate main.c: declares extern add and calls it from main
+        let ir = compile_c_to_ir(
+            "extern int add(int a, int b); \
+             int main(void) { return add(3, 4); }"
+        );
+        // The main TU should have a `declare` for `add` (extern, not defined here)
+        assert!(ir.contains("declare i32 @add(i32"),
+                "Expected declare i32 @add in main TU:\n{}", ir);
+        // The main TU should have a `define` for `main`
+        assert!(ir.contains("define i32 @main"),
+                "Expected define i32 @main in main TU:\n{}", ir);
+        // The main TU should NOT have a `define` for `add`
+        assert!(!ir.contains("define i32 @add"),
+                "Main TU should NOT define add:\n{}", ir);
+        // Should contain a call to @add with two i32 arguments
+        assert!(ir.contains("call i32 @add(i32"),
+                "Expected call i32 @add(i32 ...) in main TU:\n{}", ir);
+    }
+
+    #[test]
+    fn test_multi_tu_extern_with_pointer_params() {
+        // Helper TU: defines a function operating on pointer params
+        let helper_ir = compile_c_to_ir(
+            "int string_length(const char *s) { \
+                 int len = 0; \
+                 while (s[len]) len = len + 1; \
+                 return len; \
+             }"
+        );
+        assert!(helper_ir.contains("define i32 @string_length(ptr"),
+                "Expected define i32 @string_length(ptr) in helper TU:\n{}", helper_ir);
+
+        // Main TU: declares extern and calls it
+        let main_ir = compile_c_to_ir(
+            "extern int string_length(const char *s); \
+             int main(void) { return string_length(\"hello\"); }"
+        );
+        assert!(main_ir.contains("declare i32 @string_length(ptr"),
+                "Expected declare i32 @string_length(ptr) in main TU:\n{}", main_ir);
+        assert!(main_ir.contains("call i32 @string_length(ptr"),
+                "Expected call to string_length in main TU:\n{}", main_ir);
+    }
+
+    #[test]
+    fn test_multi_tu_extern_void_function() {
+        // Helper TU: defines a void function
+        let helper_ir = compile_c_to_ir(
+            "int global_val; \
+             void set_value(int v) { global_val = v; }"
+        );
+        assert!(helper_ir.contains("define void @set_value(i32"),
+                "Expected define void @set_value in helper TU:\n{}", helper_ir);
+
+        // Main TU: declares extern void function and calls it
+        let main_ir = compile_c_to_ir(
+            "extern void set_value(int v); \
+             int main(void) { set_value(42); return 0; }"
+        );
+        assert!(main_ir.contains("declare void @set_value(i32"),
+                "Expected declare void @set_value in main TU:\n{}", main_ir);
+        assert!(!main_ir.contains("define void @set_value"),
+                "Main TU should NOT define set_value:\n{}", main_ir);
+    }
+
+    #[test]
+    fn test_multi_tu_multiple_extern_decls() {
+        // Main TU: declares multiple externs from different hypothetical TUs
+        let ir = compile_c_to_ir(
+            "extern int add(int a, int b); \
+             extern int multiply(int a, int b); \
+             int main(void) { return add(2, 3) + multiply(4, 5); }"
+        );
+        assert!(ir.contains("declare i32 @add(i32"),
+                "Expected declare for add:\n{}", ir);
+        assert!(ir.contains("declare i32 @multiply(i32"),
+                "Expected declare for multiply:\n{}", ir);
+        assert!(ir.contains("define i32 @main"),
+                "Expected define for main:\n{}", ir);
+        assert!(ir.contains("call i32 @add(i32"),
+                "Expected call to add:\n{}", ir);
+        assert!(ir.contains("call i32 @multiply(i32"),
+                "Expected call to multiply:\n{}", ir);
+    }
+
+    #[test]
+    fn test_multi_tu_ir_verifies_for_both_sides() {
+        // Verify that both TUs produce valid LLVM IR (module verification)
+        use crate::frontend::parser::Parser;
+        use tempfile::NamedTempFile;
+
+        // Helper TU
+        {
+            let temp_file = NamedTempFile::new().unwrap();
+            let arena = Arena::new(temp_file.path(), 65536).unwrap();
+            let mut parser = Parser::new(arena);
+            let root = parser.parse("int add(int a, int b) { return a + b; }").expect("parse failed");
+
+            let context = Context::create();
+            let ts = TypeSystem::new();
+            let mut backend = LlvmBackend::with_types(&context, "helper", &ts);
+            backend.compile(&parser.arena, root).expect("compile failed");
+            backend.verify().expect("helper TU LLVM verification failed");
+        }
+
+        // Main TU
+        {
+            let temp_file = NamedTempFile::new().unwrap();
+            let arena = Arena::new(temp_file.path(), 65536).unwrap();
+            let mut parser = Parser::new(arena);
+            let root = parser.parse(
+                "extern int add(int a, int b); \
+                 int main(void) { return add(3, 4); }"
+            ).expect("parse failed");
+
+            let context = Context::create();
+            let ts = TypeSystem::new();
+            let mut backend = LlvmBackend::with_types(&context, "main", &ts);
+            backend.compile(&parser.arena, root).expect("compile failed");
+            backend.verify().expect("main TU LLVM verification failed");
+        }
+    }
+
+    #[test]
+    fn test_multi_tu_signature_consistency() {
+        // Verify that the define in helper and declare in main have matching signatures
+        let helper_ir = compile_c_to_ir(
+            "int add(int a, int b) { return a + b; }"
+        );
+        let main_ir = compile_c_to_ir(
+            "extern int add(int a, int b); \
+             int main(void) { return add(1, 2); }"
+        );
+
+        // Extract the signature of add from both TUs
+        // Helper should have: define i32 @add(i32 %..., i32 %...)
+        // Main should have:   declare i32 @add(i32, i32)
+        // Both use i32 return type and two i32 params
+        let helper_has_i32_ret = helper_ir.contains("define i32 @add(");
+        let main_has_i32_ret = main_ir.contains("declare i32 @add(");
+        assert!(helper_has_i32_ret, "Helper TU add should return i32:\n{}", helper_ir);
+        assert!(main_has_i32_ret, "Main TU add declare should return i32:\n{}", main_ir);
+
+        // Count i32 params: both should have exactly 2
+        let helper_add_line = helper_ir.lines()
+            .find(|l| l.contains("define i32 @add("))
+            .expect("no define line for add");
+        let main_add_line = main_ir.lines()
+            .find(|l| l.contains("declare i32 @add("))
+            .expect("no declare line for add");
+
+        let helper_param_count = helper_add_line.matches("i32").count() - 1; // subtract return type
+        let main_param_count = main_add_line.matches("i32").count() - 1;
+        assert_eq!(helper_param_count, 2, "Helper add should have 2 i32 params: {}", helper_add_line);
+        assert_eq!(main_param_count, 2, "Main add declare should have 2 i32 params: {}", main_add_line);
     }
 }

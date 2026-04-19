@@ -27,6 +27,14 @@ The LLVM backend now supports typed lowering for several core C types. Current w
 - [x] **Typed lowering**: Type-aware code generation for i8/i16/i32/i64/float/double.
 - [x] **External function declarations**: Auto-declare with variadic i32 signature when called but not defined.
 - [x] **`find_ident_name`**: Handles kind=73 init-declarator nodes — looks into first_child chain to find the variable name.
+- [x] **Switch/case codegen**: Full `lower_switch_stmt` with LLVM `build_switch`, case value → BasicBlock mapping, default block handling, and fall-through semantics. Tested with end-to-end test.
+- [x] **Goto/label codegen**: `lower_goto_stmt` and `lower_labeled_stmt` with forward-reference label resolution via `label_blocks` HashMap. Labels are resolved lazily — if the label hasn't been seen yet, a forward BasicBlock is created.
+- [x] **Break/continue**: `lower_break_continue` with `break_stack` and `continue_stack`. Pushed by while/for loops and switch statements. For-loop continue jumps to increment block.
+- [x] **25+ builtins**: `lower_builtin_call` handles __builtin_clz/ctz/popcount/bswap (LLVM ctlz/cttz/ctpop/bswap intrinsics), __builtin_ffs (cttz+select), __builtin_abs (sub+select), __builtin_unreachable/trap (LLVM unreachable/llvm.trap), __builtin_expect/constant_p/offsetof (pass-through/constant-fold), __builtin_object_size/frame_address/return_address/prefetch, __builtin_expect_with_probability/assume_aligned (pass-through).
+- [x] **Variadic functions**: Parser detects `...` in parameter lists, stores is_variadic flag (data=1 on kind=9 func declarator). Backend reads this in lower_func_def and pre_register_func_def, passes to fn_type(). `va_start`/`va_end`/`va_copy` intercepted in lower_call_expr, emitted as LLVM intrinsics.
+- [x] **Attribute lowering**: `extract_attributes` walks kind=200 children. `apply_function_attributes` handles weak (ExternalWeak linkage), section, visibility (Hidden/Protected via as_global_value), noreturn, cold. `apply_global_attributes` handles weak, section, aligned, visibility. Applied in both `pre_register_func_def` and `lower_func_def`.
+- [x] **Block scope**: `scope_stack: Vec<HashMap<String, Option<VariableBinding>>>` field. `push_scope()`/`pop_scope()` bracket `lower_compound`. `insert_scoped_variable()` saves previous binding before overwriting, restores on pop.
+- [x] **Platform macros**: Preprocessor `platform_fallback_macros()` provides __linux__, __x86_64__, __LP64__, __BYTE_ORDER__, __CHAR_BIT__, __SIZE_TYPE__, etc. when no system compiler detected.
 
 ### KEY AST LAYOUT (after parser fix, 2026-04-17)
 The parser now chains child nodes entirely via first_child chains, not via next_sibling of parent nodes:
@@ -36,19 +44,40 @@ The parser now chains child nodes entirely via first_child chains, not via next_
 - `kind=69` (member_access): `first_child=base_expr`, `next_sibling=field_ident`. NOTE: next_sibling here is the field name, not a sibling statement.
 - `kind=9.next_sibling` is safe for link_siblings (params not stored there anymore).
 
-### REMAINING BUGS (blockers for SQLite)
-- [ ] **Multi-variable declarations**: `int a = 0, b = 1, c;` only allocates the first variable. `parse_declaration` iterates declarators but `lower_var_decl` only processes the first one. Need to walk all init-declarator nodes in the first_child chain.
-- [ ] **if-then missing return**: `if (n <= 1) return n;` — the return in the then-branch is generated but the `lower_if_stmt` doesn't handle early-return; after the then block the merge block is created regardless, causing incorrect phi/flow.
-- [ ] **Assignment expressions**: `a = b` inside expressions (not declarations) needs `lower_assign_expr` to handle both pointer-store and variable update paths correctly.
-- [ ] **Phi nodes for ternary**: Both branches evaluated; needs proper SSA phi nodes.
-- [ ] **Nested member bases**: `lower_member_access` / `lower_lvalue_ptr` now handle identifier-backed `p->field`, but chained forms like `p->next->field` still need recursive base-expression support instead of assuming the base is a single identifier.
-- [ ] **String literals**: `lower_string_const` uses node.data as a single byte; needs arena string lookup for full string content.
-- [ ] **printf/variadic**: Auto-declaration with variadic signature is incorrect for most libc functions. Need proper declaration matching for common functions.
+### REMAINING BUGS (blockers for real-world C — tested 2026-04-19)
+- [x] **sizeof(type) returns 0**: Fixed. sizeof tokenized as Keyword not Punctuator.
+- [x] **Ternary operator always returned RHS**: Fixed. coerce_to_bool + build_select.
+- [x] **Comma operator returned first value**: Fixed. Return right operand.
+- [x] **Do-while loop condition never evaluated**: Fixed. Condition stored as body.next_sibling.
+- [x] **P0: Extern function signatures**: Fixed. lower_func_decl now extracts param types from prototypes instead of defaulting to variadic. kind=22 pre-registered in Pass 1.
+- [x] **P0: Pointer array indexing type**: Fixed. lower_array_element_ptr checks variable binding's pointee_type; if pointer, uses ptr GEP element type instead of i32.
+- [x] **P0: Call argument isolation**: Fixed. Parser wraps each call argument in kind=74 wrapper node, preventing expression-internal next_sibling chains from leaking into call argument traversal.
+- [x] **P0: Struct pointer field types**: Fixed. register_struct_types_in_node walks member children for pointer declarators (kind=7) and uses ptr type instead of i32.
+- [x] **P0: Struct field name extraction**: Fixed. collect_struct_field_names descends into pointer/array declarators to find identifiers.
+- [x] **P0: Nested member access**: Fixed. lower_member_access_ptr supports chained arrow operators (e.g., head->next->value) via recursive base expression lowering and find_member_access_root_var.
+- [x] **P1: Struct return types**: Fixed. specifier_to_llvm_type resolves struct specifiers (kind=4/5) to LLVM struct types. lower_return_stmt handles StructType returns via build_return with struct values.
+- [x] **P1: Assignment expression comparison**: Fixed. lower_assign_expr loads back from lvalue after store, returning runtime instruction instead of compile-time constant. Prevents LLVM constant folding in `(x = 42) > 0`.
+- [x] **P1: Multi-variable complex declarators**: Fixed. parse_declarator stores pointer depth in data field of single kind=7 node; declarator_llvm_type reads depth from data instead of walking next_sibling chain.
+- [x] **P2: Bitfield struct members**: Fixed. Parser stores bit_width in kind=27 data field. Backend packs consecutive bitfields into single LLVM storage units. struct_gep_info tracks (gep_index, bit_offset, bit_width). Read: lshr+and. Write: and+shl+or+store.
+- [x] **P2: Designated initializer codegen**: Fixed. lower_designated_init_into_struct does GEP+store per .field=value pair. Dispatched from lower_var_decl when init is kind=205 and variable is struct type.
+- [x] **P2: Compound literals**: Fixed. Parser detects (type_name){init_list} in parse_cast_expression, creates kind=212 node. Backend lower_compound_literal does alloca+store+load for structs, scalars, and arrays.
+
+### KERNEL-PATH NEXT STEPS (Phase 3, Milestones 6b–7)
+- [x] **Inline asm codegen (M4)**: `lower_asm_stmt` implemented. Reads template from arena, builds constraint string from operand children, creates InlineAsm via `context.create_inline_asm()`, calls via `build_indirect_call()`, stores outputs to lvalue pointers. Handles volatile, memory/cc clobbers, readwrite operands.
+- [x] **Computed goto (M5)**: `lower_label_addr` produces LLVM blockaddress via `BasicBlock::get_address()`. `lower_goto_stmt` handles computed goto (`goto *expr`) via `build_indirect_branch`. All known label_blocks passed as possible destinations.
+- [x] **Case ranges (M5)**: `case 1 ... 5:` parsed as kind=54, expanded to multiple switch entries in `collect_switch_cases`. Capped at 256 entries per range.
+- [x] **Attribute lowering (M6a)**: `extract_attributes` walks kind=200 AST children. `apply_function_attributes` handles weak/section/visibility/noreturn/cold. `apply_global_attributes` handles weak/section/aligned/visibility.
+- [x] **Block scope (M6a)**: `scope_stack` field on LlvmBackend. `push_scope()`/`pop_scope()` in `lower_compound`. `insert_scoped_variable()` saves/restores overwritten bindings.
+- [x] **Bitfield support (M6b)**: Implemented. Parser stores bit_width in kind=27 data field. Backend packs bitfields, uses shift/mask for read (lshr+and) and write (and+shl+or+store). struct_gep_info HashMap tracks per-field metadata.
+- [x] **Designated initializers (M6b)**: Fixed. lower_designated_init_into_struct does GEP+store per .field=value pair. Field name stored in arena.get_string(NodeOffset(node.data)).
+- [x] **Compound literals (M6b)**: Fixed. Parser creates kind=212 in parse_cast_expression. Backend lower_compound_literal does alloca+store+load for structs/scalars/arrays.
+- [x] **Multi-TU compilation (M6c)**: Fixed. kind=20 extern void declarations now pre-registered in Pass 1. Builder temp dir collision fixed with atomic invocation ID. End-to-end compile→link→run verified.
+- [x] **System include paths (M6c)**: Verified working. discover_default_include_paths() detects gcc/clang paths, falls back to /usr/include. add_include_path() for -I flag. define_macro() for -D flag.
 
 ## KNOWN CAVEATS
 - **LLVM 18 target**: Targets `inkwell`'s `llvm18-1-prefer-dynamic` feature. `LLVM_SYS_181_PREFIX=/usr/lib/llvm-18` in `.cargo/config.toml`.
 - **Opaque pointers**: LLVM 18 uses opaque pointers. Loads must carry explicit pointee type.
 - **Pointer declarators**: current backend reconstructs pointer declarators from the parser AST and materializes them as opaque LLVM pointers via `Context::ptr_type`. This is enough for current SQLite-style micro benchmarks, but richer declarator forms still need dedicated handling.
 - **inkwell 0.9**: Pass manager API changed; `optimize()` is a no-op stub.
-- **Symbol table scope**: `self.variables.clear()` on each function entry. No nested block scope.
+- **Symbol table scope**: Nested block scope implemented via `scope_stack`. Functions still clear variables on entry, but compound statements push/pop properly.
 - **Debug eprintln!s**: Parser and backend have many `eprintln!` calls. Do NOT use `sed -i 's/eprintln!.*//'` — it will break multi-line macros. Use a Python script with exact string replacement instead.

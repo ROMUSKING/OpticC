@@ -22,24 +22,31 @@ YOUR DIRECTIVES:
 - [x] Static analysis for provenance and taint tracking
 - [ ] VFS end-to-end mounting (optional, environment-sensitive)
 
-### Phase 2 (SQLite Compilation) — IN PROGRESS (2026-04-17)
+### Phase 2 (SQLite Compilation) — IN PROGRESS (2026-04-18)
 - [x] Preprocessor, type system, typed backend, build system, and benchmark modules exist in tree
 - [x] **PIPELINE FIXED**: parse_tokens() now filters whitespace tokens; backend produces correct LLVM IR
 - [x] **VERIFIED**: `test_samples/simple.c` (functions+params+calls) → valid IR
 - [x] **VERIFIED**: `test_samples/struct_test.c` (struct+field access) → valid IR
 - [x] **VERIFIED**: `test_samples/control_flow.c` (if/while/for) → valid IR
-- [x] All 292 passing tests still pass (1 pre-existing failure: `test_asm_volatile_flag_stored`)
+- [x] All 311 tests pass (0 failures — asm parsing and integration test race conditions fixed)
 - [ ] **BLOCKER**: Multi-variable declarations (`int a=0, b=1`) only allocate first variable
 - [ ] **BLOCKER**: Assignment expressions in while loops don't update variables
 - [ ] **BLOCKER**: SQLite uses `#include <stdio.h>` — system headers not yet supported by preprocessor
 - [ ] End-to-end SQLite shared-library generation pending above blockers
 - [ ] Benchmark comparisons need regeneration
 
-### Phase 3 (Linux Kernel) — FUTURE
-- [ ] Full GNU C extension support (`__attribute__`, `typeof`, statement expressions)
-- [ ] Inline assembly with operands and clobbers
-- [ ] Kbuild integration
-- [ ] 30M+ LOC scale handling
+### Phase 3 (Linux Kernel) — IN PROGRESS (2026-04-18)
+- [x] Switch/case codegen with fall-through, default block, and break handling
+- [x] Goto/label codegen with forward-reference label resolution
+- [x] Break/continue in loops and switch statements
+- [x] 25+ compiler builtins (clz/ctz/popcount/bswap → LLVM intrinsics, ffs/abs via select patterns, unreachable/trap, expect/constant_p/offsetof, object_size/frame_address/prefetch)
+- [x] Variadic function signatures (is_variadic flag, va_start/va_end/va_copy → LLVM intrinsics)
+- [x] Inline asm statement parsing dispatched from parse_statement()
+- [x] Lexer three-character punctuator support (..., >>=, <<=)
+- [ ] Full inline assembly codegen (parsing exists, codegen incomplete)
+- [ ] Computed goto (&&label, goto *ptr)
+- [ ] Multi-file compilation and linking at kernel scale
+- [ ] Weak symbols, section attributes, visibility
 
 ## TOOLCHAIN INSTALLATION (Current Dev Container)
 
@@ -54,7 +61,7 @@ llvm-config --version || true
 ### Build Verification
 ```bash
 cargo build
-cargo test   # expect 292 passed, 1 failed (test_asm_volatile_flag_stored - pre-existing)
+cargo test   # expect 311 passed, 0 failed
 cargo run -- compile test_samples/simple.c -o /tmp/test.ll
 llc-18 /tmp/test.ll -o /dev/null  # must succeed
 cargo run -- compile test_samples/struct_test.c -o /tmp/st.ll
@@ -100,6 +107,35 @@ cargo run -- compile "$SQLITE_C"
 - **SQLite download URL**: Changes with each release. Verify the latest URL.
 - **clang compiles sqlite3.c**: Full 255K LOC compiles in seconds. OpticC preprocessor is the bottleneck.
 - **Cross-module bugs are common**: Full-workspace checks are needed; individual module compilation isn't enough.
+
+## KERNEL COMPILATION TEST STRATEGY
+
+### Phase 3 Testing Stages
+1. **Unit tests**: Add tests for each new codegen feature (inline asm, computed goto, attributes) in `src/backend/llvm.rs` test module.
+2. **C sample files**: Create test samples in `test_samples/` for each kernel pattern:
+   - `test_samples/inline_asm.c` — basic and extended asm
+   - `test_samples/computed_goto.c` — label addresses and indirect branch
+   - `test_samples/attributes.c` — section, weak, visibility, aligned
+   - `test_samples/bitfields.c` — struct bitfield access
+   - `test_samples/atomics.c` — __sync_* and __atomic_* builtins
+3. **Real-world smoke tests**: Try compiling individual files from real projects:
+   - A single coreutils utility (e.g., `true.c`, `yes.c` — simplest)
+   - A single busybox applet
+   - A minimal kernel module (hello_world.ko source)
+4. **End-to-end**: Full multi-file compilation of a small project → link → run
+
+### Test Sample Template
+```c
+// test_samples/inline_asm.c
+void memory_barrier(void) {
+    asm volatile("" ::: "memory");
+}
+unsigned long read_cr0(void) {
+    unsigned long val;
+    asm volatile("mov %%cr0, %0" : "=r"(val));
+    return val;
+}
+```
 
 ## IMPLEMENTATION STATUS
 

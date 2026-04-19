@@ -45,20 +45,57 @@ OpticC already contains implementations for the core compiler pipeline plus the 
 ### Current Repository State
 - ✅ Core infrastructure exists: arena, DB, lexer, parser, backend, analysis, build, benchmark, integration
 - ✅ Advanced modules exist: preprocessor, type system, GNU extensions, inline asm
-- ⚠️ The remaining work is on correctness gaps, SQLite-scale preprocessing edge cases, and optional VFS re-enablement
+- ✅ Phase 3 milestones 1–6a implemented: switch/goto/break/continue, 30+ builtins, variadic, inline asm codegen, computed goto+case ranges, attribute lowering, platform macros, block scope
+- ✅ All 333 tests pass (0 failures) as of 2026-04-18
+- ⚠️ Remaining work: system header include paths, multi-TU compilation, bitfields, designated initializers, compound literals
 
 ### Immediate Priorities for Agents
-1. Verify the relevant module against the current code in `src/`
-2. Fix root-cause issues or stale assumptions in the prompt notes
-3. Re-run targeted checks (`cargo test`, CLI smoke tests, or integration commands)
-4. Record only confirmed status and remaining blockers
+1. **Milestone 6b P0 (Codegen Correctness)**: Fix extern function signatures, pointer array indexing types, and nested member access — these block even simple programs like echo.c.
+2. **Milestone 6b P1 (Richer Lowering)**: Struct return types, assignment expression comparison, compound literals.
+3. **Milestone 6b P2 (Kernel Features)**: Bitfields, designated initializer codegen.
+4. **Milestone 6c (System Headers)**: Add `-I` include path support, multi-TU compilation after codegen correctness is solid.
+5. **Intermediate validation**: Compile simplified echo.c (`extern int puts(const char *s); int main(int argc, char **argv) { ... }`) end-to-end.
+6. **Milestone 7 (Kernel-Scale)**: Compile minimal kernel module after M6b/6c complete.
+7. Verify changes with `cargo test` and CLI smoke tests before reporting.
+8. Record only confirmed status and remaining blockers in the appropriate prompt file.
 
 ### Environment Notes
 - Target environment is the current dev container on Ubuntu 24.04
 - LLVM 18 is now the expected toolchain for the inkwell binding in this repository
 - Avoid hard-coding exact passing-test totals unless you have just re-verified them in the current session
 
+### Development Strategy: Path to Linux Kernel Compilation
+The kernel compilation path requires these capabilities in priority order:
+1. **Inline assembly codegen** — kernel code is saturated with `asm volatile` blocks for barriers, atomics, and architecture-specific ops
+2. **Computed goto** — kernel uses `goto *dispatch_table[opcode]` patterns in interpreters and dispatch loops
+3. **System headers** — kernel headers include system headers transitively; preprocessor must resolve include paths
+4. **Multi-translation-unit compilation** — kernel builds hundreds of .c files into .o files linked together
+5. **Attribute support** — `section`, `weak`, `visibility`, `aligned`, `packed` all affect kernel object layout
+6. **Architecture-specific builtins** — additional `__builtin_*` for atomic operations, memory barriers, and CPU feature detection
+
+### Intermediate Target: Compile coreutils/busybox
+Before attempting the kernel, validate against simpler real-world C projects:
+- **coreutils**: standard Unix utilities, moderate complexity, heavy libc use
+- **busybox**: single-binary multi-call, extensive use of GNU extensions
+- **musl libc**: minimal C library, tests preprocessor and type system rigor
+
 ### Long-Term Roadmap
 - **SQLite milestone**: improve complex macro handling and verify end-to-end library generation
-- **Kernel milestone**: expand GNU C coverage, inline asm fidelity, and build integration
+- **coreutils milestone**: compile a real multi-file C project end-to-end
+- **Kernel milestone**: expand inline asm codegen, computed goto, multi-file compilation, and build integration
 - **Production milestone**: optimization passes, debug info, cross-compilation, and polish
+
+### Recent Achievements (2026-04-18)
+- Switch/case codegen with fall-through, default, and break
+- Goto/label codegen with forward-reference label resolution
+- Break/continue in loops and switch
+- 30+ builtins via LLVM intrinsics and select patterns
+- Variadic function support (va_start/va_end/va_copy → LLVM intrinsics)
+- Parser's internal lexer now handles 3-char punctuators (..., >>=, <<=)
+- Inline asm codegen (lower_asm_stmt → LLVM `call asm`)
+- Computed goto (&&label → blockaddress, goto *expr → indirectbr)
+- Case ranges (case 1 ... 5: → multiple switch entries)
+- Attribute lowering: weak, section, visibility, aligned, noreturn, cold
+- Platform predefined macros fallback: __linux__, __x86_64__, __LP64__, __BYTE_ORDER__, etc.
+- Block-scope variable shadowing via scope stack
+- All 333 tests pass (0 failures)

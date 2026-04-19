@@ -261,7 +261,12 @@ pub struct Builder {
 
 impl Builder {
     pub fn new(config: BuildConfig) -> Self {
-        let temp_dir = PathBuf::from(format!("/tmp/opticc_build_{}", std::process::id()));
+        let build_id = COMPILE_INVOCATION_ID.fetch_add(1, Ordering::Relaxed);
+        let temp_dir = PathBuf::from(format!(
+            "/tmp/opticc_build_{}_{}",
+            std::process::id(),
+            build_id
+        ));
         Builder {
             config,
             object_files: Vec::new(),
@@ -1139,5 +1144,514 @@ mod tests {
 
         let output = PathBuf::from("build/myapp");
         assert_eq!(OutputType::from_extension(&output), OutputType::Executable);
+    }
+
+    // ===== Multi-Translation-Unit (multi-TU) compilation tests =====
+
+    /// Helper: compile C source string to LLVM IR via the same pipeline used by the build system.
+    /// Returns (ir_string, timings).
+    fn compile_source_string_to_ir(
+        source: &str,
+        module_name: &str,
+    ) -> Result<String, String> {
+        use crate::arena::Arena;
+        use crate::backend::llvm::LlvmBackend;
+        use crate::frontend::parser::Parser as CParser;
+        use crate::types::TypeSystem;
+
+        let arena_path = std::env::temp_dir().join(format!(
+            "optic_test_arena_{}_{}_{}.bin",
+            std::process::id(),
+            module_name,
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+
+        let arena = Arena::new(&arena_path, 65536)
+            .map_err(|e| format!("Arena creation failed: {}", e))?;
+        let mut parser = CParser::new(arena);
+        let root = parser
+            .parse(source)
+            .map_err(|e| format!("Parse error: {} (line {}, col {})", e.message, e.line, e.column))?;
+
+        let context = inkwell::context::Context::create();
+        let ts = TypeSystem::new();
+        let mut backend = LlvmBackend::with_types(&context, module_name, &ts);
+        backend
+            .compile(&parser.arena, root)
+            .map_err(|e| format!("Backend error: {}", e))?;
+        backend
+            .verify()
+            .map_err(|e| format!("LLVM verification failed: {}", e))?;
+
+        let ir = backend.dump_ir();
+        let _ = fs::remove_file(&arena_path);
+        Ok(ir)
+    }
+
+    #[test]
+    fn test_multi_tu_ir_generation_helper() {
+        // Compile helper.c (defines add function) and verify IR
+        let ir = compile_source_string_to_ir(
+            "int add(int a, int b) { return a + b; }",
+            "helper",
+        )
+        .expect("helper.c compilation failed");
+
+        assert!(
+            ir.contains("define i32 @add("),
+            "Helper TU should define add:\n{}",
+            ir
+        );
+        assert!(
+            !ir.contains("declare i32 @add"),
+            "Helper TU should NOT declare add (it defines it):\n{}",
+            ir
+        );
+    }
+
+    #[test]
+    fn test_multi_tu_ir_generation_main() {
+        // Compile main.c (extern decl + call) and verify IR
+        let ir = compile_source_string_to_ir(
+            "extern int add(int a, int b); \
+             int main(void) { return add(3, 4); }",
+            "main",
+        )
+        .expect("main.c compilation failed");
+
+        assert!(
+            ir.contains("declare i32 @add("),
+            "Main TU should declare add (extern):\n{}",
+            ir
+        );
+        assert!(
+            ir.contains("define i32 @main"),
+            "Main TU should define main:\n{}",
+            ir
+        );
+        assert!(
+            !ir.contains("define i32 @add"),
+            "Main TU should NOT define add:\n{}",
+            ir
+        );
+        assert!(
+            ir.contains("call i32 @add("),
+            "Main TU should call add:\n{}",
+            ir
+        );
+    }
+
+    #[test]
+    fn test_multi_tu_both_ir_verify() {
+        // Verify that both TUs independently produce valid LLVM IR
+        let helper_ir = compile_source_string_to_ir(
+            "int add(int a, int b) { return a + b; }",
+            "helper",
+        );
+        assert!(helper_ir.is_ok(), "Helper TU should compile & verify: {:?}", helper_ir.err());
+
+        let main_ir = compile_source_string_to_ir(
+            "extern int add(int a, int b); \
+             int main(void) { return add(3, 4); }",
+            "main",
+        );
+        assert!(main_ir.is_ok(), "Main TU should compile & verify: {:?}", main_ir.err());
+    }
+
+    #[test]
+    fn test_multi_tu_file_based_ir_compilation() {
+        // Test the file-based compile_to_ir_artifacts function with two real files
+        let test_id = format!(
+            "multi_tu_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let temp_dir = std::env::temp_dir().join(&test_id);
+        fs::create_dir_all(&temp_dir).unwrap();
+
+        // Write helper.c
+        let helper_path = temp_dir.join("helper.c");
+        fs::write(
+            &helper_path,
+            "int add(int a, int b) { return a + b; }\n",
+        )
+        .unwrap();
+
+        // Write main.c
+        let main_path = temp_dir.join("main.c");
+        fs::write(
+            &main_path,
+            "extern int add(int a, int b);\nint main(void) { return add(3, 4); }\n",
+        )
+        .unwrap();
+
+        // Compile each file through the IR artifact pipeline
+        let db_path1 = temp_dir.join("helper.redb").display().to_string();
+        let arena_path1 = temp_dir.join("helper_arena.bin").display().to_string();
+        let helper_result = compile_to_ir_artifacts(
+            &helper_path,
+            0,
+            &[],
+            &HashMap::new(),
+            &db_path1,
+            &arena_path1,
+        );
+        assert!(
+            helper_result.is_ok(),
+            "helper.c compile_to_ir_artifacts failed: {:?}",
+            helper_result.err()
+        );
+        let helper_ir = helper_result.unwrap().ir;
+        assert!(
+            helper_ir.contains("define i32 @add("),
+            "helper.c IR should define add:\n{}",
+            helper_ir
+        );
+
+        let db_path2 = temp_dir.join("main.redb").display().to_string();
+        let arena_path2 = temp_dir.join("main_arena.bin").display().to_string();
+        let main_result = compile_to_ir_artifacts(
+            &main_path,
+            0,
+            &[],
+            &HashMap::new(),
+            &db_path2,
+            &arena_path2,
+        );
+        assert!(
+            main_result.is_ok(),
+            "main.c compile_to_ir_artifacts failed: {:?}",
+            main_result.err()
+        );
+        let main_ir = main_result.unwrap().ir;
+        assert!(
+            main_ir.contains("declare i32 @add("),
+            "main.c IR should declare add:\n{}",
+            main_ir
+        );
+        assert!(
+            main_ir.contains("define i32 @main"),
+            "main.c IR should define main:\n{}",
+            main_ir
+        );
+
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_multi_tu_build_config_with_multiple_sources() {
+        // Test BuildConfig with multiple source files validates correctly
+        let test_id = format!(
+            "multi_tu_cfg_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let temp_dir = std::env::temp_dir().join(&test_id);
+        fs::create_dir_all(&temp_dir).unwrap();
+
+        let helper_path = temp_dir.join("helper.c");
+        fs::write(&helper_path, "int add(int a, int b) { return a + b; }\n").unwrap();
+
+        let main_path = temp_dir.join("main.c");
+        fs::write(
+            &main_path,
+            "extern int add(int a, int b);\nint main(void) { return add(3, 4); }\n",
+        )
+        .unwrap();
+
+        // Validate the config accepts both files
+        let config = BuildConfig::new()
+            .with_source_files(vec![helper_path.clone(), main_path.clone()])
+            .with_output(temp_dir.join("test_program"));
+        assert!(config.validate().is_ok(), "Config validation should pass for existing files");
+
+        // Verify source discovery finds both
+        let discovered = BuildConfig::discover_source_files(&temp_dir);
+        assert_eq!(discovered.len(), 2, "Should discover 2 .c files");
+
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_multi_tu_object_compilation() {
+        // Test compiling two C files to object files using compile_file_to_object_impl
+        // This exercises the full frontend → LLVM → LLC pipeline per file
+        let test_id = format!(
+            "multi_tu_obj_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let temp_dir = std::env::temp_dir().join(&test_id);
+        fs::create_dir_all(&temp_dir).unwrap();
+
+        let helper_path = temp_dir.join("helper.c");
+        fs::write(&helper_path, "int add(int a, int b) { return a + b; }\n").unwrap();
+
+        let main_path = temp_dir.join("main.c");
+        fs::write(
+            &main_path,
+            "extern int add(int a, int b);\nint main(void) { return add(3, 4); }\n",
+        )
+        .unwrap();
+
+        // Skip if llc is not available
+        if find_tool(&["llc-18", "llc", "llc-17", "llc-16"]).is_err() {
+            eprintln!("Skipping object compilation test: llc not found");
+            let _ = fs::remove_dir_all(&temp_dir);
+            return;
+        }
+
+        let obj_dir = temp_dir.join("obj");
+        fs::create_dir_all(&obj_dir).unwrap();
+
+        // Compile helper.c → helper.o
+        let helper_obj = compile_file_to_object_impl(
+            &helper_path,
+            &obj_dir,
+            &[],
+            &HashMap::new(),
+            0,
+        );
+        assert!(
+            helper_obj.is_ok(),
+            "helper.c object compilation failed: {:?}",
+            helper_obj.err()
+        );
+        let helper_obj_path = helper_obj.unwrap();
+        assert!(helper_obj_path.exists(), "helper.o should exist");
+        assert!(
+            fs::metadata(&helper_obj_path).unwrap().len() > 0,
+            "helper.o should be non-empty"
+        );
+
+        // Compile main.c → main.o
+        let main_obj = compile_file_to_object_impl(
+            &main_path,
+            &obj_dir,
+            &[],
+            &HashMap::new(),
+            0,
+        );
+        assert!(
+            main_obj.is_ok(),
+            "main.c object compilation failed: {:?}",
+            main_obj.err()
+        );
+        let main_obj_path = main_obj.unwrap();
+        assert!(main_obj_path.exists(), "main.o should exist");
+        assert!(
+            fs::metadata(&main_obj_path).unwrap().len() > 0,
+            "main.o should be non-empty"
+        );
+
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_multi_tu_full_build_pipeline() {
+        // End-to-end: compile two C files and link into an executable using Builder
+        let test_id = format!(
+            "multi_tu_e2e_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let temp_dir = std::env::temp_dir().join(&test_id);
+        fs::create_dir_all(&temp_dir).unwrap();
+
+        let helper_path = temp_dir.join("helper.c");
+        fs::write(&helper_path, "int add(int a, int b) { return a + b; }\n").unwrap();
+
+        let main_path = temp_dir.join("main.c");
+        fs::write(
+            &main_path,
+            "extern int add(int a, int b);\nint main(void) { return add(3, 4); }\n",
+        )
+        .unwrap();
+
+        // Skip if required tools are not available
+        if find_tool(&["llc-18", "llc", "llc-17", "llc-16"]).is_err() {
+            eprintln!("Skipping full build pipeline test: llc not found");
+            let _ = fs::remove_dir_all(&temp_dir);
+            return;
+        }
+        if find_tool(&["clang", "gcc"]).is_err() {
+            eprintln!("Skipping full build pipeline test: linker not found");
+            let _ = fs::remove_dir_all(&temp_dir);
+            return;
+        }
+
+        let output_path = temp_dir.join("test_program");
+        let config = BuildConfig::new()
+            .with_source_files(vec![helper_path, main_path])
+            .with_output(output_path.clone())
+            .with_output_type(OutputType::Executable);
+
+        let mut builder = Builder::new(config);
+        let result = builder.build();
+        assert!(
+            result.is_ok(),
+            "Multi-TU build should succeed: {:?}",
+            result.err()
+        );
+        assert!(output_path.exists(), "Linked executable should exist");
+        assert!(
+            fs::metadata(&output_path).unwrap().len() > 0,
+            "Linked executable should be non-empty"
+        );
+
+        // Run the executable and verify exit code (add(3,4) = 7)
+        let run_result = std::process::Command::new(&output_path).output();
+        if let Ok(output) = run_result {
+            assert_eq!(
+                output.status.code(),
+                Some(7),
+                "Program should exit with add(3,4)=7, got {:?}",
+                output.status.code()
+            );
+        }
+
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_multi_tu_three_files() {
+        // Three-TU scenario: math.c, utils.c, main.c
+        let math_ir = compile_source_string_to_ir(
+            "int add(int a, int b) { return a + b; } \
+             int sub(int a, int b) { return a - b; }",
+            "math",
+        )
+        .expect("math.c compilation failed");
+
+        let utils_ir = compile_source_string_to_ir(
+            "extern int add(int a, int b); \
+             int double_add(int a, int b) { return add(a, b) + add(a, b); }",
+            "utils",
+        )
+        .expect("utils.c compilation failed");
+
+        let main_ir = compile_source_string_to_ir(
+            "extern int double_add(int a, int b); \
+             extern int sub(int a, int b); \
+             int main(void) { return double_add(2, 3) - sub(10, 5); }",
+            "main",
+        )
+        .expect("main.c compilation failed");
+
+        // math.c: defines add and sub
+        assert!(math_ir.contains("define i32 @add("), "math.c should define add:\n{}", math_ir);
+        assert!(math_ir.contains("define i32 @sub("), "math.c should define sub:\n{}", math_ir);
+
+        // utils.c: declares add, defines double_add
+        assert!(utils_ir.contains("declare i32 @add("), "utils.c should declare add:\n{}", utils_ir);
+        assert!(
+            utils_ir.contains("define i32 @double_add("),
+            "utils.c should define double_add:\n{}",
+            utils_ir
+        );
+
+        // main.c: declares double_add and sub, defines main
+        assert!(
+            main_ir.contains("declare i32 @double_add("),
+            "main.c should declare double_add:\n{}",
+            main_ir
+        );
+        assert!(
+            main_ir.contains("declare i32 @sub("),
+            "main.c should declare sub:\n{}",
+            main_ir
+        );
+        assert!(
+            main_ir.contains("define i32 @main"),
+            "main.c should define main:\n{}",
+            main_ir
+        );
+    }
+
+    #[test]
+    fn test_multi_tu_parallel_compilation() {
+        // Verify compile_all works with parallel jobs for multiple TUs
+        let test_id = format!(
+            "multi_tu_par_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let temp_dir = std::env::temp_dir().join(&test_id);
+        fs::create_dir_all(&temp_dir).unwrap();
+
+        // Skip if llc is not available
+        if find_tool(&["llc-18", "llc", "llc-17", "llc-16"]).is_err() {
+            eprintln!("Skipping parallel compilation test: llc not found");
+            let _ = fs::remove_dir_all(&temp_dir);
+            return;
+        }
+
+        // Create multiple source files
+        let helper_path = temp_dir.join("helper.c");
+        fs::write(&helper_path, "int add(int a, int b) { return a + b; }\n").unwrap();
+
+        let util_path = temp_dir.join("util.c");
+        fs::write(
+            &util_path,
+            "extern int add(int a, int b);\nint triple(int x) { return add(x, add(x, x)); }\n",
+        )
+        .unwrap();
+
+        let main_path = temp_dir.join("main.c");
+        fs::write(
+            &main_path,
+            "extern int triple(int x);\nint main(void) { return triple(3); }\n",
+        )
+        .unwrap();
+
+        let output_path = temp_dir.join("test_parallel");
+        let config = BuildConfig::new()
+            .with_source_files(vec![helper_path, util_path, main_path])
+            .with_output(output_path.clone())
+            .with_output_type(OutputType::Executable)
+            .with_jobs(2); // Parallel compilation
+
+        let mut builder = Builder::new(config);
+        let result = builder.build();
+        assert!(
+            result.is_ok(),
+            "Parallel multi-TU build should succeed: {:?}",
+            result.err()
+        );
+
+        // Verify all object files were produced
+        // (Builder cleans up temp_dir, but if build succeeded, the output exists)
+        assert!(output_path.exists(), "Linked executable should exist");
+
+        // Run and verify: triple(3) = add(3, add(3, 3)) = add(3, 6) = 9
+        let run_result = std::process::Command::new(&output_path).output();
+        if let Ok(output) = run_result {
+            assert_eq!(
+                output.status.code(),
+                Some(9),
+                "Program should exit with triple(3)=9, got {:?}",
+                output.status.code()
+            );
+        }
+
+        let _ = fs::remove_dir_all(&temp_dir);
     }
 }

@@ -26,11 +26,21 @@ The previous pattern stored child nodes as `parent.next_sibling = child`, then `
 ```
 Types: 1=void, 2=int, 3=char, 4=struct, 5=union, 6=unsigned, 7=unknown, 8=array, 9=func_decl, 10=short, 11=long, 12=signed, 13=unsigned_int, 83=float, 84=double
 Decls: 20=top_decl, 21=var_decl, 22=func_proto, 23=func_def, 24=param_decl, 25=struct_member, 26=typedef
-Stmts: 40=compound, 41=if, 42=while, 43=for, 44=return, 45=expr_stmt, 46=break, 47=continue, 48=empty, 49=goto, 50=label
+Stmts: 40=compound, 41=if, 42=while, 43=for, 44=return, 45=expr_stmt, 46=break, 47=continue, 48=empty, 49=goto, 50=switch, 51=labeled_stmt, 52=case, 53=default
 Exprs: 60=ident, 61=int_const, 62=char_const, 63=str_literal, 64=binop, 65=unop, 66=ternary, 67=call, 68=array_subscript, 69=member_access(data=0:dot, data=1:arrow), 70=cast, 71=sizeof, 72=comma, 73=init_assign, 80=enum_const, 81=wide_str, 82=float_const
 GNU exts: 201=typeof, 202=stmt_expr, 203=label_addr, 204=builtin_call, 205=designated_init, 206=extension
 ASM: 207=asm_stmt, 208=asm_operand_out, 209=asm_operand_in, 210=asm_clobber, 211=asm_goto_label
 ```
+
+### CONTROL FLOW NODE LAYOUT
+- **kind=49 (goto)**: `data` = label string offset (from `arena.store_string()`). Backend reads label name and branches to the corresponding BasicBlock.
+- **kind=50 (switch)**: `first_child` = condition expression. `next_sibling` = body (compound statement with case/default labels). Backend collects case values via walk of body.
+- **kind=51 (labeled stmt)**: `data` = label string offset. `first_child` = the statement that follows the label. Backend creates/reuses a BasicBlock named after the label.
+- **kind=52 (case)**: `first_child` = constant expression (case value). `next_sibling` = statement following the case.
+- **kind=53 (default)**: `first_child` = statement following default.
+- **kind=46 (break)**: No children. Backend branches to the top of break_stack.
+- **kind=47 (continue)**: No children. Backend branches to the top of continue_stack.
+- **kind=9 (func_decl)**: `data` = 1 if variadic (has `...` in parameter list), 0 otherwise.
 
 ### AST LAYOUT CONTRACTS (after 2026-04-17 parser fixes)
 - **kind=21 (var_decl)**: `first_child = type_spec → init_declarators_chain`. Init-declarators (kind=73) are chained via `type_spec.next_sibling = first_init_decl`. Each kind=73 has `first_child=kind=60(name)`, `next_sibling=init_expr`.
@@ -47,6 +57,11 @@ ASM: 207=asm_stmt, 208=asm_operand_out, 209=asm_operand_in, 210=asm_clobber, 211
 - **Multi-variable declarations**: `int a = 0, b = 1;` — the parser creates multiple init-declarators correctly, but the backend `lower_var_decl` only processes the first one. The first_child chain has `type_spec → kind=73(a=0) → kind=73(b=1)` but backend breaks after first.
 - **Compound initializers**: `struct Point p = {10, 20}` — initializer is the first element (kind=61(10)) with next_sibling chain; backend stores first value only and can't map struct fields positionally.
 - **Debug eprintln!s**: Still many `eprintln!` calls in the parser. Do NOT remove with `sed -i` (will break multi-line macros). Remove only with exact Python string replacement.
+
+### RECENTLY FIXED
+- **Inline asm in function bodies**: `asm volatile("nop");` now dispatches to `parse_asm_stmt()` from `parse_statement()` (was previously unhandled, falling through to expression statement).
+- **Three-character punctuators**: Lexer now handles `...`, `>>=`, `<<=` correctly via lookahead-2 before falling back to 2-char punctuators.
+- **Variadic parameter `...`**: Now tokenized as single `...` token instead of three `.` tokens.
 
 ## FUTURE WORK (Phase 2+)
 - **Preprocessor integration**: Keep the direct `self.lex()` path and the preprocessor-driven path behaviorally consistent.

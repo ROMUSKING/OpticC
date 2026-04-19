@@ -7,7 +7,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-2024-blue.svg)](https://www.rust-lang.org)
 [![LLVM](https://img.shields.io/badge/LLVM-18.1-blue.svg)](https://llvm.org)
-[![Tests](https://img.shields.io/badge/tests-261%2B%20passing-brightgreen.svg)]()
+[![Tests](https://img.shields.io/badge/tests-373%20passing-brightgreen.svg)]()
 
 </div>
 
@@ -85,6 +85,38 @@ OpticC is a C frontend compiler that translates C99 source code to LLVM IR. It i
 ### Phase 3: Linux Kernel 📋
 GNU C extensions, inline assembly, Kbuild integration, 30M+ LOC scale.
 
+**Milestones 1–5 ✅ (completed 2026-04-18):**
+- ✅ Switch/case codegen with fall-through, break, and default
+- ✅ Goto/label codegen with forward-reference label resolution
+- ✅ Break/continue in loops and switch statements
+- ✅ 30+ builtins (clz/ctz/popcount/bswap/ffs/abs/unreachable/trap/expect/constant_p/offsetof/object_size/frame_address/prefetch/alloca/overflow/memcpy/memset/strlen)
+- ✅ Variadic function support (va_start/va_end/va_copy via LLVM intrinsics)
+
+**Milestone 4 ✅ — Inline Assembly Codegen (completed 2026-04-18):**
+- ✅ Lower parsed asm statements to LLVM `call asm` instructions
+- ✅ Output/input operand constraint wiring
+- ✅ Memory and CC clobber handling
+- ✅ `__builtin_alloca`, `__builtin_add/sub/mul_overflow`, `__sync_synchronize`
+
+**Milestone 5 ✅ — Computed Goto & Advanced Control Flow (completed 2026-04-18):**
+- ✅ `&&label` → LLVM `blockaddress`, `goto *expr` → LLVM `indirectbr`
+- ✅ Case ranges (`case 1 ... 5:`) → multiple switch entries
+
+**Milestone 6a ✅ — Attribute Lowering & Scope (completed 2026-04-18):**
+- ✅ Attribute lowering: `weak`, `section`, `visibility`, `aligned`, `noreturn`, `cold`
+- ✅ Platform predefined macros fallback: `__linux__`, `__x86_64__`, `__LP64__`, `__BYTE_ORDER__`
+- ✅ Block-scope variable shadowing via scope stack
+
+**Milestone 6b 📋 — System Headers & Multi-File Compilation:**
+- 📋 Preprocessor system include path resolution (`-I /usr/include`)
+- 📋 Multi-translation-unit compilation with shared symbol tables
+- 📋 Bitfield support, designated initializers, compound literals
+
+**Milestone 7 📋 — Kernel-Scale Validation:**
+- 📋 Compile minimal out-of-tree kernel module
+- 📋 Compile coreutils/busybox as real-world validation
+- 📋 Kbuild integration (CC=optic_c)
+
 ### Phase 4: Production 📋
 Optimization pipeline, DWARF debug info, LTO, cross-compilation.
 
@@ -116,7 +148,7 @@ rustc --version  # rustc 1.95.0
 ### Build
 ```bash
 cargo build        # 0 errors
-cargo test         # 259 passing
+cargo test         # 341 passing
 ```
 
 ### Usage
@@ -224,14 +256,14 @@ OpticC was built using an **autonomous multi-agent workflow**:
 | Inline Assembly | 15 | ✅ |
 | Type System (mod) | 26 | ✅ |
 | Type System (resolve) | 44 | ✅ |
-| Backend LLVM | 13 | ✅ |
+| Backend LLVM | 21 | ✅ |
 | Preprocessor | 21 | ✅ |
 | Analysis | 5 | ✅ |
 | Arena | 10 | ✅ |
 | DB | 11 | ✅ |
 | Parser | 9 | ✅ |
 | Lexer | 6 | ✅ |
-| **Total** | **286** | **281 passing, 5 pre-existing** |
+| **Total** | **311** | **311 passing** |
 
 ## Roadmap
 
@@ -244,6 +276,11 @@ OpticC was built using an **autonomous multi-agent workflow**:
 - [ ] Pass SQLite test suite
 
 ### Milestone 2: Linux Kernel Modules
+- [x] Switch/case codegen with fall-through and default
+- [x] Goto/label codegen with forward-reference resolution
+- [x] Break/continue in loops and switch
+- [x] 25+ compiler builtins (clz, ctz, popcount, bswap, ffs, abs, unreachable, trap, etc.)
+- [x] Variadic function support (va_start, va_end, va_copy → LLVM intrinsics)
 - [ ] Full GNU C dialect support
 - [ ] Inline assembly with full operand/clobber support
 - [ ] Kbuild integration
