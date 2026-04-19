@@ -46,7 +46,7 @@ OpticC already contains implementations for the core compiler pipeline plus the 
 - ✅ Core infrastructure exists: arena, DB, lexer, parser, backend, analysis, build, benchmark, integration
 - ✅ Advanced modules exist: preprocessor, type system, GNU extensions, inline asm
 - ✅ Phase 3 milestones 1–6a implemented: switch/goto/break/continue, 30+ builtins, variadic, inline asm codegen, computed goto+case ranges, attribute lowering, platform macros, block scope
-- ✅ All 330 tests pass (0 failures) as of 2026-04-18
+- ✅ All 333 tests pass (0 failures) as of 2026-04-18
 - ⚠️ Remaining work: system header include paths, multi-TU compilation, bitfields, designated initializers, compound literals
 
 ### Immediate Priorities for Agents
@@ -96,4 +96,4 @@ Before attempting the kernel, validate against simpler real-world C projects:
 - Attribute lowering: weak, section, visibility, aligned, noreturn, cold
 - Platform predefined macros fallback: __linux__, __x86_64__, __LP64__, __BYTE_ORDER__, etc.
 - Block-scope variable shadowing via scope stack
-- All 330 tests pass (0 failures)
+- All 333 tests pass (0 failures)

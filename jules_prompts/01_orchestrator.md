@@ -37,7 +37,7 @@ Arena, DB, Lexer, Macro, Parser, LLVM backend, analysis, and VFS code are all pr
 - [x] Platform predefined macros fallback: `__linux__`, `__x86_64__`, `__LP64__`, `__BYTE_ORDER__`, `__CHAR_BIT__`, `__SIZE_TYPE__`
 - [x] Block-scope variable shadowing: scope stack in `lower_compound` with `push_scope`/`pop_scope`
 - [x] 7 new tests (4 attribute backend, 3 platform macro preprocessor)
-- [x] 330 tests pass, 0 failures
+- [x] 333 tests pass, 0 failures
 
 **Milestone 6b — System Headers & Multi-File** (NEXT PRIORITY):
 - [ ] Preprocessor: resolve `#include <stdio.h>` from system include paths (`-I /usr/include`)

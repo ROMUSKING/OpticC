@@ -3801,17 +3801,11 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
         arena: &Arena,
         node: &CAstNode,
     ) -> Result<Option<BasicValueEnum<'ctx>>, BackendError> {
-        let mut last_val: Option<BasicValueEnum> = None;
-        let mut child_offset = node.first_child;
-        while child_offset != NodeOffset::NULL {
-            if let Some(child) = arena.get(child_offset) {
-                last_val = self.lower_expr(arena, child_offset)?;
-                child_offset = child.next_sibling;
-            } else {
-                break;
-            }
-        }
-        Ok(last_val)
+        // Comma expression: kind=72, first_child=left, next_sibling=right
+        // Evaluate left for side effects, return right
+        let _left_val = self.lower_expr(arena, node.first_child)?;
+        let right_val = self.lower_expr(arena, node.next_sibling)?;
+        Ok(right_val)
     }
 
     fn lower_assign_expr(

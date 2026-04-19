@@ -2,13 +2,13 @@
 
 **Generated:** 2026-04-18
 **Project:** Optic C-Compiler
-**Status:** PHASE 3 IN PROGRESS — M6a COMPLETE
+**Status:** PHASE 3 IN PROGRESS — M6a COMPLETE, 333 TESTS PASS
 
 ---
 
 ## Executive Summary
 
-The Optic C-Compiler project has completed all major Phase 1 and Phase 2 components. Phase 3 (Linux Kernel Compilation) milestones 1–6a are now implemented: switch/case/goto/label/break/continue codegen, 30+ compiler builtins, variadic function support, inline asm codegen, computed goto, case ranges, attribute lowering, platform macros, and block-scope variable shadowing. All 330 tests pass with 0 failures.
+The Optic C-Compiler project has completed all major Phase 1 and Phase 2 components. Phase 3 (Linux Kernel Compilation) milestones 1–6a are now implemented: switch/case/goto/label/break/continue codegen, 30+ compiler builtins, variadic function support, inline asm codegen, computed goto, case ranges, attribute lowering, platform macros, and block-scope variable shadowing. All 333 tests pass with 0 failures.
 
 ---
 
@@ -180,7 +180,7 @@ cat /tmp/optic_vfs/path/to/source.c
 cd optic_c && cargo build
 
 # Run all tests
-cargo test   # 323 passed, 0 failed
+cargo test   # 333 passed, 0 failed
 
 # Run specific component tests
 cargo test --lib arena
@@ -224,6 +224,11 @@ cargo test --lib vfs
 - [x] Fixed `test_asm_volatile_flag_stored`: asm/\__asm__/\__asm dispatched from `parse_statement()`
 - [x] Fixed flaky `test_preprocess_mock`: unique temp directories per integration test
 - [x] Fixed lexer 3-char punctuator tokenization: `...`, `>>=`, `<<=` now handled correctly
+- [x] Fixed `sizeof(type)` returns 0: `sizeof` tokenized as Keyword, matched only under Punctuator branch — added Keyword check in `parse_unary_expression`
+- [x] Fixed ternary operator: `lower_cond_expr` now uses `coerce_to_bool` + `build_select` with correct AST wrapper navigation
+- [x] Fixed comma operator: `lower_comma_expr` evaluates left for side effects, returns right
+- [x] Fixed do-while condition: condition stored as `body.next_sibling` to survive `link_siblings` overwrites
+- [x] Fixed sizeof type-aware: `lower_sizeof_expr` now walks type specifier AST to compute correct sizes for int(4), char(1), short(2), long(8), etc.
 
 ### Milestone 4: Inline Assembly Codegen ✅ (completed 2026-04-18)
 - [x] Add `lower_asm_stmt` to backend for kind=207 nodes
@@ -253,7 +258,7 @@ cargo test --lib vfs
 - [x] `insert_scoped_variable` used in `lower_var_decl` for proper shadowing
 - [x] 4 backend tests: weak, section, noreturn, cold
 - [x] 3 preprocessor tests: fallback macros defined, linux macros, x86_64 macros
-- [x] Total: 330 tests pass, 0 failures
+- [x] Total: 333 tests pass, 0 failures
 
 ### Milestone 6b: System Headers & Multi-File Compilation 📋
 - [ ] Preprocessor system include path resolution (-I, /usr/include)

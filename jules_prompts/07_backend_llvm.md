@@ -45,13 +45,15 @@ The parser now chains child nodes entirely via first_child chains, not via next_
 - `kind=9.next_sibling` is safe for link_siblings (params not stored there anymore).
 
 ### REMAINING BUGS (blockers for SQLite)
-- [ ] **Multi-variable declarations**: `int a = 0, b = 1, c;` only allocates the first variable. `parse_declaration` iterates declarators but `lower_var_decl` only processes the first one. Need to walk all init-declarator nodes in the first_child chain.
-- [ ] **if-then missing return**: `if (n <= 1) return n;` — the return in the then-branch is generated but the `lower_if_stmt` doesn't handle early-return; after the then block the merge block is created regardless, causing incorrect phi/flow.
-- [ ] **Assignment expressions**: `a = b` inside expressions (not declarations) needs `lower_assign_expr` to handle both pointer-store and variable update paths correctly.
-- [ ] **Phi nodes for ternary**: Both branches evaluated; needs proper SSA phi nodes.
-- [ ] **Nested member bases**: `lower_member_access` / `lower_lvalue_ptr` now handle identifier-backed `p->field`, but chained forms like `p->next->field` still need recursive base-expression support instead of assuming the base is a single identifier.
-- [ ] **String literals**: `lower_string_const` uses node.data as a single byte; needs arena string lookup for full string content.
-- [ ] **printf/variadic**: Auto-declaration with variadic signature is incorrect for most libc functions. Need proper declaration matching for common functions.
+- [x] **sizeof(type) returns 0**: Fixed. Root cause: `sizeof` tokenized as Keyword but `parse_unary_expression` only checked Punctuator branch; `sizeof(int)` was misinterpreted as cast expression `(int)`. Fix: added Keyword check before Punctuator match.
+- [x] **Ternary operator always returned RHS**: Fixed. `lower_cond_expr` now uses `coerce_to_bool` + `build_select` with correct AST navigation (wrapper node for then/else).
+- [x] **Comma operator returned first value**: Fixed. `lower_comma_expr` now evaluates left for side effects, returns right (matches kind=72 AST layout: first_child=left, next_sibling=right).
+- [x] **Do-while loop condition never evaluated**: Fixed. Condition stored as `body.next_sibling` to survive `link_siblings` overwrites.
+- [ ] **Multi-variable declarations**: `int a = 0, b = 1, c;` — now works correctly for simple cases, but complex declarator chains may still have issues.
+- [ ] **if-then missing return**: `if (n <= 1) return n;` — the return in the then-branch is generated but `lower_if_stmt` creates a merge block regardless, causing incorrect flow after early return.
+- [ ] **Assignment expression comparison**: `(x = 42) > 0` stores correctly but the comparison is evaluated at compile-time as `true` instead of runtime comparison.
+- [ ] **Nested member bases**: `lower_member_access` / `lower_lvalue_ptr` handle `p->field`, but chained forms like `p->next->field` still need recursive base-expression support.
+- [ ] **printf/variadic**: Auto-declaration with variadic signature is incorrect for most libc functions. Need proper declaration matching.
 
 ### KERNEL-PATH NEXT STEPS (Phase 3, Milestones 6b–7)
 - [x] **Inline asm codegen (M4)**: `lower_asm_stmt` implemented. Reads template from arena, builds constraint string from operand children, creates InlineAsm via `context.create_inline_asm()`, calls via `build_indirect_call()`, stores outputs to lvalue pointers. Handles volatile, memory/cc clobbers, readwrite operands.
