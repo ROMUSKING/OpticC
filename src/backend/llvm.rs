@@ -564,8 +564,27 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                             let mut member_off = child.first_child;
                             while member_off != NodeOffset::NULL {
                                 if let Some(m) = arena.get(member_off) {
-                                    let mk = arena.get(m.first_child).map(|n| n.kind).unwrap_or(2);
-                                    field_types.push(self.node_kind_to_llvm_type(mk));
+                                    // Determine field type by walking the member's children
+                                    let mut has_pointer = false;
+                                    let mut base_kind = 2u16; // default to int
+                                    let mut check_off = m.first_child;
+                                    while check_off != NodeOffset::NULL {
+                                        if let Some(cn) = arena.get(check_off) {
+                                            match cn.kind {
+                                                1..=6 | 10..=13 | 83 | 84 => base_kind = cn.kind,
+                                                7 => has_pointer = true,
+                                                _ => {}
+                                            }
+                                            check_off = cn.next_sibling;
+                                        } else {
+                                            break;
+                                        }
+                                    }
+                                    if has_pointer {
+                                        field_types.push(self.context.ptr_type(AddressSpace::default()).as_basic_type_enum());
+                                    } else {
+                                        field_types.push(self.node_kind_to_llvm_type(base_kind));
+                                    }
                                     member_off = m.next_sibling;
                                 } else {
                                     break;
@@ -946,17 +965,6 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
         let base_offset = node.first_child;
         let field_offset = node.next_sibling;
 
-        let base_name = match arena.get(base_offset).and_then(|n| {
-            if n.kind == 60 {
-                arena.get_string(NodeOffset(n.data)).map(|s| s.to_string())
-            } else {
-                None
-            }
-        }) {
-            Some(name) => name,
-            None => return Ok(None),
-        };
-
         let field_name = match arena.get(field_offset).and_then(|n| {
             if n.kind == 60 {
                 arena.get_string(NodeOffset(n.data)).map(|s| s.to_string())
@@ -968,23 +976,52 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
             None => return Ok(None),
         };
 
-        let field_idx = self
-            .struct_fields
-            .get(&base_name)
-            .and_then(|fields| fields.iter().position(|f| f == &field_name))
-            .unwrap_or(0) as u32;
+        // Try to resolve base as a simple identifier first (fast path)
+        let base_name = arena.get(base_offset).and_then(|n| {
+            if n.kind == 60 {
+                arena.get_string(NodeOffset(n.data)).map(|s| s.to_string())
+            } else {
+                None
+            }
+        });
 
-        if node.data == 1 {
-            let Some(struct_type) = self.pointer_struct_types.get(&base_name).copied() else {
-                return Ok(None);
+        if let Some(ref base_name) = base_name {
+            let field_idx = self
+                .struct_fields
+                .get(base_name)
+                .and_then(|fields| fields.iter().position(|f| f == &field_name))
+                .unwrap_or(0) as u32;
+
+            if node.data == 1 {
+                // Arrow operator: base is a pointer to struct
+                let Some(struct_type) = self.pointer_struct_types.get(base_name).copied() else {
+                    return Ok(None);
+                };
+                let base_ptr = match self.lower_expr(arena, base_offset)? {
+                    Some(BasicValueEnum::PointerValue(ptr)) => ptr,
+                    _ => return Ok(None),
+                };
+                let field_ptr = self
+                    .builder
+                    .build_struct_gep(struct_type, base_ptr, field_idx, "arrow.gep")
+                    .map_err(|_| BackendError::InvalidNode)?;
+                let field_type = struct_type
+                    .get_field_type_at_index(field_idx)
+                    .unwrap_or_else(|| self.context.i32_type().as_basic_type_enum());
+                return Ok(Some((field_ptr, field_type)));
+            }
+
+            // Dot operator: base is a struct variable
+            let binding = match self.variables.get(base_name).copied() {
+                Some(binding) => binding,
+                None => return Ok(None),
             };
-            let base_ptr = match self.lower_expr(arena, base_offset)? {
-                Some(BasicValueEnum::PointerValue(ptr)) => ptr,
-                _ => return Ok(None),
+            let BasicTypeEnum::StructType(struct_type) = binding.pointee_type else {
+                return Ok(None);
             };
             let field_ptr = self
                 .builder
-                .build_struct_gep(struct_type, base_ptr, field_idx, "arrow.gep")
+                .build_struct_gep(struct_type, binding.ptr, field_idx, "dot.gep")
                 .map_err(|_| BackendError::InvalidNode)?;
             let field_type = struct_type
                 .get_field_type_at_index(field_idx)
@@ -992,21 +1029,78 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
             return Ok(Some((field_ptr, field_type)));
         }
 
-        let binding = match self.variables.get(&base_name).copied() {
-            Some(binding) => binding,
-            None => return Ok(None),
-        };
-        let BasicTypeEnum::StructType(struct_type) = binding.pointee_type else {
-            return Ok(None);
-        };
-        let field_ptr = self
-            .builder
-            .build_struct_gep(struct_type, binding.ptr, field_idx, "dot.gep")
-            .map_err(|_| BackendError::InvalidNode)?;
-        let field_type = struct_type
-            .get_field_type_at_index(field_idx)
-            .unwrap_or_else(|| self.context.i32_type().as_basic_type_enum());
-        Ok(Some((field_ptr, field_type)))
+        // Recursive path: base is a complex expression (e.g., nested member access like p->next->field)
+        if node.data == 1 {
+            // Arrow operator on a complex base expression
+            // First, lower the base expression to get a pointer
+            let base_val = self.lower_expr(arena, base_offset)?;
+            let base_ptr = match base_val {
+                Some(BasicValueEnum::PointerValue(ptr)) => ptr,
+                _ => return Ok(None),
+            };
+
+            // Try to determine the struct type from the base expression
+            // For nested arrow (e.g., head->next->value), the base is itself a member access
+            // that returned a pointer. We need to find what struct type it points to.
+            if let Some(base_node) = arena.get(base_offset) {
+                if base_node.kind == 69 {
+                    // The base is another member access. Look at its root variable
+                    // to find the struct tag, then use the tag's struct type.
+                    let root_var = self.find_member_access_root_var(arena, base_node);
+                    if let Some(root_name) = root_var {
+                        // Get the struct type from pointer_struct_types (same struct for self-ref)
+                        if let Some(struct_type) = self.pointer_struct_types.get(&root_name).copied() {
+                            // Look up field names from struct_fields
+                            if let Some(fields) = self.struct_fields.get(&root_name) {
+                                let field_idx = fields.iter().position(|f| f == &field_name).unwrap_or(0) as u32;
+                                let field_ptr = self
+                                    .builder
+                                    .build_struct_gep(struct_type, base_ptr, field_idx, "chain.gep")
+                                    .map_err(|_| BackendError::InvalidNode)?;
+                                let ft = struct_type
+                                    .get_field_type_at_index(field_idx)
+                                    .unwrap_or_else(|| self.context.i32_type().as_basic_type_enum());
+                                return Ok(Some((field_ptr, ft)));
+                            }
+                        }
+                    }
+
+                    // Fallback: search struct_tag_types/struct_tag_fields for a struct with this field
+                    for (tag_name, fields) in &self.struct_tag_fields {
+                        if fields.contains(&field_name) {
+                            if let Some(struct_type) = self.struct_tag_types.get(tag_name).copied() {
+                                let field_idx = fields.iter().position(|f| f == &field_name).unwrap_or(0) as u32;
+                                let field_ptr = self
+                                    .builder
+                                    .build_struct_gep(struct_type, base_ptr, field_idx, "chain.gep")
+                                    .map_err(|_| BackendError::InvalidNode)?;
+                                let ft = struct_type
+                                    .get_field_type_at_index(field_idx)
+                                    .unwrap_or_else(|| self.context.i32_type().as_basic_type_enum());
+                                return Ok(Some((field_ptr, ft)));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(None)
+    }
+
+    /// Find the root variable name of a chained member access expression.
+    /// E.g., for `head->next->value`, walks back through kind=69 nodes to find "head".
+    fn find_member_access_root_var(&self, arena: &Arena, node: &CAstNode) -> Option<String> {
+        let base_offset = node.first_child;
+        if let Some(base) = arena.get(base_offset) {
+            if base.kind == 60 {
+                return arena.get_string(NodeOffset(base.data)).map(|s| s.to_string());
+            }
+            if base.kind == 69 {
+                return self.find_member_access_root_var(arena, base);
+            }
+        }
+        None
     }
 
     fn lower_array_element_ptr(
@@ -1262,6 +1356,27 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                             if let Some(name) = arena.get_string(NodeOffset(child.data)) {
                                 names.push(name.to_string());
                                 found = true;
+                                break;
+                            }
+                        }
+                        // Descend into pointer/array declarators (kind=7/8) to find ident
+                        if matches!(child.kind, 7 | 8) && !found {
+                            let mut inner = child.first_child;
+                            while inner != NodeOffset::NULL {
+                                if let Some(inner_n) = arena.get(inner) {
+                                    if inner_n.kind == 60 {
+                                        if let Some(name) = arena.get_string(NodeOffset(inner_n.data)) {
+                                            names.push(name.to_string());
+                                            found = true;
+                                            break;
+                                        }
+                                    }
+                                    inner = inner_n.next_sibling;
+                                } else {
+                                    break;
+                                }
+                            }
+                            if found {
                                 break;
                             }
                         }
@@ -3769,16 +3884,7 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
         arena: &Arena,
         node: &CAstNode,
     ) -> Result<Option<BasicValueEnum<'ctx>>, BackendError> {
-        let base_offset = node.first_child;
         let field_node_offset = node.next_sibling;
-
-        let base_name_str: Option<String> = arena.get(base_offset).and_then(|n| {
-            if n.kind == 60 {
-                arena.get_string(NodeOffset(n.data)).map(|s| s.to_string())
-            } else {
-                None
-            }
-        });
 
         let field_name_str: Option<String> = arena.get(field_node_offset).and_then(|n| {
             if n.kind == 60 {
@@ -3788,9 +3894,9 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
             }
         });
 
-        let field_name = match (base_name_str.as_ref(), field_name_str.as_ref()) {
-            (Some(_), Some(f)) => f.clone(),
-            _ => return Ok(None),
+        let field_name = match field_name_str {
+            Some(f) => f,
+            None => return Ok(None),
         };
 
         let Some((field_ptr, field_llvm_type)) = self.lower_member_access_ptr(arena, node)? else {
@@ -5290,5 +5396,70 @@ mod tests {
         );
         // Ternary should produce a select instruction
         assert!(ir.contains("select"), "Expected select instruction for ternary:\n{}", ir);
+    }
+
+    #[test]
+    fn test_extern_func_decl_with_params() {
+        let ir = compile_c_to_ir(
+            "extern int puts(const char *s); \
+             int main(void) { return puts(\"hello\"); }"
+        );
+        // extern decl should produce declare with ptr param, not variadic
+        assert!(ir.contains("declare i32 @puts(ptr)"), "Expected declare i32 @puts(ptr):\n{}", ir);
+        assert!(!ir.contains("@puts(...)"), "Should not have variadic puts:\n{}", ir);
+    }
+
+    #[test]
+    fn test_pointer_array_indexing() {
+        let ir = compile_c_to_ir(
+            "extern int puts(const char *s); \
+             int main(int argc, char **argv) { return puts(argv[1]); }"
+        );
+        // argv[1] should use ptr element type GEP, not i32
+        assert!(ir.contains("getelementptr ptr"), "Expected getelementptr ptr for char **argv:\n{}", ir);
+    }
+
+    #[test]
+    fn test_call_arg_isolation() {
+        let ir = compile_c_to_ir(
+            "extern int puts(const char *s); \
+             int main(int argc, char **argv) { puts(argv[1]); return 0; }"
+        );
+        // puts should be called with exactly one argument (ptr), not two
+        assert!(ir.contains("call i32 @puts(ptr"), "Expected call with ptr arg:\n{}", ir);
+        // Should NOT have two arguments
+        assert!(!ir.contains("@puts(ptr %idx, i32"), "Should not have extra index arg in puts call:\n{}", ir);
+    }
+
+    #[test]
+    fn test_struct_pointer_field_type() {
+        let ir = compile_c_to_ir(
+            "struct node { int value; struct node *next; }; \
+             int test(struct node *head) { return head->value; }"
+        );
+        // Struct should have {i32, ptr} layout, not {i32, i32}
+        assert!(ir.contains("{ i32, ptr }"), "Expected struct type {{i32, ptr}}:\n{}", ir);
+    }
+
+    #[test]
+    fn test_struct_field_index_correctness() {
+        let ir = compile_c_to_ir(
+            "struct node { int value; struct node *next; }; \
+             struct node *get_next(struct node *head) { return head->next; }"
+        );
+        // head->next should use field index 1, not 0
+        assert!(ir.contains("i32 0, i32 1"), "Expected GEP index 1 for next field:\n{}", ir);
+    }
+
+    #[test]
+    fn test_nested_member_access() {
+        let ir = compile_c_to_ir(
+            "struct node { int value; struct node *next; }; \
+             int test(struct node *head) { return head->next->value; }"
+        );
+        // Should have two GEPs: one for ->next (index 1), one for ->value (index 0)
+        assert!(ir.contains("i32 0, i32 1"), "Expected GEP for next (index 1):\n{}", ir);
+        assert!(ir.contains("chain.gep"), "Expected chained GEP for nested access:\n{}", ir);
+        assert!(ir.contains("ret i32 %value"), "Expected return of value field:\n{}", ir);
     }
 }
