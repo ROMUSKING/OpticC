@@ -2913,8 +2913,11 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
         };
 
         if !node.flags.contains(NodeFlags::IS_VALID) {
+            eprintln!("[DEBUG lower_expr] kind={} NOT VALID, flags={:?}", node.kind, node.flags);
             return Ok(None);
         }
+
+        eprintln!("[DEBUG lower_expr] kind={} data={} first_child={:?}", node.kind, node.data, node.first_child);
 
         match node.kind {
             60 => self.lower_ident(arena, &node),
