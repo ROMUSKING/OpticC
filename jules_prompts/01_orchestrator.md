@@ -39,7 +39,7 @@ Arena, DB, Lexer, Macro, Parser, LLVM backend, analysis, and VFS code are all pr
 - [x] 7 new tests (4 attribute backend, 3 platform macro preprocessor)
 - [x] 333 tests pass, 0 failures
 
-**Milestone 6b — Codegen Correctness** (P0+P1 bugs fixed 2026-04-19):
+**Milestone 6b — Codegen Correctness** (P0+P1+P2 bugs fixed 2026-04-19):
 - [x] **P0: Extern function signatures**: lower_func_decl extracts param types from prototypes; kind=22 pre-registered
 - [x] **P0: Pointer array indexing**: char **argv → getelementptr ptr; checks variable binding's pointee_type
 - [x] **P0: Call argument isolation**: kind=74 wrapper nodes prevent expression-internal next_sibling leaking
@@ -48,9 +48,10 @@ Arena, DB, Lexer, Macro, Parser, LLVM backend, analysis, and VFS code are all pr
 - [x] **P0: Struct field name/index**: collect_struct_field_names descends into pointer/array declarators
 - [x] **P1: Struct return types**: specifier_to_llvm_type resolves struct kinds 4/5; lower_return_stmt handles StructType
 - [x] **P1: Assignment expression comparison**: lower_assign_expr loads back from lvalue, preventing constant folding
-- [ ] **P1: Bitfield support**: struct bitfields (`unsigned int readable : 1`) need shift/mask patterns
-- [ ] **P2: Designated initializers codegen**: `.field = value` parsed (kind=205) but not lowered
-- [ ] **P2: Compound literals**: `(struct foo){.x = 1}` needs alloca+store+load pattern
+- [x] **P1: Multi-variable complex declarators**: parse_declarator stores pointer depth in data field; declarator_llvm_type reads it
+- [x] **P2: Designated initializers codegen**: lower_designated_init_into_struct does GEP+store per .field=value pair
+- [x] **P2: Compound literals**: kind=212 AST node, lower_compound_literal does alloca+store+load for structs/scalars/arrays
+- [ ] **P2: Bitfield support**: struct bitfields (`unsigned int readable : 1`) need backend shift/mask patterns (type system layout exists)
 
 **Milestone 6c — System Headers & Multi-File** (after 6b correctness):
 - [ ] Preprocessor: resolve `#include <stdio.h>` from system include paths (`-I /usr/include`)

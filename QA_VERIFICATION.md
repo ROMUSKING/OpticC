@@ -2,7 +2,7 @@
 
 **Generated:** 2026-04-19
 **Project:** Optic C-Compiler
-**Status:** PHASE 3 IN PROGRESS — M6b P0+P1 FIXED, 341 TESTS PASS
+**Status:** PHASE 3 IN PROGRESS — M6b P0+P1+P2 FIXED, 348 TESTS PASS
 
 ---
 
@@ -180,7 +180,7 @@ cat /tmp/optic_vfs/path/to/source.c
 cd optic_c && cargo build
 
 # Run all tests
-cargo test   # 341 passed, 0 failed
+cargo test   # 348 passed, 0 failed
 
 # Run specific component tests
 cargo test --lib arena
@@ -261,12 +261,13 @@ cargo test --lib vfs
 - [x] Total: 333 tests pass, 0 failures
 
 ### Milestone 6b: System Headers & Multi-File Compilation 📋
+- [x] Multi-variable complex declarators (`int *p = &x, a[10]`)
+- [x] Designated initializers (`.field = value` → GEP+store per field)
+- [x] Compound literals (`(struct foo){.x = 1}` → alloca+store+load)
+- [ ] Bitfield backend codegen (shift/mask patterns)
 - [ ] Preprocessor system include path resolution (-I, /usr/include)
 - [ ] Command-line -D defines for cross-compilation
 - [ ] Multi-translation-unit compilation
-- [ ] Bitfield support in struct layout
-- [ ] Designated initializers (.field = value, [index] = value)
-- [ ] Compound literals ((struct foo){.x = 1})
 
 ### Milestone 7: Kernel-Scale Validation 📋
 - [ ] Compile minimal out-of-tree kernel module

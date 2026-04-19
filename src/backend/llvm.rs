@@ -746,20 +746,14 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
 
         match declarator.kind {
             7 => {
-                let mut depth = 1usize;
-                let mut cursor = declarator.next_sibling;
-                while cursor != NodeOffset::NULL {
-                    if let Some(node) = arena.get(cursor) {
-                        if node.kind == 7 {
-                            depth += 1;
-                            cursor = node.next_sibling;
-                        } else {
-                            break;
-                        }
-                    } else {
-                        break;
-                    }
-                }
+                // Pointer depth is stored in `data` (set by the parser).
+                // A value of 0 means a single pointer level (legacy nodes that
+                // were allocated before the parser encoded the depth).
+                let depth = if declarator.data > 0 {
+                    declarator.data as usize
+                } else {
+                    1
+                };
 
                 let mut ty = base_type;
                 for _ in 0..depth {
@@ -858,7 +852,25 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                                     .map(|d| d.next_sibling)
                                     .unwrap_or(NodeOffset::NULL);
                                 if init_offset != NodeOffset::NULL {
-                                    if let Some(val) = self.lower_expr(arena, init_offset)? {
+                                    let is_designated_init = arena
+                                        .get(init_offset)
+                                        .map(|n| n.kind == 205)
+                                        .unwrap_or(false);
+                                    if is_designated_init {
+                                        if let BasicTypeEnum::StructType(struct_type) =
+                                            actual_alloca_type
+                                        {
+                                            self.lower_designated_init_into_struct(
+                                                arena,
+                                                init_offset,
+                                                var_ptr,
+                                                struct_type,
+                                                &var_name,
+                                            )?;
+                                        }
+                                    } else if let Some(val) =
+                                        self.lower_expr(arena, init_offset)?
+                                    {
                                         if Self::types_compatible(actual_alloca_type, val) {
                                             let _ = self
                                                 .builder
@@ -3176,6 +3188,7 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
             204 => self.lower_builtin_call(arena, &node),
             205 => self.lower_designated_init(arena, &node),
             206 => self.lower_extension(arena, &node),
+            212 => self.lower_compound_literal(arena, &node),
             1..=9 | 83 | 90..=94 | 101..=105 | 200 => Ok(None),
             _ => Ok(None),
         }
@@ -4703,6 +4716,72 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
         Ok(None)
     }
 
+    /// Lower a chain of designated initializers (kind=205) into GEP+store
+    /// instructions targeting the fields of an already-allocated struct variable.
+    fn lower_designated_init_into_struct(
+        &mut self,
+        arena: &Arena,
+        first_init_offset: NodeOffset,
+        struct_ptr: PointerValue<'ctx>,
+        struct_type: StructType<'ctx>,
+        var_name: &str,
+    ) -> Result<(), BackendError> {
+        // Clone field names to avoid borrow conflict with &mut self in lower_expr.
+        let field_names = self
+            .struct_fields
+            .get(var_name)
+            .cloned()
+            .or_else(|| {
+                // Fallback: search struct_tag_fields for a matching struct.
+                for (_tag, fields) in &self.struct_tag_fields {
+                    if fields.len() == struct_type.count_fields() as usize {
+                        return Some(fields.clone());
+                    }
+                }
+                None
+            })
+            .unwrap_or_default();
+
+        let mut offset = first_init_offset;
+        while offset != NodeOffset::NULL {
+            if let Some(node) = arena.get(offset) {
+                if node.kind == 205 {
+                    // Field designated init: data = string-table offset for field name.
+                    if let Some(field_name) = arena.get_string(NodeOffset(node.data)) {
+                        let field_name = field_name.to_string();
+                        let field_idx = field_names
+                            .iter()
+                            .position(|f| f == &field_name)
+                            .unwrap_or(0) as u32;
+
+                        // Lower the value expression (stored as first_child).
+                        if node.first_child != NodeOffset::NULL {
+                            if let Some(val) = self.lower_expr(arena, node.first_child)? {
+                                let field_ptr = self
+                                    .builder
+                                    .build_struct_gep(
+                                        struct_type,
+                                        struct_ptr,
+                                        field_idx,
+                                        "desig.gep",
+                                    )
+                                    .map_err(|_| BackendError::InvalidNode)?;
+                                let _ = self
+                                    .builder
+                                    .build_store(field_ptr, val)
+                                    .map_err(|_| BackendError::InvalidNode);
+                            }
+                        }
+                    }
+                }
+                offset = node.next_sibling;
+            } else {
+                break;
+            }
+        }
+        Ok(())
+    }
+
     fn lower_extension(
         &mut self,
         arena: &Arena,
@@ -4713,6 +4792,194 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
         } else {
             Ok(None)
         }
+    }
+
+    /// Lower a compound literal expression (kind=212).
+    ///
+    /// AST layout:
+    ///   kind=212, data = NodeOffset of first initializer element
+    ///   first_child = type specifier chain
+    ///
+    /// Generated LLVM IR:
+    ///   1. Alloca a temporary of the resolved type
+    ///   2. Store each initializer value (designated or positional)
+    ///   3. Load and return the aggregate/scalar value
+    fn lower_compound_literal(
+        &mut self,
+        arena: &Arena,
+        node: &CAstNode,
+    ) -> Result<Option<BasicValueEnum<'ctx>>, BackendError> {
+        let spec_offset = node.first_child;
+        let init_offset = NodeOffset(node.data);
+
+        let spec_node = arena.get(spec_offset);
+        let spec_kind = spec_node.map(|n| n.kind).unwrap_or(2);
+
+        // Resolve the compound literal's type and optional struct info.
+        let (alloca_type, struct_info) = if matches!(spec_kind, 4 | 5) {
+            // Struct / union type
+            let info = self.struct_info_for_spec(arena, spec_node);
+            let ty = info
+                .as_ref()
+                .map(|(st, _)| st.as_basic_type_enum())
+                .unwrap_or_else(|| {
+                    spec_node
+                        .map(|sn| self.build_struct_llvm_type(arena, sn))
+                        .unwrap_or_else(|| self.context.i32_type().as_basic_type_enum())
+                });
+            (ty, info)
+        } else {
+            // Scalar or array type – check for an array declarator chained on the
+            // specifier (e.g. `(int[]){1,2,3}` would have a kind=8 node after the
+            // specifier in the first_child chain).
+            let base_type = self.node_kind_to_llvm_type(spec_kind);
+
+            // Walk sibling chain to see if there is an array declarator.
+            let mut arr_size: Option<u32> = None;
+            let mut off = spec_offset;
+            while off != NodeOffset::NULL {
+                if let Some(n) = arena.get(off) {
+                    if n.kind == 8 {
+                        arr_size = Some(if n.data > 0 {
+                            n.data
+                        } else {
+                            // Zero-length: infer from init count.
+                            self.count_init_elements(arena, init_offset)
+                        });
+                        break;
+                    }
+                    off = n.next_sibling;
+                } else {
+                    break;
+                }
+            }
+
+            if let Some(size) = arr_size {
+                (base_type.array_type(size).as_basic_type_enum(), None)
+            } else {
+                (base_type, None)
+            }
+        };
+
+        // Allocate a temporary for the compound literal.
+        let tmp_ptr = self
+            .build_entry_alloca(alloca_type, "compound.lit")
+            .or_else(|_| {
+                self.builder
+                    .build_alloca(alloca_type, "compound.lit")
+                    .map_err(|_| BackendError::InvalidNode)
+            })?;
+
+        // --- Store initializers ---
+        if init_offset != NodeOffset::NULL {
+            let is_designated = arena
+                .get(init_offset)
+                .map(|n| n.kind == 205)
+                .unwrap_or(false);
+
+            if is_designated {
+                if let BasicTypeEnum::StructType(struct_type) = alloca_type {
+                    // Register field names so lower_designated_init_into_struct
+                    // can look them up.  We use a synthetic variable name that
+                    // won't collide with user identifiers.
+                    let synth_name = "__compound_lit_tmp".to_string();
+                    if let Some((_, ref field_names)) = struct_info {
+                        self.struct_fields
+                            .insert(synth_name.clone(), field_names.clone());
+                    }
+                    self.lower_designated_init_into_struct(
+                        arena,
+                        init_offset,
+                        tmp_ptr,
+                        struct_type,
+                        &synth_name,
+                    )?;
+                    self.struct_fields.remove(&synth_name);
+                }
+            } else if let BasicTypeEnum::ArrayType(arr_ty) = alloca_type {
+                // Positional array initializer: store each element at its index.
+                let elem_type = arr_ty.get_element_type();
+                let mut idx: u64 = 0;
+                let mut off = init_offset;
+                while off != NodeOffset::NULL {
+                    if let Some(val) = self.lower_expr(arena, off)? {
+                        let indices = [
+                            self.context.i64_type().const_int(0, false),
+                            self.context.i64_type().const_int(idx, false),
+                        ];
+                        let elem_ptr = unsafe {
+                            self.builder
+                                .build_gep(
+                                    arr_ty.as_basic_type_enum(),
+                                    tmp_ptr,
+                                    &indices,
+                                    "cl.arr.gep",
+                                )
+                                .map_err(|_| BackendError::InvalidNode)?
+                        };
+                        let store_val = self.maybe_cast(val, elem_type);
+                        let _ = self
+                            .builder
+                            .build_store(elem_ptr, store_val)
+                            .map_err(|_| BackendError::InvalidNode);
+                    }
+                    off = arena
+                        .get(off)
+                        .map(|n| n.next_sibling)
+                        .unwrap_or(NodeOffset::NULL);
+                    idx += 1;
+                }
+            } else {
+                // Scalar compound literal – just store the single value.
+                if let Some(val) = self.lower_expr(arena, init_offset)? {
+                    let _ = self
+                        .builder
+                        .build_store(tmp_ptr, val)
+                        .map_err(|_| BackendError::InvalidNode);
+                }
+            }
+        }
+
+        // Load and return the compound literal value.
+        let loaded = self
+            .builder
+            .build_load(alloca_type, tmp_ptr, "compound.lit.load")
+            .map_err(|_| BackendError::InvalidNode)?;
+        Ok(Some(loaded))
+    }
+
+    /// Count the number of initializer elements in a sibling chain.
+    fn count_init_elements(&self, arena: &Arena, first: NodeOffset) -> u32 {
+        let mut count = 0u32;
+        let mut off = first;
+        while off != NodeOffset::NULL {
+            count += 1;
+            off = arena
+                .get(off)
+                .map(|n| n.next_sibling)
+                .unwrap_or(NodeOffset::NULL);
+        }
+        count
+    }
+
+    /// Cast `val` to match `target` element type if they differ.
+    fn maybe_cast(
+        &self,
+        val: BasicValueEnum<'ctx>,
+        target: BasicTypeEnum<'ctx>,
+    ) -> BasicValueEnum<'ctx> {
+        if val.get_type() == target {
+            return val;
+        }
+        // int → int truncation / extension
+        if val.is_int_value() && target.is_int_type() {
+            let from = val.into_int_value();
+            let to_ty = target.into_int_type();
+            if let Ok(cast) = self.builder.build_int_cast(from, to_ty, "cl.cast") {
+                return cast.into();
+            }
+        }
+        val
     }
 
     fn find_ident_name(&self, arena: &Arena, node: &CAstNode) -> Option<String> {
@@ -5529,5 +5796,189 @@ mod tests {
                 "Expected struct return type:\n{}", ir);
         assert!(ir.contains("ret { i32, i32 }"),
                 "Expected struct ret instruction:\n{}", ir);
+    }
+
+    #[test]
+    fn test_multi_var_complex_declarators() {
+        // Test 1: pointer with init, then array (basic case from bug report)
+        let ir = compile_c_to_ir(
+            "void test_multi() { \
+                 int x = 42; \
+                 int *p = &x, a[10]; \
+             }"
+        );
+        assert!(ir.contains("alloca ptr"), "T1: Expected alloca ptr for *p:\n{}", ir);
+        assert!(ir.contains("alloca [10 x i32]"), "T1: Expected alloca [10 x i32] for a[10]:\n{}", ir);
+
+        // Test 2: array first, then pointer (reversed order)
+        let ir2 = compile_c_to_ir(
+            "void test_multi2() { \
+                 int x = 42; \
+                 int a[10], *p; \
+             }"
+        );
+        assert!(ir2.contains("alloca [10 x i32]"), "T2: Expected alloca [10 x i32] for a[10]:\n{}", ir2);
+        assert!(ir2.contains("alloca ptr"), "T2: Expected alloca ptr for *p:\n{}", ir2);
+
+        // Test 3: pointer, scalar, and array in one decl
+        let ir3 = compile_c_to_ir(
+            "void test_multi3() { \
+                 int *p, n, a[5]; \
+             }"
+        );
+        assert!(ir3.contains("alloca ptr"), "T3: Expected alloca ptr for *p:\n{}", ir3);
+        assert!(ir3.contains("alloca i32"), "T3: Expected alloca i32 for n:\n{}", ir3);
+        assert!(ir3.contains("alloca [5 x i32]"), "T3: Expected alloca [5 x i32] for a[5]:\n{}", ir3);
+
+        // Test 4: double pointer then array
+        let ir4 = compile_c_to_ir(
+            "void test_multi4() { \
+                 int x = 42; \
+                 int *px = &x; \
+                 int **pp = &px, a[10]; \
+             }"
+        );
+        assert!(ir4.contains("alloca ptr"), "T4: Expected alloca ptr for **pp:\n{}", ir4);
+        assert!(ir4.contains("alloca [10 x i32]"), "T4: Expected alloca [10 x i32] for a[10]:\n{}", ir4);
+
+        // Test 5: two pointers without initializers — verifies declarator_llvm_type
+        // does NOT walk next_sibling (which would count q's pointer declarator
+        // as extra pointer depth for p)
+        let ir5 = compile_c_to_ir(
+            "void test_multi5() { \
+                 int *p, *q; \
+             }"
+        );
+        let p_alloca_count = ir5.matches("alloca ptr").count();
+        assert_eq!(p_alloca_count, 2, "T5: Expected exactly 2 alloca ptr (one for *p, one for *q):\n{}", ir5);
+    }
+
+    #[test]
+    fn test_designated_init_struct() {
+        let ir = compile_c_to_ir(
+            "struct point { int x; int y; }; \
+             void test_desig_init() { \
+                 struct point p = {.x = 1, .y = 2}; \
+             }"
+        );
+        // Should allocate the struct
+        assert!(ir.contains("alloca { i32, i32 }"),
+                "Expected struct alloca:\n{}", ir);
+        // Should have GEP instructions targeting struct fields
+        assert!(ir.contains("getelementptr inbounds { i32, i32 }"),
+                "Expected struct GEP for designated init:\n{}", ir);
+        // Should have stores for both fields
+        assert!(ir.contains("store i32 1"),
+                "Expected store of 1 for .x:\n{}", ir);
+        assert!(ir.contains("store i32 2"),
+                "Expected store of 2 for .y:\n{}", ir);
+        // Should have the designated-init GEP label
+        assert!(ir.contains("desig.gep"),
+                "Expected desig.gep label:\n{}", ir);
+    }
+
+    #[test]
+    fn test_designated_init_partial() {
+        // Only initialize one field — the other should not crash
+        let ir = compile_c_to_ir(
+            "struct point { int x; int y; }; \
+             void test_partial() { \
+                 struct point p = {.y = 42}; \
+             }"
+        );
+        assert!(ir.contains("alloca { i32, i32 }"),
+                "Expected struct alloca:\n{}", ir);
+        // .y is field index 1
+        assert!(ir.contains("desig.gep"),
+                "Expected desig.gep for .y:\n{}", ir);
+        assert!(ir.contains("store i32 42"),
+                "Expected store of 42 for .y:\n{}", ir);
+    }
+
+    #[test]
+    fn test_designated_init_field_order() {
+        // Initialize fields out of declaration order
+        let ir = compile_c_to_ir(
+            "struct rgb { int r; int g; int b; }; \
+             void test_order() { \
+                 struct rgb c = {.b = 3, .r = 1, .g = 2}; \
+             }"
+        );
+        assert!(ir.contains("alloca { i32, i32, i32 }"),
+                "Expected 3-field struct alloca:\n{}", ir);
+        // All three field values should be stored
+        assert!(ir.contains("store i32 3"),
+                "Expected store for .b:\n{}", ir);
+        assert!(ir.contains("store i32 1"),
+                "Expected store for .r:\n{}", ir);
+        assert!(ir.contains("store i32 2"),
+                "Expected store for .g:\n{}", ir);
+        // Should have 3 GEPs (each GEP line contains "desig.gep")
+        let gep_count = ir.lines()
+            .filter(|l| l.contains("getelementptr") && l.contains("desig.gep"))
+            .count();
+        assert_eq!(gep_count, 3,
+                "Expected 3 desig.gep GEP instructions:\n{}", ir);
+    }
+
+    // ------------------------------------------------------------------ //
+    //  Compound literal tests (kind=212)
+    // ------------------------------------------------------------------ //
+
+    #[test]
+    fn test_compound_literal_struct() {
+        let ir = compile_c_to_ir(
+            "struct point { int x; int y; }; \
+             int test_cl() { \
+                 struct point p = (struct point){.x = 10, .y = 20}; \
+                 return p.x + p.y; \
+             }"
+        );
+        // Should allocate a temporary for the compound literal
+        assert!(ir.contains("compound.lit"),
+                "Expected compound.lit alloca:\n{}", ir);
+        // Should have stores for the designated init values
+        assert!(ir.contains("store i32 10"),
+                "Expected store of 10 for .x:\n{}", ir);
+        assert!(ir.contains("store i32 20"),
+                "Expected store of 20 for .y:\n{}", ir);
+        // Should have a load of the compound literal
+        assert!(ir.contains("compound.lit.load"),
+                "Expected compound.lit.load:\n{}", ir);
+    }
+
+    #[test]
+    fn test_compound_literal_scalar() {
+        let ir = compile_c_to_ir(
+            "int test_scalar_cl() { \
+                 int x = (int){42}; \
+                 return x; \
+             }"
+        );
+        // Should allocate a temporary for the compound literal
+        assert!(ir.contains("compound.lit"),
+                "Expected compound.lit alloca:\n{}", ir);
+        assert!(ir.contains("store i32 42"),
+                "Expected store of 42:\n{}", ir);
+        assert!(ir.contains("compound.lit.load"),
+                "Expected compound.lit.load:\n{}", ir);
+    }
+
+    #[test]
+    fn test_compound_literal_in_expression() {
+        // Compound literal used directly in a return expression
+        let ir = compile_c_to_ir(
+            "struct pair { int a; int b; }; \
+             int test_cl_expr() { \
+                 struct pair p = (struct pair){.a = 3, .b = 7}; \
+                 return p.a; \
+             }"
+        );
+        assert!(ir.contains("compound.lit"),
+                "Expected compound.lit alloca:\n{}", ir);
+        assert!(ir.contains("store i32 3"),
+                "Expected store of 3 for .a:\n{}", ir);
+        assert!(ir.contains("store i32 7"),
+                "Expected store of 7 for .b:\n{}", ir);
     }
 }

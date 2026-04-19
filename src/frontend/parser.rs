@@ -1123,26 +1123,20 @@ impl Parser {
     }
 
     pub fn parse_declarator(&mut self) -> Result<NodeOffset, ParseError> {
-        let mut pointer_node = NodeOffset::NULL;
-        let mut last_pointer = NodeOffset::NULL;
+        let mut pointer_depth: u32 = 0;
 
         while self.skip_punctuator("*") {
-            let ptr = self.alloc_node(7, 0, NodeOffset::NULL, NodeOffset::NULL, NodeOffset::NULL);
-            if pointer_node == NodeOffset::NULL {
-                pointer_node = ptr;
-                last_pointer = ptr;
-            } else if let Some(lp) = self.arena.get_mut(last_pointer) {
-                lp.next_sibling = ptr;
-                last_pointer = ptr;
-            }
+            pointer_depth += 1;
         }
 
         let direct_decl = self.parse_direct_declarator()?;
 
-        if pointer_node != NodeOffset::NULL {
-            if let Some(pp) = self.arena.get_mut(pointer_node) {
-                pp.first_child = direct_decl;
-            }
+        if pointer_depth > 0 {
+            // Store the full pointer depth in the `data` field of a single kind=7
+            // node.  This avoids chaining pointer nodes via `next_sibling`, which
+            // is later reused by `link_siblings` / initializer attachment and would
+            // corrupt the pointer-depth information.
+            let pointer_node = self.alloc_node(7, pointer_depth, NodeOffset::NULL, direct_decl, NodeOffset::NULL);
             return Ok(pointer_node);
         }
 
@@ -1997,6 +1991,19 @@ impl Parser {
                     }
                 }
                 if self.skip_punctuator(")") {
+                    // Compound literal: (type_name){initializer_list}
+                    if self.current_token().kind == TokenKind::Punctuator
+                        && self.current_token().text == "{"
+                    {
+                        let init_list = self.parse_initializer()?;
+                        return Ok(self.alloc_node(
+                            212,
+                            init_list.0,
+                            NodeOffset::NULL,
+                            cast_type,
+                            NodeOffset::NULL,
+                        ));
+                    }
                     let expr = self.parse_cast_expression()?;
                     return Ok(self.alloc_node(70, 0, NodeOffset::NULL, cast_type, expr));
                 }
