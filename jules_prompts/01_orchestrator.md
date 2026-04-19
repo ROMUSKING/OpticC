@@ -39,15 +39,18 @@ Arena, DB, Lexer, Macro, Parser, LLVM backend, analysis, and VFS code are all pr
 - [x] 7 new tests (4 attribute backend, 3 platform macro preprocessor)
 - [x] 333 tests pass, 0 failures
 
-**Milestone 6b — Codegen Correctness** (NEXT PRIORITY — blockers found via testing):
-- [ ] **P0: Extern function signatures**: `extern int puts(const char *s)` lowered as `declare i32 @puts(...)` instead of `declare i32 @puts(ptr)`. Functions with explicit prototypes must use the declared param types, not variadic fallback.
-- [ ] **P0: Pointer array indexing**: `argv[i]` (char **argv) generates `getelementptr i32` instead of `getelementptr ptr`. Array index GEP must use the pointee element type, not always i32.
-- [ ] **P0: Nested member access**: `head->next->value` returns 0 instead of chaining through intermediate pointer loads. `lower_member_access` needs recursive base-expression support.
-- [ ] **P1: Struct return types**: `return (struct point){.x = x}` lowers as `ret i32 0` — compound literal + struct return not implemented. Need alloca+store pattern.
-- [ ] **P1: Assignment expression comparison**: `(x = 42) > 0` evaluates at compile-time as `true` instead of runtime `icmp sgt`. The assignment value must feed into the comparison operand.
-- [ ] **P1: Bitfield support**: struct bitfields (`unsigned int readable : 1`) need shift/mask patterns in GEP.
-- [ ] **P2: Designated initializers codegen**: `.field = value` parsed (kind=205) but not lowered to struct GEP+store.
-- [ ] **P2: Compound literals**: `(struct foo){.x = 1}` needs alloca+store+load pattern.
+**Milestone 6b — Codegen Correctness** (IN PROGRESS — P0 bugs fixed 2026-04-19):
+- [x] **P0: Extern function signatures**: lower_func_decl extracts param types from prototypes; kind=22 pre-registered
+- [x] **P0: Pointer array indexing**: char **argv → getelementptr ptr; checks variable binding's pointee_type
+- [x] **P0: Call argument isolation**: kind=74 wrapper nodes prevent expression-internal next_sibling leaking
+- [x] **P0: Nested member access**: head->next->value → chained GEP via recursive base lowering
+- [x] **P0: Struct pointer fields**: register_struct_types_in_node detects pointer declarators (kind=7)
+- [x] **P0: Struct field name/index**: collect_struct_field_names descends into pointer/array declarators
+- [ ] **P1: Struct return types**: `return (struct point){.x = x}` needs compound literal + struct return
+- [ ] **P1: Assignment expression comparison**: `(x = 42) > 0` needs runtime icmp, not compile-time fold
+- [ ] **P1: Bitfield support**: struct bitfields (`unsigned int readable : 1`) need shift/mask patterns
+- [ ] **P2: Designated initializers codegen**: `.field = value` parsed (kind=205) but not lowered
+- [ ] **P2: Compound literals**: `(struct foo){.x = 1}` needs alloca+store+load pattern
 
 **Milestone 6c — System Headers & Multi-File** (after 6b correctness):
 - [ ] Preprocessor: resolve `#include <stdio.h>` from system include paths (`-I /usr/include`)

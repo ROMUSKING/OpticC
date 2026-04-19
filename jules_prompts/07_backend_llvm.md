@@ -45,16 +45,19 @@ The parser now chains child nodes entirely via first_child chains, not via next_
 - `kind=9.next_sibling` is safe for link_siblings (params not stored there anymore).
 
 ### REMAINING BUGS (blockers for real-world C — tested 2026-04-19)
-- [x] **sizeof(type) returns 0**: Fixed. Root cause: `sizeof` tokenized as Keyword but `parse_unary_expression` only checked Punctuator branch; `sizeof(int)` was misinterpreted as cast expression `(int)`. Fix: added Keyword check before Punctuator match.
-- [x] **Ternary operator always returned RHS**: Fixed. `lower_cond_expr` now uses `coerce_to_bool` + `build_select` with correct AST navigation (wrapper node for then/else).
-- [x] **Comma operator returned first value**: Fixed. `lower_comma_expr` now evaluates left for side effects, returns right (matches kind=72 AST layout: first_child=left, next_sibling=right).
-- [x] **Do-while loop condition never evaluated**: Fixed. Condition stored as `body.next_sibling` to survive `link_siblings` overwrites.
-- [ ] **P0: Extern function signatures**: `extern int puts(const char *s)` lowered as `declare i32 @puts(...)` instead of `declare i32 @puts(ptr)`. Root cause: `pre_register_func_def` only handles function definitions; extern declarations with prototypes still fall back to variadic auto-declaration in `lower_call_expr`. Fix: parse extern declarations and register their signatures before codegen.
-- [ ] **P0: Pointer array indexing type**: `argv[i]` (where argv is `char **`) generates `getelementptr i32` instead of `getelementptr ptr`. Root cause: `lower_array_index` always uses `i32` element type. Fix: track pointer-to-pointer types and use correct GEP element type.
-- [ ] **P0: Nested member access**: `head->next->value` returns `ret i32 0` — only one level of member access works. Root cause: `lower_member_access` resolves the base as an identifier name, not recursively as an expression. Fix: make base resolution recursive (lower the base expression, then GEP from its result).
-- [ ] **P1: Struct return types**: `return (struct point){.x = x, .y = y, .z = 0}` lowers as `ret i32 0`. Compound literals and struct return values need alloca+store+load+ret pattern.
-- [ ] **P1: Assignment expression comparison**: `(x = 42) > 0` evaluates comparison at compile-time as `br i1 true`. Root cause: `lower_assign_expr` returns the stored value, but the comparison with `0` is folded. The comparison operand should be the runtime load result, not a constant.
-- [ ] **P1: Multi-variable complex declarators**: `int *p = &x, a[10]` — simple `int a, b, c` works, but mixed pointer/array declarators in the same declaration may fail.
+- [x] **sizeof(type) returns 0**: Fixed. sizeof tokenized as Keyword not Punctuator.
+- [x] **Ternary operator always returned RHS**: Fixed. coerce_to_bool + build_select.
+- [x] **Comma operator returned first value**: Fixed. Return right operand.
+- [x] **Do-while loop condition never evaluated**: Fixed. Condition stored as body.next_sibling.
+- [x] **P0: Extern function signatures**: Fixed. lower_func_decl now extracts param types from prototypes instead of defaulting to variadic. kind=22 pre-registered in Pass 1.
+- [x] **P0: Pointer array indexing type**: Fixed. lower_array_element_ptr checks variable binding's pointee_type; if pointer, uses ptr GEP element type instead of i32.
+- [x] **P0: Call argument isolation**: Fixed. Parser wraps each call argument in kind=74 wrapper node, preventing expression-internal next_sibling chains from leaking into call argument traversal.
+- [x] **P0: Struct pointer field types**: Fixed. register_struct_types_in_node walks member children for pointer declarators (kind=7) and uses ptr type instead of i32.
+- [x] **P0: Struct field name extraction**: Fixed. collect_struct_field_names descends into pointer/array declarators to find identifiers.
+- [x] **P0: Nested member access**: Fixed. lower_member_access_ptr supports chained arrow operators (e.g., head->next->value) via recursive base expression lowering and find_member_access_root_var.
+- [ ] **P1: Struct return types**: `return (struct point){.x = x, .y = y}` lowers as `ret i32 0`. Compound literals and struct return values need alloca+store+load+ret pattern.
+- [ ] **P1: Assignment expression comparison**: `(x = 42) > 0` evaluates comparison at compile-time as `br i1 true`. The comparison operand should be the runtime load result.
+- [ ] **P1: Multi-variable complex declarators**: `int *p = &x, a[10]` — mixed pointer/array declarators in the same declaration may fail.
 - [ ] **P2: Bitfield struct members**: `unsigned int readable : 1` — not handled in struct layout or access patterns.
 - [ ] **P2: Designated initializer codegen**: `.field = value` parsed as kind=205 but lowered as no-op.
 

@@ -1,14 +1,14 @@
 # Optic C-Compiler QA Verification Report
 
-**Generated:** 2026-04-18
+**Generated:** 2026-04-19
 **Project:** Optic C-Compiler
-**Status:** PHASE 3 IN PROGRESS — M6a COMPLETE, 333 TESTS PASS
+**Status:** PHASE 3 IN PROGRESS — M6b CODEGEN FIXES IN PROGRESS, 339 TESTS PASS
 
 ---
 
 ## Executive Summary
 
-The Optic C-Compiler project has completed all major Phase 1 and Phase 2 components. Phase 3 (Linux Kernel Compilation) milestones 1–6a are now implemented: switch/case/goto/label/break/continue codegen, 30+ compiler builtins, variadic function support, inline asm codegen, computed goto, case ranges, attribute lowering, platform macros, and block-scope variable shadowing. All 333 tests pass with 0 failures.
+The Optic C-Compiler project has completed all major Phase 1 and Phase 2 components. Phase 3 (Linux Kernel Compilation) milestones 1–6a are implemented, and M6b codegen correctness fixes are in progress. Key P0 bugs fixed: extern function declarations with proper param types, pointer-to-pointer array indexing, call argument isolation, nested member access, struct pointer field types, and struct field index correctness. Simplified echo.c compiles and runs end-to-end (OpticC → LLC → Clang → binary). All 339 tests pass with 0 failures.
 
 ---
 
