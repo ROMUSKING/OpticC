@@ -106,3 +106,49 @@ M+ = structs (TypeId points to struct definition)
 5. LLVM backend generates correct types for at least: i8, i16, i32, i64, float, double, pointers
 6. Type-system tests should be rerun and pass before reporting current totals.
 7. Integration test: compile a C file with mixed types and verify that the emitted LLVM IR uses the expected types.
+
+## KERNEL TYPE SYSTEM REQUIREMENTS (M8–M9)
+The Linux kernel uses advanced C type features throughout:
+
+### Flexible Array Members (M9)
+`struct sk_buff { int len; unsigned char data[]; };`
+- Last struct member can be `T name[]` (zero-length trailing array)
+- Does not contribute to `sizeof(struct)` — must be excluded from layout
+- LLVM: represent as zero-length array `[0 x T]` in struct type
+
+### Anonymous Structs/Unions (M9)
+```c
+struct sockaddr_storage {
+    unsigned short ss_family;
+    union { struct sockaddr_in sin; struct sockaddr_in6 sin6; }; // anonymous
+};
+```
+- Members of anonymous struct/union are accessed as if they belong to the enclosing struct
+- Parser: parse unnamed struct/union members, don't require field name
+- Type system: flatten member access paths so `s.sin` works directly
+
+### _Static_assert (M9)
+`_Static_assert(sizeof(int) == 4, "int must be 4 bytes");`
+- Evaluate expression at compile time, emit error with message if false
+- Can appear at file scope or in struct/union definitions
+
+### _Thread_local / __thread (M9)
+`_Thread_local int per_cpu_data;` or `__thread int per_cpu_data;`
+- Marks global variables as thread-local → LLVM `thread_local` attribute
+- Kernel uses for per-CPU variables (though with custom wrappers)
+
+### Packed Struct Layout (M8)
+- When `__attribute__((packed))` is present on a struct:
+  - `compute_struct_layout()` must suppress all padding between members
+  - Alignment of the struct itself is 1 byte
+  - Individual members may still have `__attribute__((aligned(N)))` to override
+
+### _Atomic Full Lowering (M9)
+- `_Atomic int counter;` → all accesses use atomic load/store
+- Binary operations on `_Atomic` types use atomic read-modify-write
+- Currently recognized but treated as plain int — needs proper lowering
+
+### Implementation Notes
+- M6b bitfield support is ✅ COMPLETE
+- Struct/union layout computation exists in `compute_struct_layout()`
+- Type caching and implicit conversions are working

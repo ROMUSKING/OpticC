@@ -45,19 +45,21 @@ OpticC already contains implementations for the core compiler pipeline plus the 
 ### Current Repository State
 - ✅ Core infrastructure exists: arena, DB, lexer, parser, backend, analysis, build, benchmark, integration
 - ✅ Advanced modules exist: preprocessor, type system, GNU extensions, inline asm
-- ✅ Phase 3 milestones 1–6a implemented: switch/goto/break/continue, 30+ builtins, variadic, inline asm codegen, computed goto+case ranges, attribute lowering, platform macros, block scope
-- ✅ All 333 tests pass (0 failures) as of 2026-04-18
-- ⚠️ Remaining work: system header include paths, multi-TU compilation, bitfields, designated initializers, compound literals
+- ✅ Phase 3 milestones 1–6c implemented: switch/goto/break/continue, 30+ builtins, variadic, inline asm codegen, computed goto+case ranges, attribute lowering, platform macros, block scope, bitfields, designated initializers, compound literals, system headers, multi-TU compilation
+- ✅ All 373 tests pass (0 failures) as of 2026-04-19
+- ⚠️ Remaining work: atomic builtins, packed structs, freestanding mode, Kbuild integration, kernel compilation
 
 ### Immediate Priorities for Agents
-1. **Milestone 6b P0 (Codegen Correctness)**: Fix extern function signatures, pointer array indexing types, and nested member access — these block even simple programs like echo.c.
-2. **Milestone 6b P1 (Richer Lowering)**: Struct return types, assignment expression comparison, compound literals.
-3. **Milestone 6b P2 (Kernel Features)**: Bitfields, designated initializer codegen.
-4. **Milestone 6c (System Headers)**: Add `-I` include path support, multi-TU compilation after codegen correctness is solid.
-5. **Intermediate validation**: Compile simplified echo.c (`extern int puts(const char *s); int main(int argc, char **argv) { ... }`) end-to-end.
-6. **Milestone 7 (Kernel-Scale)**: Compile minimal kernel module after M6b/6c complete.
-7. Verify changes with `cargo test` and CLI smoke tests before reporting.
-8. Record only confirmed status and remaining blockers in the appropriate prompt file.
+1. **Milestone 7 — Atomic Builtins** [KERNEL-CRITICAL]: Implement `__sync_fetch_and_add/sub/or/and/xor`, `__sync_val_compare_and_swap`, `__sync_lock_test_and_set/release` → LLVM `atomicrmw`/`cmpxchg`. Implement `__atomic_*` C11-style atomics with memory ordering.
+2. **Milestone 8 — Missing Attributes & Builtins**: `__attribute__((packed))` → suppress padding + LLVM packed struct. `noinline`/`always_inline`/`constructor`/`destructor`/`hot`. `__builtin_types_compatible_p`, `__builtin_choose_expr`, 64-bit builtins.
+3. **Milestone 9 — Type System Extensions**: Flexible array members, anonymous structs/unions, `_Static_assert`, `_Thread_local`/`__thread`, `_Atomic` full lowering.
+4. **Milestone 10 — Preprocessor Extensions**: `__has_attribute`, `__has_builtin`, `__has_include`, `_Pragma("GCC diagnostic ...")`, `__VA_OPT__`.
+5. **Milestone 11 — Freestanding Mode & Kernel Flags**: `-ffreestanding`, `-mcmodel=kernel`, `-mno-red-zone`, `-fno-PIE`, `-fno-common`, `-fno-strict-aliasing`.
+6. **Milestone 12 — GCC CLI Drop-In & Kbuild**: `CC=optic_c` in kernel Makefile, dependency files, response files, `--version`/`-dumpversion`/`-dumpmachine`.
+7. **Milestone 13 — Progressive Validation & Boot**: coreutils → kernel module → kernel subsystem → tinyconfig → QEMU boot.
+8. Verify changes with `cargo test` and CLI smoke tests before reporting.
+9. Record only confirmed status and remaining blockers in the appropriate prompt file.
+10. Reference `jules_prompts/16_kernel_compilation.md` for detailed kernel milestone tracking.
 
 ### Environment Notes
 - Target environment is the current dev container on Ubuntu 24.04
@@ -66,12 +68,18 @@ OpticC already contains implementations for the core compiler pipeline plus the 
 
 ### Development Strategy: Path to Linux Kernel Compilation
 The kernel compilation path requires these capabilities in priority order:
-1. **Inline assembly codegen** — kernel code is saturated with `asm volatile` blocks for barriers, atomics, and architecture-specific ops
-2. **Computed goto** — kernel uses `goto *dispatch_table[opcode]` patterns in interpreters and dispatch loops
-3. **System headers** — kernel headers include system headers transitively; preprocessor must resolve include paths
-4. **Multi-translation-unit compilation** — kernel builds hundreds of .c files into .o files linked together
-5. **Attribute support** — `section`, `weak`, `visibility`, `aligned`, `packed` all affect kernel object layout
-6. **Architecture-specific builtins** — additional `__builtin_*` for atomic operations, memory barriers, and CPU feature detection
+1. **Atomic builtins** [HIGHEST PRIORITY] — kernel spinlocks, barriers, and synchronization primitives depend on `__sync_*` and `__atomic_*` builtins
+2. **Packed structs & missing attributes** — kernel data structures use `packed`, functions use `noinline`/`always_inline`, modules use `constructor`/`destructor`
+3. **Freestanding mode & kernel flags** — `-ffreestanding`, `-mcmodel=kernel`, `-mno-red-zone` are required for any kernel compilation
+4. **GCC CLI compatibility & Kbuild** — `CC=optic_c` must work in Kbuild; dependency files, response files, `-include`, `-isystem` required
+5. **Preprocessor predicates** — `__has_attribute`, `__has_builtin`, `__has_include` used by kernel feature detection headers
+6. **Type extensions** — flexible array members, anonymous structs/unions, `_Static_assert`, `_Thread_local` used throughout kernel
+7. **Inline assembly codegen** ✅ — already implemented (barriers, operands, clobbers, goto asm)
+8. **Computed goto** ✅ — already implemented (&&label → blockaddress, goto *expr → indirectbr)
+9. **System headers & multi-TU** ✅ — already implemented (include path resolution, multi-file compilation)
+10. **Attribute support** ✅ — partially implemented (`section`, `weak`, `visibility`, `aligned`; `packed` still needed)
+
+See `jules_prompts/16_kernel_compilation.md` for detailed milestones and QEMU boot protocol.
 
 ### Intermediate Target: Compile coreutils/busybox
 Before attempting the kernel, validate against simpler real-world C projects:
@@ -98,4 +106,17 @@ Before attempting the kernel, validate against simpler real-world C projects:
 - Attribute lowering: weak, section, visibility, aligned, noreturn, cold
 - Platform predefined macros fallback: __linux__, __x86_64__, __LP64__, __BYTE_ORDER__, etc.
 - Block-scope variable shadowing via scope stack
+
+### Recent Achievements (2026-04-19)
+- Milestone 6b (Codegen Correctness): extern function signatures, pointer array indexing, nested member access, struct return types, assignment expression comparison, multi-variable complex declarators, bitfield read/write (shift/mask), designated initializer codegen (GEP+store), compound literals (alloca+store+load)
+- Milestone 6c (System Headers & Multi-File): preprocessor system include path resolution (discover_default_include_paths), -D command-line defines, multi-TU compilation with shared symbol tables, end-to-end compile→link→run verified
+- 373 tests passing (0 failures)
+
+### QEMU BOOT VERIFICATION PROTOCOL
+When kernel compilation milestones are complete, verify with:
+1. **Build**: `cd linux-6.6 && make tinyconfig && make CC=/path/to/optic_c V=1`
+2. **Boot**: `qemu-system-x86_64 -kernel arch/x86/boot/bzImage -nographic -append "console=ttyS0" -no-reboot`
+3. **Success**: Kernel prints "Linux version 6.6.x" and boot messages to serial console
+4. **Expected end state**: Kernel panic (no init) unless initramfs is provided
+See `jules_prompts/16_kernel_compilation.md` for full QEMU boot protocol details.
 - All 333 tests pass (0 failures)

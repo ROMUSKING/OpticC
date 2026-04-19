@@ -107,18 +107,52 @@ GNU C extensions, inline assembly, Kbuild integration, 30M+ LOC scale.
 - ✅ Platform predefined macros fallback: `__linux__`, `__x86_64__`, `__LP64__`, `__BYTE_ORDER__`
 - ✅ Block-scope variable shadowing via scope stack
 
-**Milestone 6b 📋 — System Headers & Multi-File Compilation:**
-- 📋 Preprocessor system include path resolution (`-I /usr/include`)
-- 📋 Multi-translation-unit compilation with shared symbol tables
-- 📋 Bitfield support, designated initializers, compound literals
+**Milestone 6b ✅ — Codegen Correctness (completed 2026-04-19):**
+- ✅ Extern function signatures with proper param types
+- ✅ Pointer array indexing, nested member access, struct pointer fields
+- ✅ Struct return types, assignment expression comparison
+- ✅ Multi-variable complex declarators
+- ✅ Bitfield support (shift/mask read/write patterns)
+- ✅ Designated initializers (`.field = value` → GEP+store)
+- ✅ Compound literals (`(struct){...}` → alloca+store+load)
 
-**Milestone 7 📋 — Kernel-Scale Validation:**
-- 📋 Compile minimal out-of-tree kernel module
-- 📋 Compile coreutils/busybox as real-world validation
-- 📋 Kbuild integration (CC=optic_c)
+**Milestone 6c ✅ — System Headers & Multi-File (completed 2026-04-19):**
+- ✅ Preprocessor system include path resolution (`-I`, `/usr/include`, gcc/clang path detection)
+- ✅ Command-line `-D` defines for cross-compilation
+- ✅ Multi-translation-unit compilation with shared symbol tables
+- ✅ End-to-end compile→link→run verified
+
+**Milestone 7–13 📋 — Linux Kernel Compilation:**
+- 📋 M7: Atomic builtins (`__sync_*`, `__atomic_*` → LLVM atomicrmw/cmpxchg)
+- 📋 M8: Missing attributes (packed, noinline, always_inline, constructor/destructor) & builtins
+- 📋 M9: Type system extensions (flexible arrays, anonymous structs, `_Static_assert`, `_Thread_local`)
+- 📋 M10: Preprocessor extensions (`__has_attribute`, `__has_builtin`, `__has_include`, `__VA_OPT__`)
+- 📋 M11: Freestanding mode & kernel flags (`-ffreestanding`, `-mcmodel=kernel`, `-mno-red-zone`)
+- 📋 M12: GCC CLI drop-in & Kbuild integration (`CC=optic_c`, dep files, response files)
+- 📋 M13: Progressive validation (coreutils → kernel module → tinyconfig → QEMU boot)
 
 ### Phase 4: Production 📋
 Optimization pipeline, DWARF debug info, LTO, cross-compilation.
+
+### Kernel Compilation Target
+**Goal**: Compile a minimal Linux 6.6 LTS kernel (`tinyconfig`, x86_64) that boots in QEMU with serial console.
+
+```bash
+# Build kernel with OpticC
+cd linux-6.6
+make tinyconfig
+make CC=/path/to/optic_c V=1
+
+# Boot in QEMU
+qemu-system-x86_64 -kernel arch/x86/boot/bzImage -nographic -append "console=ttyS0"
+```
+
+**Validation Ladder**:
+1. coreutils (`true`, `false`, `yes`, `echo`) → compile + run
+2. Kernel module (hello_world.ko) → insmod + dmesg
+3. Kernel subsystem (`make lib/ CC=optic_c`) → object files link
+4. Full tinyconfig → bzImage generated
+5. QEMU boot → kernel prints boot messages to serial console
 
 ## Quick Start
 
@@ -244,6 +278,9 @@ OpticC was built using an **autonomous multi-agent workflow**:
 | Jules-Inline-Asm | Assembly support | `13_inline_asm.md` |
 | Jules-Build-System | Multi-file compilation | `14_build_system.md` |
 | Jules-Benchmark | Performance comparison | `15_benchmark.md` |
+| Jules-Kernel-Compilation | Kernel build integration | `16_kernel_compilation.md` |
+| Jules-CLI-Compatibility | GCC flag compatibility | `17_cli_compatibility.md` |
+| Jules-Optimization | LLVM pass pipeline | `18_optimization_passes.md` |
 
 ## Test Results
 
@@ -275,16 +312,23 @@ OpticC was built using an **autonomous multi-agent workflow**:
 - [ ] Compile SQLite Amalgamation (255K LOC) to `libsqlite3.so`
 - [ ] Pass SQLite test suite
 
-### Milestone 2: Linux Kernel Modules
+### Milestone 2: Linux Kernel Compilation
 - [x] Switch/case codegen with fall-through and default
 - [x] Goto/label codegen with forward-reference resolution
 - [x] Break/continue in loops and switch
 - [x] 25+ compiler builtins (clz, ctz, popcount, bswap, ffs, abs, unreachable, trap, etc.)
 - [x] Variadic function support (va_start, va_end, va_copy → LLVM intrinsics)
-- [ ] Full GNU C dialect support
-- [ ] Inline assembly with full operand/clobber support
-- [ ] Kbuild integration
-- [ ] Compile out-of-tree kernel modules
+- [x] Inline assembly with operand/clobber/goto support
+- [x] Attribute lowering (weak, section, visibility, aligned, noreturn, cold)
+- [x] System headers & multi-TU compilation
+- [x] Bitfields, designated initializers, compound literals
+- [ ] Atomic builtins (`__sync_*`, `__atomic_*`)
+- [ ] Packed structs, noinline/always_inline, constructor/destructor
+- [ ] Freestanding mode (`-ffreestanding`, `-mcmodel=kernel`, `-mno-red-zone`)
+- [ ] GCC CLI compatibility & Kbuild integration (`CC=optic_c`)
+- [ ] Compile coreutils/busybox as validation
+- [ ] Compile minimal kernel module (.ko)
+- [ ] Linux 6.6 tinyconfig → QEMU boot
 
 ### Milestone 3: Production Compiler
 - [ ] LLVM optimization pipeline (pass manager)

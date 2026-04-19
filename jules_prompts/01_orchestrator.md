@@ -10,7 +10,7 @@ See `00_protocol.md` for the full roadmap. Summary:
 ### Phase 1: Core Infrastructure (IMPLEMENTED)
 Arena, DB, Lexer, Macro, Parser, LLVM backend, analysis, and VFS code are all present in the tree. Treat VFS as optional until it is re-exported from the library and re-verified in the current environment.
 
-### Phase 2: Stabilization and SQLite-Scale Validation (CURRENT FOCUS)
+### Phase 2: Stabilization and SQLite-Scale Validation (COMPLETE)
 | Prompt | Agent | Dependencies |
 |--------|-------|-------------|
 | `10_preprocessor.md` | Jules-Preprocessor | Phase 1 |
@@ -64,6 +64,24 @@ Arena, DB, Lexer, Macro, Parser, LLVM backend, analysis, and VFS code are all pr
 - [ ] Compile coreutils or busybox as end-to-end C software validation
 - [ ] Kbuild integration: replace CC=gcc with CC=optic_c in Makefile
 
+### Phase 3 Kernel Milestones (NEW — M7–M13)
+| Milestone | Agent(s) | Prompt | Dependencies |
+|-----------|----------|--------|--------------|
+| M7: Atomic Builtins | Jules-GNU-Extensions, Jules-Backend-LLVM | `12_gnu_extensions.md`, `07_backend_llvm.md` | M6c |
+| M8: Missing Attrs & Builtins | Jules-GNU-Extensions, Jules-Type-System | `12_gnu_extensions.md`, `11_type_system.md` | M6c |
+| M9: Type System Extensions | Jules-Type-System, Jules-Parser | `11_type_system.md`, `05_parser.md` | M6c |
+| M10: Preprocessor Extensions | Jules-Preprocessor | `10_preprocessor.md` | M6c |
+| M11: Freestanding & Kernel Flags | Jules-Build-System, Jules-Backend-LLVM | `14_build_system.md`, `17_cli_compatibility.md` | M7, M8 |
+| M12: GCC CLI & Kbuild | Jules-Build-System | `14_build_system.md`, `17_cli_compatibility.md` | M11 |
+| M13: Validation & QEMU Boot | Jules-Integration, Jules-Kernel-Compilation | `16_kernel_compilation.md` | M7–M12 |
+
+**New Prompt Files**:
+| Prompt | Agent | Dependencies |
+|--------|-------|-------------|
+| `16_kernel_compilation.md` | Jules-Kernel-Compilation | 12, 13, 14 |
+| `17_cli_compatibility.md` | Jules-Build-System | 14 |
+| `18_optimization_passes.md` | Jules-Backend-LLVM | 07 |
+
 ### Phase 4: Production Compiler (FUTURE)
 Optimization passes, debug info, LTO, cross-compilation, and general polish.
 
@@ -71,11 +89,13 @@ Optimization passes, debug info, LTO, cross-compilation, and general polish.
 1. Read `00_protocol.md` for the current workflow rules.
 2. Inspect `README.md`, `QA_VERIFICATION.md`, `Cargo.toml`, and the relevant `src/` modules.
 3. Use the files in `jules_prompts/` as the shared agent memory for status, lessons learned, and blockers.
-4. **Priority: Milestone 6b P0 bugs** — extern function signatures, pointer array indexing, nested member access.
-5. **Validation test files**: Use `/tmp/test_m6b.c` and `/tmp/test_echo.c` patterns to verify fixes (simplified echo.c and struct/pointer test).
-6. **Intermediate validation**: attempt to compile a simplified `echo.c` (no includes, extern puts) and verify correct IR.
-7. Verify changes with `cargo test` and CLI smoke tests before reporting.
-8. Record only confirmed status and remaining blockers in the appropriate prompt file.
+4. **Priority: Milestone 7 — Atomic Builtins**: Implement `__sync_*` and `__atomic_*` families → LLVM `atomicrmw`/`cmpxchg` in `gnu_extensions.rs` and `llvm.rs`. This is the highest-priority kernel blocker.
+5. **Priority: Milestone 8 — Packed structs**: `__attribute__((packed))` → suppress padding in `compute_struct_layout` + LLVM packed struct type.
+6. **Priority: Milestone 11 — Freestanding mode**: `-ffreestanding`, `-mcmodel=kernel`, `-mno-red-zone` are required for any kernel compilation attempt.
+7. **Validation**: After M7+M8, attempt to compile simplified kernel-style code (spinlock, packed struct, container_of macro).
+8. Reference `jules_prompts/16_kernel_compilation.md` for full kernel milestone tracking and QEMU boot protocol.
+9. Verify changes with `cargo test` and CLI smoke tests before reporting.
+10. Record only confirmed status and remaining blockers in the appropriate prompt file.
 
 ## LESSONS LEARNED (Post-Execution Addendum)
 - **Prompt files are the live coordination layer**: this repo snapshot does not ship the old `.optic` spec/task directories, so status should be kept current in `jules_prompts/` instead.
@@ -84,4 +104,8 @@ Optimization passes, debug info, LTO, cross-compilation, and general polish.
 - **Edition**: keep `edition = "2021"` for compatibility with the current toolchain.
 - **Three tokenizers still exist**: lexer, macro expander, and parser token handling remain a coordination risk.
 - **Typed backend exists now**: focus on correctness gaps such as structs, attributes, and complex real-world inputs rather than the old i32-only baseline.
-- **Preprocessor remains a major priority**: SQLite-scale macros are still the most likely blocker for large-source compilation.
+- **Preprocessor remains a major priority**: kernel-scale macros drive complex preprocessing demands.
+- **Kernel compilation is the flagship target**: Linux 6.6 LTS tinyconfig, x86_64, QEMU serial console boot. See `16_kernel_compilation.md` for full protocol.
+- **Progressive validation matters**: always validate coreutils before kernel module, kernel module before full kernel. Don't skip levels.
+- **Atomic builtins are the #1 kernel blocker**: every kernel spinlock, barrier, and synchronization primitive depends on `__sync_*`/`__atomic_*`.
+- **Kbuild passes many flags**: the compiler must gracefully accept unknown flags with a warning, not an error. See `17_cli_compatibility.md` for the full flag matrix.

@@ -89,3 +89,62 @@ asm volatile("lock cmpxchg %1, %2" : "+a"(old) : "r"(new_val), "m"(*ptr) : "memo
 4. `"memory"` clobber generates correct side-effect metadata
 5. Inline-asm tests should be rerun before reporting totals.
 6. Integration test: compile a representative function with inline asm and verify the LLVM IR.
+
+## KERNEL ASM PATTERNS
+Common kernel inline asm patterns that must work correctly:
+
+### Spinlock Acquire/Release
+```c
+static inline void spin_lock(spinlock_t *lock) {
+    asm volatile("1: lock; decb %0\n\t"
+                 "jns 3f\n\t"
+                 "2: pause\n\t"
+                 "cmpb $0, %0\n\t"
+                 "jle 2b\n\t"
+                 "jmp 1b\n\t"
+                 "3:\n" : "+m"(lock->slock) :: "memory");
+}
+```
+
+### Memory Barriers
+```c
+#define barrier() asm volatile("" ::: "memory")
+#define rmb()     asm volatile("lfence" ::: "memory")
+#define wmb()     asm volatile("sfence" ::: "memory")
+#define mb()      asm volatile("mfence" ::: "memory")
+```
+
+### CPUID
+```c
+static inline void cpuid(unsigned int *eax, unsigned int *ebx,
+                         unsigned int *ecx, unsigned int *edx) {
+    asm volatile("cpuid"
+        : "=a"(*eax), "=b"(*ebx), "=c"(*ecx), "=d"(*edx)
+        : "0"(*eax), "2"(*ecx));
+}
+```
+
+### MSR Read/Write
+```c
+static inline unsigned long long rdmsr(unsigned int msr) {
+    unsigned int low, high;
+    asm volatile("rdmsr" : "=a"(low), "=d"(high) : "c"(msr));
+    return ((unsigned long long)high << 32) | low;
+}
+```
+
+### I/O Port Access
+```c
+static inline unsigned char inb(unsigned short port) {
+    unsigned char val;
+    asm volatile("inb %w1, %0" : "=a"(val) : "Nd"(port));
+    return val;
+}
+```
+
+### Note on Atomic Operations
+Modern kernel code is migrating from inline asm atomics to `__sync_*`/`__atomic_*` builtins. However, legacy code and low-level architecture support still use inline asm for:
+- Lock-prefixed instructions (`lock cmpxchg`, `lock xadd`)
+- Architecture-specific barriers
+- CPU feature detection (`cpuid`)
+- MSR/I/O operations

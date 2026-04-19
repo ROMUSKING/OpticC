@@ -8,7 +8,7 @@
 
 ## Executive Summary
 
-The Optic C-Compiler project has completed all major Phase 1 and Phase 2 components. Phase 3 (Linux Kernel Compilation) milestones 1–6a are implemented, and M6b codegen correctness fixes are in progress. Key P0 bugs fixed: extern function declarations with proper param types, pointer-to-pointer array indexing, call argument isolation, nested member access, struct pointer field types, and struct field index correctness. Simplified echo.c compiles and runs end-to-end (OpticC → LLC → Clang → binary). All 339 tests pass with 0 failures.
+The Optic C-Compiler project has completed all major Phase 1 and Phase 2 components. Phase 3 (Linux Kernel Compilation) milestones 1–6c are complete. The compiler now handles switch/goto, 30+ builtins, variadic functions, inline asm, computed goto, case ranges, attribute lowering, bitfields, designated initializers, compound literals, and multi-translation-unit compilation. End-to-end compile→link→run is verified. Next: M7–M13 (atomic builtins → Kbuild integration → Linux 6.6 tinyconfig QEMU boot). All 373 tests pass with 0 failures.
 
 ---
 
@@ -180,7 +180,7 @@ cat /tmp/optic_vfs/path/to/source.c
 cd optic_c && cargo build
 
 # Run all tests
-cargo test   # 348 passed, 0 failed
+cargo test   # 373 passed, 0 failed
 
 # Run specific component tests
 cargo test --lib arena
@@ -272,7 +272,58 @@ cargo test --lib vfs
 - [x] Multi-translation-unit compilation (extern void fix, Builder temp dir collision fix)
 - [x] End-to-end multi-TU: compile → link → run verified
 
-### Milestone 7: Kernel-Scale Validation 📋
-- [ ] Compile minimal out-of-tree kernel module
-- [ ] Compile coreutils/busybox
-- [ ] Kbuild CC=optic_c integration
+### Milestone 7: Atomic Builtins 📋
+- [ ] `__sync_val_compare_and_swap` → LLVM `cmpxchg`
+- [ ] `__sync_lock_test_and_set` / `__sync_lock_release` → LLVM `atomicrmw xchg`
+- [ ] `__sync_fetch_and_add/sub/or/and/xor` → LLVM `atomicrmw`
+- [ ] `__atomic_load_n`, `__atomic_store_n`, `__atomic_exchange_n` → LLVM atomic ops
+- [ ] `__atomic_compare_exchange_n` → LLVM `cmpxchg`
+- [ ] Memory ordering enum: `__ATOMIC_RELAXED` through `__ATOMIC_SEQ_CST`
+- [ ] End-to-end tests: atomic counter, spinlock, CAS loop
+
+### Milestone 8: Attributes & Builtins 📋
+- [ ] `__attribute__((packed))` → packed struct layout
+- [ ] `__attribute__((noinline))` / `__attribute__((always_inline))`
+- [ ] `__attribute__((constructor))` / `__attribute__((destructor))` → `@llvm.global_ctors`/`@llvm.global_dtors`
+- [ ] `__builtin_types_compatible_p`, `__builtin_choose_expr`
+- [ ] End-to-end tests per attribute
+
+### Milestone 9: Type System Extensions 📋
+- [ ] Flexible array members (`struct { int n; char data[]; }`)
+- [ ] Anonymous structs and unions (C11)
+- [ ] `_Static_assert` (compile-time assertion)
+- [ ] `_Thread_local` storage class
+- [ ] `_Atomic` qualifier → LLVM atomic types
+- [ ] End-to-end tests per type feature
+
+### Milestone 10: Preprocessor Extensions 📋
+- [ ] `__has_attribute(x)` → 1 for supported attributes
+- [ ] `__has_builtin(x)` → 1 for supported builtins
+- [ ] `__has_include(<header>)` → 1 if include path resolves
+- [ ] `__VA_OPT__(x)` for variadic macros
+- [ ] `_Pragma("string")` operator
+- [ ] Feature-test macros: `__STDC_VERSION__`, `__GNUC__`, `__GNUC_MINOR__`
+
+### Milestone 11: Freestanding Mode & Kernel Flags 📋
+- [ ] `-ffreestanding` flag (no hosted assumptions)
+- [ ] `-mcmodel=kernel` → LLVM code model
+- [ ] `-mno-red-zone` → LLVM function attribute
+- [ ] `-mno-sse`, `-mno-mmx`, `-mno-sse2` → LLVM target features
+- [ ] `-fno-stack-protector` flag
+
+### Milestone 12: Kbuild Integration 📋
+- [ ] Response files (`@file` argument expansion)
+- [ ] Dependency files (`-MD`, `-MF`, `-MT`)
+- [ ] Force include (`-include file.h`)
+- [ ] Include path variants (`-isystem`, `-iquote`)
+- [ ] Version/info commands (`-dumpversion`, `--version`, `-print-file-name=`)
+- [ ] Graceful handling of unknown flags (warn + continue)
+- [ ] End-to-end: `make CC=optic_c` on coreutils `true.c`
+
+### Milestone 13: Progressive Validation & QEMU Boot 📋
+- [ ] Compile coreutils (`true`, `false`, `yes`, `echo`)
+- [ ] Compile minimal out-of-tree kernel module (hello_world.ko)
+- [ ] `make lib/ CC=optic_c` on Linux 6.6
+- [ ] Full `make tinyconfig` on Linux 6.6 → bzImage
+- [ ] QEMU boot: `qemu-system-x86_64 -kernel bzImage -nographic -append "console=ttyS0"`
+- [ ] Kernel prints boot messages to serial console

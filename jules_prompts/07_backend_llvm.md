@@ -74,6 +74,58 @@ The parser now chains child nodes entirely via first_child chains, not via next_
 - [x] **Multi-TU compilation (M6c)**: Fixed. kind=20 extern void declarations now pre-registered in Pass 1. Builder temp dir collision fixed with atomic invocation ID. End-to-end compile→link→run verified.
 - [x] **System include paths (M6c)**: Verified working. discover_default_include_paths() detects gcc/clang paths, falls back to /usr/include. add_include_path() for -I flag. define_macro() for -D flag.
 
+### KERNEL CODEGEN REQUIREMENTS (M7–M11)
+These backend features are required for Linux kernel compilation:
+
+#### Atomic Instruction Codegen (M7)
+- `__sync_fetch_and_add(ptr, val)` → `atomicrmw add ptr, val seq_cst`
+- `__sync_fetch_and_sub/or/and/xor` → `atomicrmw sub/or/and/xor`
+- `__sync_val_compare_and_swap(ptr, old, new)` → `cmpxchg ptr, old, new seq_cst seq_cst`
+- `__sync_lock_test_and_set(ptr, val)` → `atomicrmw xchg ptr, val acquire`
+- `__sync_lock_release(ptr)` → `store 0, ptr release`
+- `__atomic_load_n(ptr, order)` → `load atomic ptr, <order>`
+- `__atomic_store_n(ptr, val, order)` → `store atomic val, ptr <order>`
+- `__atomic_exchange_n(ptr, val, order)` → `atomicrmw xchg ptr, val <order>`
+- `__atomic_compare_exchange_n` → `cmpxchg` with success/failure ordering
+- `__atomic_fetch_add/sub/and/or/xor` → `atomicrmw` with specified ordering
+- Memory ordering map: `__ATOMIC_RELAXED`→Monotonic, `__ATOMIC_CONSUME`→Monotonic, `__ATOMIC_ACQUIRE`→Acquire, `__ATOMIC_RELEASE`→Release, `__ATOMIC_ACQ_REL`→AcquireRelease, `__ATOMIC_SEQ_CST`→SequentiallyConsistent
+
+#### Packed Struct Types (M8)
+- When `__attribute__((packed))` is present, create LLVM StructType with `isPacked=true`
+- In `register_struct_types_in_node`, check for packed attribute → set packed flag
+- In `compute_struct_layout`, suppress padding when packed
+
+#### Function Attributes (M8)
+- `noinline` → add `Attribute::NoInline` to function
+- `always_inline` → add `Attribute::AlwaysInline` to function
+- `hot` → add `Attribute::Hot` to function (already have `cold`)
+
+#### Global Constructor/Destructor Arrays (M8)
+- `__attribute__((constructor(priority)))` → add function to `@llvm.global_ctors` array
+- `__attribute__((destructor(priority)))` → add function to `@llvm.global_dtors` array
+- Format: `@llvm.global_ctors = appending global [N x { i32, ptr, ptr }] [{ i32 priority, ptr @func, ptr null }]`
+
+#### Kernel Code Model (M11)
+- `-mcmodel=kernel` → set `CodeModel::Kernel` on LLVM TargetMachine
+- This places code in the high address space (above 0xFFFF800000000000)
+
+#### Red Zone Disable (M11)
+- `-mno-red-zone` → add `noredzone` attribute to ALL functions
+- Required for kernel code (interrupts can clobber red zone)
+
+#### Thread-Local Globals (M9)
+- `_Thread_local` / `__thread` → set `thread_local` attribute on LLVM global variable
+- Kernel uses per-CPU variables via thread-local storage
+
+#### Section Control (M11)
+- `-fdata-sections` → each global in its own `.data.<name>` section
+- `-ffunction-sections` → each function in its own `.text.<name>` section
+- Enables linker `--gc-sections` to eliminate unused code
+
+#### Optimization Passes
+- See `jules_prompts/18_optimization_passes.md` for pass pipeline details
+- Currently `llc -O2` provides backend optimization during object generation
+
 ## KNOWN CAVEATS
 - **LLVM 18 target**: Targets `inkwell`'s `llvm18-1-prefer-dynamic` feature. `LLVM_SYS_181_PREFIX=/usr/lib/llvm-18` in `.cargo/config.toml`.
 - **Opaque pointers**: LLVM 18 uses opaque pointers. Loads must carry explicit pointee type.

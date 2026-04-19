@@ -1,6 +1,6 @@
 {
-  "name": "",
-  "description": "",
+  "name": "OpticC",
+  "description": "Autonomous multi-agent C99-to-LLVM compiler targeting Linux kernel compilation",
   "requestFramePermissions": [],
-  "majorCapabilities": []
+  "majorCapabilities": ["c99-compilation", "llvm-codegen", "kernel-compilation", "static-analysis"]
 }

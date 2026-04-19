@@ -88,27 +88,54 @@ OpticC already includes a GNU-extensions module. The current task is to improve 
 - [x] `__builtin_va_copy(dest, src)` → LLVM `llvm.va_copy`
 
 ### Builtins — NOT YET IMPLEMENTED (Kernel Priority)
-- [ ] `__builtin_types_compatible_p(type1, type2)` → needs type system integration
-- [ ] `__builtin_choose_expr(const_expr, expr1, expr2)` → compile-time selection
+- [ ] `__builtin_types_compatible_p(type1, type2)` → needs type system integration [KERNEL-CRITICAL]
+- [ ] `__builtin_choose_expr(const_expr, expr1, expr2)` → compile-time selection [KERNEL-CRITICAL]
 - [x] `__builtin_memcpy/memset/strlen` → external function call (working; LLVM intrinsic upgrade pending)
 - [x] `__builtin_add_overflow/sub_overflow/mul_overflow` → compute + store (conservative, no overflow detection yet)
-- [ ] `__sync_*` atomic builtins → LLVM atomic instructions (kernel uses these heavily)
+- [ ] `__sync_*` atomic builtins → LLVM atomic instructions [KERNEL-CRITICAL] (**kernel uses these heavily**)
   - [x] `__sync_synchronize` → LLVM fence (SequentiallyConsistent)
-- [ ] `__atomic_*` C11-style atomic builtins → LLVM atomicrmw/cmpxchg
-- [ ] `__builtin_ia32_*` x86 intrinsics → LLVM x86 intrinsics (SSE/AVX)
+  - [ ] `__sync_fetch_and_add/sub/or/and/xor(ptr, val)` → LLVM `atomicrmw add/sub/or/and/xor ptr, val seq_cst`
+  - [ ] `__sync_val_compare_and_swap(ptr, old, new)` → LLVM `cmpxchg ptr, old, new seq_cst seq_cst`
+  - [ ] `__sync_lock_test_and_set(ptr, val)` → LLVM `atomicrmw xchg ptr, val acquire`
+  - [ ] `__sync_lock_release(ptr)` → LLVM `store 0, ptr release`
+  - [ ] `__sync_bool_compare_and_swap(ptr, old, new)` → `cmpxchg` + extract success flag
+- [ ] `__atomic_*` C11-style atomic builtins → LLVM atomicrmw/cmpxchg [KERNEL-CRITICAL]
+  - [ ] `__atomic_load_n(ptr, order)` → LLVM `load atomic`
+  - [ ] `__atomic_store_n(ptr, val, order)` → LLVM `store atomic`
+  - [ ] `__atomic_exchange_n(ptr, val, order)` → LLVM `atomicrmw xchg`
+  - [ ] `__atomic_compare_exchange_n(ptr, expected, desired, weak, succ, fail)` → LLVM `cmpxchg`
+  - [ ] `__atomic_fetch_add/sub/and/or/xor(ptr, val, order)` → LLVM `atomicrmw`
+  - [ ] `__atomic_thread_fence(order)` → LLVM `fence`
+  - [ ] `__atomic_signal_fence(order)` → LLVM `fence singlethread`
+  - [ ] Memory ordering constants: `__ATOMIC_RELAXED`(0), `__ATOMIC_CONSUME`(1), `__ATOMIC_ACQUIRE`(2), `__ATOMIC_RELEASE`(3), `__ATOMIC_ACQ_REL`(4), `__ATOMIC_SEQ_CST`(5)
+- [ ] `__builtin_ia32_pause` → x86 `pause` instruction (spin-wait hint)
+- [ ] `__builtin_ia32_*` x86 intrinsics → LLVM x86 intrinsics (SSE/AVX) — low priority
+- [ ] `__builtin_classify_type(expr)` → GCC type classification (int enum)
 - [x] `__builtin_alloca` → LLVM array alloca (dynamic stack allocation)
 
 ### Attributes — LOWERING STATUS (Kernel Priority)
-- [x] `__attribute__((section("name")))` → LLVM section metadata (kernel .init.text etc.) — implemented via `apply_function_attributes`/`apply_global_attributes`
+- [x] `__attribute__((section("name")))` → LLVM section metadata — implemented
 - [x] `__attribute__((weak))` → LLVM ExternalWeak linkage — implemented
-- [x] `__attribute__((visibility("hidden")))` → LLVM Hidden visibility via `as_global_value()` — implemented
+- [x] `__attribute__((visibility("hidden")))` → LLVM Hidden visibility — implemented
 - [x] `__attribute__((aligned(N)))` → LLVM alignment on globals — implemented
 - [x] `__attribute__((noreturn))` → LLVM noreturn function attribute — implemented
 - [x] `__attribute__((cold))` → LLVM cold function attribute — implemented
-- [ ] `__attribute__((packed))` → struct layout without padding
-- [ ] `__attribute__((constructor/destructor))` → LLVM ctors/dtors arrays
+- [ ] `__attribute__((packed))` → struct layout without padding [KERNEL-CRITICAL]
+- [ ] `__attribute__((constructor/destructor))` → LLVM ctors/dtors arrays [KERNEL-CRITICAL]
+- [ ] `__attribute__((noinline))` → LLVM noinline function attribute [KERNEL-CRITICAL]
+- [ ] `__attribute__((always_inline))` → LLVM alwaysinline function attribute [KERNEL-CRITICAL]
+- [ ] `__attribute__((hot))` → LLVM hot function attribute
+- [ ] `__attribute__((deprecated("msg")))` → warning on use
+- [ ] `__attribute__((error("msg")))` / `__attribute__((warning("msg")))` → compile-time diagnostic
 - [ ] `__attribute__((format(printf, m, n)))` → type checking (optional, can ignore)
-- [ ] `__attribute__((noinline/always_inline))` → LLVM function attributes
+- [ ] `__attribute__((regparm(n)))` → x86 calling convention adjustment
+
+### Kernel Compilation Roadmap
+See `jules_prompts/16_kernel_compilation.md` for the full kernel milestone tracker (M7–M13) including:
+- QEMU boot verification protocol
+- Kbuild integration details
+- Progressive validation ladder (coreutils → kernel module → tinyconfig → QEMU boot)
+- Kernel feature checklist with per-milestone tracking
 
 ### Other GNU Extensions
 - [x] `__attribute__((...))` — parsed and consumed (attributes stored for backend)

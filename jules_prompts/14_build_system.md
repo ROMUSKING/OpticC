@@ -101,3 +101,63 @@ OpticC now exposes both single-file compile and multi-file build flows. The curr
 The build system is complete and functional. The benchmark module (`src/benchmark/mod.rs`)
 has been implemented and uses the build system's external tool invocation patterns for
 comparing GCC and Clang compilation performance.
+
+## KBUILD INTEGRATION (M12)
+Required for `CC=optic_c` to work in the Linux kernel Makefile:
+
+### Dependency File Generation
+Kbuild needs dependency files for incremental builds:
+- `-Wp,-MD,path/.file.o.d` → Kbuild's preferred form (preprocessor writes .d file)
+- `-MD` → generate .d file alongside compilation
+- `-MF file.d` → specify output path for .d file
+- `-MP` → add phony targets for each header (prevents make errors on deleted headers)
+- `-MT target` → override the target name in dependency rules
+
+Format of .d files:
+```makefile
+path/to/file.o: path/to/file.c include/header1.h include/header2.h
+
+include/header1.h:
+include/header2.h:
+```
+Implementation: during preprocessing, track all `#include`d files, write them to .d file.
+
+### Force Include
+`-include file.h` → process this file before the main source file.
+Kbuild uses this for `include/linux/kconfig.h` and `include/linux/compiler_types.h`.
+Implementation: prepend the forced file's token stream before the main source tokens.
+
+### Include Path Variants
+- `-isystem path` → system include path (warnings suppressed for headers here)
+- `-iquote path` → path searched only for `"file"` includes, not `<file>` includes
+- `-I path` → ✅ implemented — standard include search path
+
+### Response Files
+`@file` → read flags from file (one per line or space-separated).
+Some build systems generate response files for very long command lines.
+
+### Graceful Flag Handling
+Kbuild passes many GCC-specific flags. OpticC must:
+1. Accept all `-f*`, `-m*`, `-W*` flags without erroring
+2. Implement semantically important flags (see `17_cli_compatibility.md`)
+3. Silently ignore cosmetic/non-essential flags with a warning
+4. NEVER exit with error code for an unrecognized flag during kernel build
+
+### Info Commands
+Kbuild probes the compiler for capabilities:
+- `optic_c --version` → version string (Kbuild parses this)
+- `optic_c -dumpmachine` → target triple (e.g., `x86_64-linux-gnu`)
+- `optic_c -dumpversion` → version number
+- `optic_c -print-file-name=include` → path to compiler's include directory
+
+## OBJECT FILE REQUIREMENTS
+Kernel builds produce relocatable ELF object files:
+- Correct symbol binding: `STB_GLOBAL`, `STB_LOCAL`, `STB_WEAK`
+- Correct visibility: `STV_DEFAULT`, `STV_HIDDEN`, `STV_PROTECTED`
+- Relocations for extern references (symbol table entries)
+- `-fdata-sections` → each global variable in `.data.<name>` section
+- `-ffunction-sections` → each function in `.text.<name>` section
+- Enables linker `--gc-sections` to eliminate unreferenced code
+- Verify with: `readelf -a output.o`, `nm output.o`, `objdump -d output.o`
+
+See `jules_prompts/17_cli_compatibility.md` for the full GCC flag acceptance matrix.

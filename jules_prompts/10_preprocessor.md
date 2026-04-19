@@ -88,3 +88,30 @@ OpticC already includes a substantial preprocessor implementation. The current c
 4. Preprocessed output feeds directly into the parser
 5. `cargo test` passes with 20+ preprocessor-specific tests
 6. Integration test: preprocess a file with 50+ macros and verify correct expansion
+
+## KERNEL PREPROCESSOR REQUIREMENTS (M10)
+The Linux kernel uses advanced preprocessor features for feature detection and compatibility:
+
+### Feature Detection Predicates
+- `__has_attribute(name)` → return 1 if OpticC recognizes the attribute, 0 otherwise. Used in kernel's `compiler_attributes.h` to detect compiler support for each attribute.
+- `__has_builtin(name)` → return 1 if OpticC implements the builtin, 0 otherwise. Used to select between builtin and fallback implementations.
+- `__has_include("file")` / `__has_include(<file>)` → return 1 if the file exists in the include search paths. Used for optional feature inclusion.
+
+### Inline Pragma Support
+- `_Pragma("GCC diagnostic push")` — save current diagnostic state
+- `_Pragma("GCC diagnostic pop")` — restore saved diagnostic state
+- `_Pragma("GCC diagnostic ignored \"-Wfoo\"")` — suppress specific warning
+- Implementation: treat as equivalent to `#pragma GCC diagnostic ...`
+
+### Variadic Macro Extensions
+- `__VA_OPT__(content)` → C2x extension: expands `content` only if `__VA_ARGS__` is non-empty. Used in kernel logging macros.
+- Empty `__VA_ARGS__` handling for GNU extension `##__VA_ARGS__` (delete preceding comma when args empty)
+
+### Feature-Test Macros
+- `__STDC_VERSION__` must be >= 201112L (C11) for `_Static_assert`, `_Generic`, `_Noreturn`
+- `__GNUC__` / `__GNUC_MINOR__` / `__GNUC_PATCHLEVEL__` define GCC compatibility level
+- Kernel checks these to enable/disable compiler-specific features
+
+### Implementation Notes
+- M6c (system headers) is ✅ COMPLETE: `discover_default_include_paths()`, `-I`, `-D` working
+- See `jules_prompts/17_cli_compatibility.md` for full preprocessing flag details (-I, -D, -U, -include, -isystem, -iquote)
