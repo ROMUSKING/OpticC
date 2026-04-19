@@ -1902,6 +1902,11 @@ impl Parser {
     fn parse_unary_expression(&mut self) -> Result<NodeOffset, ParseError> {
         let token = self.current_token();
 
+        // sizeof is a keyword, not a punctuator — check it first
+        if token.kind == TokenKind::Keyword && token.text == "sizeof" {
+            return self.parse_sizeof_expression();
+        }
+
         if token.kind == TokenKind::Punctuator {
             match token.text.as_str() {
                 "++" => {
@@ -1943,9 +1948,6 @@ impl Parser {
                     self.advance();
                     let operand = self.parse_cast_expression()?;
                     return Ok(self.alloc_node(65, 5, NodeOffset::NULL, operand, NodeOffset::NULL));
-                }
-                "sizeof" => {
-                    return self.parse_sizeof_expression();
                 }
                 _ => {}
             }

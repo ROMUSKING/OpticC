@@ -2913,11 +2913,8 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
         };
 
         if !node.flags.contains(NodeFlags::IS_VALID) {
-            eprintln!("[DEBUG lower_expr] kind={} NOT VALID, flags={:?}", node.kind, node.flags);
             return Ok(None);
         }
-
-        eprintln!("[DEBUG lower_expr] kind={} data={} first_child={:?}", node.kind, node.data, node.first_child);
 
         match node.kind {
             60 => self.lower_ident(arena, &node),
@@ -5166,5 +5163,32 @@ mod tests {
         );
         assert!(ir.contains("rare_path"), "Expected function in IR:\n{}", ir);
         assert!(ir.contains("cold"), "Expected cold attribute in IR:\n{}", ir);
+    }
+
+    #[test]
+    fn test_sizeof_int() {
+        let ir = compile_c_to_ir(
+            "int test_sizeof(void) { return sizeof(int); }"
+        );
+        // sizeof(int) should produce 4, returned as i32
+        assert!(ir.contains("ret i32 4"), "Expected ret i32 4 for sizeof(int):\n{}", ir);
+    }
+
+    #[test]
+    fn test_sizeof_char() {
+        let ir = compile_c_to_ir(
+            "int test_sizeof_char(void) { return sizeof(char); }"
+        );
+        // sizeof(char) should produce 1, returned as i32
+        assert!(ir.contains("ret i32 1"), "Expected ret i32 1 for sizeof(char):\n{}", ir);
+    }
+
+    #[test]
+    fn test_ternary_select() {
+        let ir = compile_c_to_ir(
+            "int max(int a, int b) { return a > b ? a : b; }"
+        );
+        // Ternary should produce a select instruction
+        assert!(ir.contains("select"), "Expected select instruction for ternary:\n{}", ir);
     }
 }
