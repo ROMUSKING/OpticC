@@ -2,7 +2,7 @@
 
 **Generated:** 2026-04-19
 **Project:** Optic C-Compiler
-**Status:** PHASE 3 IN PROGRESS — M6b P0+P1+P2 FIXED, 348 TESTS PASS
+**Status:** PHASE 3 IN PROGRESS — M6b+M6c COMPLETE, 373 TESTS PASS
 
 ---
 
@@ -260,14 +260,17 @@ cargo test --lib vfs
 - [x] 3 preprocessor tests: fallback macros defined, linux macros, x86_64 macros
 - [x] Total: 333 tests pass, 0 failures
 
-### Milestone 6b: System Headers & Multi-File Compilation 📋
+### Milestone 6b: Codegen Correctness ✅ (completed 2026-04-19)
 - [x] Multi-variable complex declarators (`int *p = &x, a[10]`)
 - [x] Designated initializers (`.field = value` → GEP+store per field)
 - [x] Compound literals (`(struct foo){.x = 1}` → alloca+store+load)
-- [ ] Bitfield backend codegen (shift/mask patterns)
-- [ ] Preprocessor system include path resolution (-I, /usr/include)
-- [ ] Command-line -D defines for cross-compilation
-- [ ] Multi-translation-unit compilation
+- [x] Bitfield backend codegen (shift/mask patterns: lshr+and for read, and+shl+or+store for write)
+
+### Milestone 6c: System Headers & Multi-File ✅ (completed 2026-04-19)
+- [x] Preprocessor system include path resolution (-I, /usr/include, gcc/clang path detection)
+- [x] Command-line -D defines for cross-compilation
+- [x] Multi-translation-unit compilation (extern void fix, Builder temp dir collision fix)
+- [x] End-to-end multi-TU: compile → link → run verified
 
 ### Milestone 7: Kernel-Scale Validation 📋
 - [ ] Compile minimal out-of-tree kernel module

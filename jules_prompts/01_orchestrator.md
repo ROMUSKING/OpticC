@@ -51,13 +51,13 @@ Arena, DB, Lexer, Macro, Parser, LLVM backend, analysis, and VFS code are all pr
 - [x] **P1: Multi-variable complex declarators**: parse_declarator stores pointer depth in data field; declarator_llvm_type reads it
 - [x] **P2: Designated initializers codegen**: lower_designated_init_into_struct does GEP+store per .field=value pair
 - [x] **P2: Compound literals**: kind=212 AST node, lower_compound_literal does alloca+store+load for structs/scalars/arrays
-- [ ] **P2: Bitfield support**: struct bitfields (`unsigned int readable : 1`) need backend shift/mask patterns (type system layout exists)
+- [x] **P2: Bitfield support**: shift/mask patterns for bitfield read (lshr+and) and write (and+shl+or+store). Parser stores bit_width in kind=27 data field. Backend packs consecutive bitfields into single LLVM storage units. struct_gep_info tracks (gep_index, bit_offset, bit_width) per field.
 
-**Milestone 6c — System Headers & Multi-File** (after 6b correctness):
-- [ ] Preprocessor: resolve `#include <stdio.h>` from system include paths (`-I /usr/include`)
-- [ ] Preprocessor: handle `-D` command-line defines for cross-compilation
-- [ ] Build system: multi-translation-unit compilation with shared symbol tables
-- [ ] Linker integration: generate relocatable .o files via LLC, link with system ld
+**Milestone 6c — System Headers & Multi-File** (✅ COMPLETED 2026-04-19):
+- [x] Preprocessor: resolve `#include <stdio.h>` from system include paths (`-I /usr/include`). discover_default_include_paths() detects gcc/clang paths, falls back to /usr/include.
+- [x] Preprocessor: handle `-D` command-line defines for cross-compilation. define_macro() + CLI parsing working.
+- [x] Build system: multi-translation-unit compilation with shared symbol tables. Fixed: kind=20 extern void declarations now pre-registered; Builder temp dir collision fixed with atomic invocation ID.
+- [x] Linker integration: generate relocatable .o files via LLC, link with system ld. End-to-end verified.
 
 **Milestone 7 — Kernel-Scale Validation**:
 - [ ] Compile a minimal out-of-tree kernel module (.ko) with OpticC

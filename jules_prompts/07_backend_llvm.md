@@ -58,7 +58,7 @@ The parser now chains child nodes entirely via first_child chains, not via next_
 - [x] **P1: Struct return types**: Fixed. specifier_to_llvm_type resolves struct specifiers (kind=4/5) to LLVM struct types. lower_return_stmt handles StructType returns via build_return with struct values.
 - [x] **P1: Assignment expression comparison**: Fixed. lower_assign_expr loads back from lvalue after store, returning runtime instruction instead of compile-time constant. Prevents LLVM constant folding in `(x = 42) > 0`.
 - [x] **P1: Multi-variable complex declarators**: Fixed. parse_declarator stores pointer depth in data field of single kind=7 node; declarator_llvm_type reads depth from data instead of walking next_sibling chain.
-- [x] **P2: Bitfield struct members**: Type system layout exists (src/types/mod.rs:448-483) but backend shift/mask codegen not yet implemented.
+- [x] **P2: Bitfield struct members**: Fixed. Parser stores bit_width in kind=27 data field. Backend packs consecutive bitfields into single LLVM storage units. struct_gep_info tracks (gep_index, bit_offset, bit_width). Read: lshr+and. Write: and+shl+or+store.
 - [x] **P2: Designated initializer codegen**: Fixed. lower_designated_init_into_struct does GEP+store per .field=value pair. Dispatched from lower_var_decl when init is kind=205 and variable is struct type.
 - [x] **P2: Compound literals**: Fixed. Parser detects (type_name){init_list} in parse_cast_expression, creates kind=212 node. Backend lower_compound_literal does alloca+store+load for structs, scalars, and arrays.
 
@@ -68,11 +68,11 @@ The parser now chains child nodes entirely via first_child chains, not via next_
 - [x] **Case ranges (M5)**: `case 1 ... 5:` parsed as kind=54, expanded to multiple switch entries in `collect_switch_cases`. Capped at 256 entries per range.
 - [x] **Attribute lowering (M6a)**: `extract_attributes` walks kind=200 AST children. `apply_function_attributes` handles weak/section/visibility/noreturn/cold. `apply_global_attributes` handles weak/section/aligned/visibility.
 - [x] **Block scope (M6a)**: `scope_stack` field on LlvmBackend. `push_scope()`/`pop_scope()` in `lower_compound`. `insert_scoped_variable()` saves/restores overwritten bindings.
-- [ ] **Bitfield support (M6b)**: Kernel structs use bitfields extensively. Need GEP + shift/mask patterns for bitfield access.
-- [ ] **Designated initializers (M6b)**: `.field = value` and `[index] = value` in struct/array initializers.
-- [ ] **Compound literals (M6b)**: `(struct foo){.x = 1}` → alloca + store pattern.
-- [ ] **Multi-TU compilation (M6b)**: shared symbol tables across translation units, extern declarations, tentative definitions.
-- [ ] **System include paths (M6b)**: `-I /usr/include` in preprocessor for `#include <stdio.h>` resolution.
+- [x] **Bitfield support (M6b)**: Implemented. Parser stores bit_width in kind=27 data field. Backend packs bitfields, uses shift/mask for read (lshr+and) and write (and+shl+or+store). struct_gep_info HashMap tracks per-field metadata.
+- [x] **Designated initializers (M6b)**: Fixed. lower_designated_init_into_struct does GEP+store per .field=value pair. Field name stored in arena.get_string(NodeOffset(node.data)).
+- [x] **Compound literals (M6b)**: Fixed. Parser creates kind=212 in parse_cast_expression. Backend lower_compound_literal does alloca+store+load for structs/scalars/arrays.
+- [x] **Multi-TU compilation (M6c)**: Fixed. kind=20 extern void declarations now pre-registered in Pass 1. Builder temp dir collision fixed with atomic invocation ID. End-to-end compile→link→run verified.
+- [x] **System include paths (M6c)**: Verified working. discover_default_include_paths() detects gcc/clang paths, falls back to /usr/include. add_include_path() for -I flag. define_macro() for -D flag.
 
 ## KNOWN CAVEATS
 - **LLVM 18 target**: Targets `inkwell`'s `llvm18-1-prefer-dynamic` feature. `LLVM_SYS_181_PREFIX=/usr/lib/llvm-18` in `.cargo/config.toml`.

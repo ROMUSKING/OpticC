@@ -3307,4 +3307,144 @@ const char *s = STR(hello world);"#;
         assert!(names.contains(&"__x86_64__"), "Expected __x86_64__ on x86_64");
         assert!(names.contains(&"__LP64__"), "Expected __LP64__ on x86_64");
     }
+
+    /// Verify that `-I` style include paths work: a header in an external
+    /// directory is found when the directory is registered via `add_include_path`,
+    /// and macros defined inside that header are expanded correctly.
+    #[test]
+    fn test_include_path_resolves_external_header() {
+        let (mut pp, _db_dir) = create_test_preprocessor();
+
+        // Create a *separate* temp directory to act as the include path.
+        let inc_dir = TempDir::new().unwrap();
+        let header_path = inc_dir.path().join("myheader.h");
+        fs::write(&header_path, "#define MYCONST 99\n").unwrap();
+
+        // Register the include directory – mirrors the `-I` CLI flow.
+        pp.add_include_path(inc_dir.path().to_str().unwrap());
+
+        // Source that includes the header via a quoted include and uses the macro.
+        let source = "#include \"myheader.h\"\nint val = MYCONST;\n";
+        let tokens = pp.process_source(source, "test_ext.c").unwrap();
+
+        let non_ws: Vec<&Token> = tokens.iter().filter(|t| !t.is_whitespace()).collect();
+        // The macro MYCONST from the header should have been expanded to 99.
+        assert!(
+            non_ws.iter().any(|t| t.text == "99"),
+            "Expected MYCONST to expand to 99 via included header; tokens: {:?}",
+            non_ws.iter().map(|t| &t.text).collect::<Vec<_>>()
+        );
+        assert!(
+            non_ws.iter().any(|t| t.text == "val"),
+            "Expected identifier 'val' in output"
+        );
+    }
+
+    /// Verify that `-D` style command-line defines work: `define_macro` makes
+    /// the value available for expansion in subsequently processed source.
+    #[test]
+    fn test_command_line_define_substitution() {
+        let (mut pp, _db_dir) = create_test_preprocessor();
+
+        // Simulate `-DMYVAL=42`
+        pp.define_macro("MYVAL", "42");
+
+        let source = "int x = MYVAL;\n";
+        let tokens = pp.process_source(source, "test_define.c").unwrap();
+
+        let non_ws: Vec<&Token> = tokens.iter().filter(|t| !t.is_whitespace()).collect();
+        assert!(
+            non_ws.iter().any(|t| t.text == "42"),
+            "Expected MYVAL to expand to 42; tokens: {:?}",
+            non_ws.iter().map(|t| &t.text).collect::<Vec<_>>()
+        );
+    }
+
+    /// Verify that `-D` defines without a value default to "1" (tested via
+    /// `#ifdef` conditional).
+    #[test]
+    fn test_command_line_define_flag_only() {
+        let (mut pp, _db_dir) = create_test_preprocessor();
+
+        // Simulate `-DDEBUG` (no value → "1")
+        pp.define_macro("DEBUG", "1");
+
+        let source = "#ifdef DEBUG\nint debug_on = 1;\n#else\nint debug_on = 0;\n#endif\n";
+        let tokens = pp.process_source(source, "test_flag.c").unwrap();
+
+        let non_ws: Vec<&Token> = tokens.iter().filter(|t| !t.is_whitespace()).collect();
+        assert!(
+            non_ws.iter().any(|t| t.text == "debug_on"),
+            "Expected 'debug_on' in output"
+        );
+        // Should take the #ifdef branch, so the value should be 1 (not 0).
+        let texts: Vec<&str> = non_ws.iter().map(|t| t.text.as_str()).collect();
+        // Pattern: int debug_on = 1 ;
+        let pos = texts.iter().position(|&t| t == "debug_on").unwrap();
+        assert_eq!(texts[pos + 1], "=");
+        assert_eq!(texts[pos + 2], "1", "Expected debug_on = 1 in #ifdef DEBUG branch");
+    }
+
+    /// Verify that `discover_default_include_paths()` finds at least one
+    /// existing include path on this system. On a typical Linux CI runner with
+    /// gcc/clang installed, `/usr/include` (or compiler-detected paths) should
+    /// appear.
+    #[test]
+    fn test_discover_default_include_paths_non_empty() {
+        let paths = Preprocessor::discover_default_include_paths();
+        assert!(
+            !paths.is_empty(),
+            "Expected at least one default include path; got none"
+        );
+        // Every returned path must actually exist on disk.
+        for p in &paths {
+            assert!(
+                p.exists(),
+                "Default include path {} does not exist",
+                p.display()
+            );
+        }
+    }
+
+    /// On Linux, `/usr/include` should be among the discovered paths (either
+    /// directly or via compiler detection).
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_discover_default_include_paths_has_usr_include() {
+        let paths = Preprocessor::discover_default_include_paths();
+        let has_usr_include = paths.iter().any(|p| p == Path::new("/usr/include"));
+        assert!(
+            has_usr_include,
+            "Expected /usr/include among default paths; got: {:?}",
+            paths
+        );
+    }
+
+    /// End-to-end: include path + define work together. A header uses a
+    /// command-line define to conditionally emit code.
+    #[test]
+    fn test_include_path_and_define_combined() {
+        let (mut pp, _db_dir) = create_test_preprocessor();
+
+        let inc_dir = TempDir::new().unwrap();
+        let header = inc_dir.path().join("config.h");
+        fs::write(
+            &header,
+            "#ifdef USE_FEATURE\n#define FEATURE_VAL 77\n#else\n#define FEATURE_VAL 0\n#endif\n",
+        )
+        .unwrap();
+
+        pp.add_include_path(inc_dir.path().to_str().unwrap());
+        pp.define_macro("USE_FEATURE", "1");
+
+        let source = "#include \"config.h\"\nint feat = FEATURE_VAL;\n";
+        let tokens = pp.process_source(source, "combo.c").unwrap();
+
+        let non_ws: Vec<&Token> = tokens.iter().filter(|t| !t.is_whitespace()).collect();
+        assert!(
+            non_ws.iter().any(|t| t.text == "77"),
+            "Expected FEATURE_VAL=77 when USE_FEATURE is defined; tokens: {:?}",
+            non_ws.iter().map(|t| &t.text).collect::<Vec<_>>()
+        );
+    }
 }

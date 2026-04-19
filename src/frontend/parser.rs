@@ -976,9 +976,10 @@ impl Parser {
                 && self.current_token().text == ":"
             {
                 self.advance(); // skip ':'
-                let _width = self.parse_constant_expression()?;
+                let width = self.parse_constant_expression()?;
+                let width_val = self.arena.get(width).map(|n| if n.kind == 61 { n.data } else { 0 }).unwrap_or(0);
                 let bitfield_node =
-                    self.alloc_node(27, 0, NodeOffset::NULL, NodeOffset::NULL, NodeOffset::NULL);
+                    self.alloc_node(27, width_val, NodeOffset::NULL, NodeOffset::NULL, NodeOffset::NULL);
                 self.link_siblings(&mut first_declarator, &mut last_declarator, bitfield_node);
                 continue;
             }
@@ -995,10 +996,11 @@ impl Parser {
                 && self.current_token().text == ":"
             {
                 self.advance(); // skip ':'
-                let _width = self.parse_constant_expression()?;
+                let width = self.parse_constant_expression()?;
+                let width_val = self.arena.get(width).map(|n| if n.kind == 61 { n.data } else { 0 }).unwrap_or(0);
                 // Wrap as bitfield node (kind=27) with declarator as child
                 let bitfield_node =
-                    self.alloc_node(27, 0, NodeOffset::NULL, declarator, NodeOffset::NULL);
+                    self.alloc_node(27, width_val, NodeOffset::NULL, declarator, NodeOffset::NULL);
                 self.link_siblings(&mut first_declarator, &mut last_declarator, bitfield_node);
             } else {
                 self.link_siblings(&mut first_declarator, &mut last_declarator, declarator);

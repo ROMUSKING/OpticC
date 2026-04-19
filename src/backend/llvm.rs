@@ -41,6 +41,15 @@ pub struct LlvmBackend<'ctx, 'types> {
     /// Scope stack for block-scoped variable shadowing. Each entry saves variable
     /// bindings that were overwritten when entering a new block scope.
     scope_stack: Vec<HashMap<String, Option<VariableBinding<'ctx>>>>,
+    /// Bitfield GEP info: struct_tag → field_name → (gep_index, Option<(bit_offset, bit_width)>).
+    /// Tracks how each struct member maps to LLVM struct field indices, with
+    /// optional bit-level packing metadata for bitfield members.
+    struct_gep_info: HashMap<String, HashMap<String, (u32, Option<(u32, u32)>)>>,
+    /// Maps variable name → struct tag name (for looking up gep_info).
+    var_struct_tag: HashMap<String, String>,
+    /// Set by `lower_member_access_ptr` when the access resolved a bitfield.
+    /// Consumed by callers that need shift/mask codegen for read or write.
+    last_bitfield_access: Option<(u32, u32)>,
 }
 
 #[derive(Clone, Copy)]
@@ -78,6 +87,9 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
             break_stack: Vec::new(),
             continue_stack: Vec::new(),
             scope_stack: Vec::new(),
+            struct_gep_info: HashMap::new(),
+            var_struct_tag: HashMap::new(),
+            last_bitfield_access: None,
         }
     }
 
@@ -107,6 +119,9 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
             break_stack: Vec::new(),
             continue_stack: Vec::new(),
             scope_stack: Vec::new(),
+            struct_gep_info: HashMap::new(),
+            var_struct_tag: HashMap::new(),
+            last_bitfield_access: None,
         }
     }
 
@@ -291,6 +306,24 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                     let _ = self.pre_register_func_def(arena, node);
                 } else if node.kind == 22 {
                     let _ = self.lower_func_decl(arena, node);
+                } else if node.kind == 20 {
+                    // A kind=20 declaration may contain a function declarator
+                    // (e.g. `extern void foo(int);`). Walk its children to find
+                    // any function declarator and pre-register it.
+                    let mut decl_child = node.first_child;
+                    while decl_child != NodeOffset::NULL {
+                        if let Some(c) = arena.get(decl_child) {
+                            if matches!(c.kind, 7..=9) {
+                                if self.find_function_declarator_offset(arena, decl_child).is_some() {
+                                    let _ = self.lower_func_decl(arena, node);
+                                    break;
+                                }
+                            }
+                            decl_child = c.next_sibling;
+                        } else {
+                            break;
+                        }
+                    }
                 }
                 prescan_offset = node.next_sibling;
             } else {
@@ -360,6 +393,16 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                     }
                     22 => { let _ = self.lower_func_decl(arena, child); }
                     23 => { let _ = self.lower_func_def(arena, child); }
+                    7..=9 => {
+                        // A declarator containing a function declarator represents
+                        // a forward / extern function declaration wrapped in a
+                        // kind=20 declaration node (e.g. `extern void foo(int);`).
+                        // Delegate to lower_func_decl with the parent declaration
+                        // so it can walk the full specifier + declarator chain.
+                        if self.find_function_declarator_offset(arena, child_offset).is_some() {
+                            let _ = self.lower_func_decl(arena, node);
+                        }
+                    }
                     _ => {}
                 }
                 child_offset = child.next_sibling;
@@ -561,18 +604,32 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                         if !self.struct_tag_types.contains_key(&tag_name) {
                             let field_names = Self::collect_struct_field_names(arena, child);
                             let mut field_types: Vec<BasicTypeEnum<'ctx>> = Vec::new();
+                            // Track bitfield info: field_name → (gep_idx, Option<(bit_offset, bit_width)>)
+                            let mut gep_info: HashMap<String, (u32, Option<(u32, u32)>)> = HashMap::new();
+                            let mut gep_idx: u32 = 0;
+                            let mut field_name_idx: usize = 0;
+                            // Track current bitfield group: (base_kind, bits_used, storage_bit_capacity)
+                            let mut bitfield_group: Option<(u16, u32, u32)> = None;
+
                             let mut member_off = child.first_child;
                             while member_off != NodeOffset::NULL {
                                 if let Some(m) = arena.get(member_off) {
-                                    // Determine field type by walking the member's children
+                                    // Determine field type and check for bitfield
                                     let mut has_pointer = false;
                                     let mut base_kind = 2u16; // default to int
+                                    let mut bitfield_width: Option<u32> = None;
                                     let mut check_off = m.first_child;
                                     while check_off != NodeOffset::NULL {
                                         if let Some(cn) = arena.get(check_off) {
                                             match cn.kind {
                                                 1..=6 | 10..=13 | 83 | 84 => base_kind = cn.kind,
                                                 7 => has_pointer = true,
+                                                27 => {
+                                                    // Bitfield node: data = width
+                                                    if cn.data > 0 {
+                                                        bitfield_width = Some(cn.data);
+                                                    }
+                                                }
                                                 _ => {}
                                             }
                                             check_off = cn.next_sibling;
@@ -580,11 +637,45 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                                             break;
                                         }
                                     }
-                                    if has_pointer {
-                                        field_types.push(self.context.ptr_type(AddressSpace::default()).as_basic_type_enum());
+
+                                    let current_name = field_names.get(field_name_idx).cloned()
+                                        .unwrap_or_else(|| format!("_field{}", field_name_idx));
+                                    field_name_idx += 1;
+
+                                    if let Some(bw) = bitfield_width {
+                                        // This is a bitfield member
+                                        let storage_bits = self.node_kind_bit_width(base_kind);
+                                        if let Some((grp_kind, ref mut bits_used, capacity)) = bitfield_group {
+                                            if grp_kind == base_kind && *bits_used + bw <= capacity {
+                                                // Fits in current group
+                                                gep_info.insert(current_name, (gep_idx - 1, Some((*bits_used, bw))));
+                                                *bits_used += bw;
+                                            } else {
+                                                // Start new storage unit
+                                                field_types.push(self.node_kind_to_llvm_type(base_kind));
+                                                gep_info.insert(current_name, (gep_idx, Some((0, bw))));
+                                                bitfield_group = Some((base_kind, bw, storage_bits));
+                                                gep_idx += 1;
+                                            }
+                                        } else {
+                                            // Start first bitfield group
+                                            field_types.push(self.node_kind_to_llvm_type(base_kind));
+                                            gep_info.insert(current_name, (gep_idx, Some((0, bw))));
+                                            bitfield_group = Some((base_kind, bw, storage_bits));
+                                            gep_idx += 1;
+                                        }
                                     } else {
-                                        field_types.push(self.node_kind_to_llvm_type(base_kind));
+                                        // Non-bitfield member: close any open bitfield group
+                                        bitfield_group = None;
+                                        if has_pointer {
+                                            field_types.push(self.context.ptr_type(AddressSpace::default()).as_basic_type_enum());
+                                        } else {
+                                            field_types.push(self.node_kind_to_llvm_type(base_kind));
+                                        }
+                                        gep_info.insert(current_name, (gep_idx, None));
+                                        gep_idx += 1;
                                     }
+
                                     member_off = m.next_sibling;
                                 } else {
                                     break;
@@ -593,7 +684,10 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                             if !field_types.is_empty() {
                                 let st = self.context.struct_type(&field_types, false);
                                 self.struct_tag_types.insert(tag_name.clone(), st);
-                                self.struct_tag_fields.insert(tag_name, field_names);
+                                self.struct_tag_fields.insert(tag_name.clone(), field_names);
+                                if gep_info.values().any(|(_, bf)| bf.is_some()) {
+                                    self.struct_gep_info.insert(tag_name, gep_info);
+                                }
                             }
                         }
                     }
@@ -618,6 +712,17 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
             83 => self.context.f32_type().as_basic_type_enum(),
             84 => self.context.f64_type().as_basic_type_enum(),
             _ => self.context.i32_type().as_basic_type_enum(),
+        }
+    }
+
+    /// Return the bit width of a storage unit for a given AST type-specifier kind.
+    fn node_kind_bit_width(&self, kind: u16) -> u32 {
+        match kind {
+            1 | 3 => 8,          // void (treated as i8), char
+            10 => 16,            // short
+            2 | 6 | 12 | 13 => 32, // int, enum, signed, unsigned
+            11 => 64,            // long
+            _ => 32,
         }
     }
 
@@ -838,6 +943,16 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                                         .insert(var_name.clone(), struct_type);
                                 }
                             }
+                            // Record struct tag for bitfield lookups
+                            if matches!(spec_kind, 4 | 5) {
+                                if let Some(sn) = spec_node {
+                                    if sn.data != 0 {
+                                        if let Some(tag) = arena.get_string(NodeOffset(sn.data)) {
+                                            self.var_struct_tag.insert(var_name.clone(), tag.to_string());
+                                        }
+                                    }
+                                }
+                            }
                             self.insert_scoped_variable(
                                 var_name.clone(),
                                 VariableBinding {
@@ -907,6 +1022,16 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                                         .insert(var_name.clone(), struct_type);
                                 }
                             }
+                            // Record struct tag for bitfield lookups
+                            if matches!(spec_kind, 4 | 5) {
+                                if let Some(sn) = spec_node {
+                                    if sn.data != 0 {
+                                        if let Some(tag) = arena.get_string(NodeOffset(sn.data)) {
+                                            self.var_struct_tag.insert(var_name.clone(), tag.to_string());
+                                        }
+                                    }
+                                }
+                            }
                             self.insert_scoped_variable(
                                 var_name,
                                 VariableBinding {
@@ -947,6 +1072,9 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
         arena: &Arena,
         offset: NodeOffset,
     ) -> Result<Option<(PointerValue<'ctx>, BasicTypeEnum<'ctx>)>, BackendError> {
+        // Clear bitfield state; it will be set by lower_member_access_ptr if needed
+        self.last_bitfield_access = None;
+
         let node = match arena.get(offset) {
             Some(node) => node,
             None => return Ok(None),
@@ -986,6 +1114,9 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
         arena: &Arena,
         node: &CAstNode,
     ) -> Result<Option<(PointerValue<'ctx>, BasicTypeEnum<'ctx>)>, BackendError> {
+        // Clear bitfield state from any previous call
+        self.last_bitfield_access = None;
+
         let base_offset = node.first_child;
         let field_offset = node.next_sibling;
 
@@ -1010,11 +1141,22 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
         });
 
         if let Some(ref base_name) = base_name {
-            let field_idx = self
-                .struct_fields
-                .get(base_name)
-                .and_then(|fields| fields.iter().position(|f| f == &field_name))
-                .unwrap_or(0) as u32;
+            // Look up bitfield/gep info from struct tag metadata
+            let gep_lookup = self.var_struct_tag.get(base_name).cloned()
+                .and_then(|tag| {
+                    self.struct_gep_info.get(&tag)
+                        .and_then(|m| m.get(&field_name).copied())
+                });
+
+            let field_idx = if let Some((idx, bf)) = gep_lookup {
+                self.last_bitfield_access = bf;
+                idx
+            } else {
+                self.struct_fields
+                    .get(base_name)
+                    .and_then(|fields| fields.iter().position(|f| f == &field_name))
+                    .unwrap_or(0) as u32
+            };
 
             if node.data == 1 {
                 // Arrow operator: base is a pointer to struct
@@ -1347,12 +1489,57 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
 
     fn build_struct_llvm_type(&self, arena: &Arena, node: &CAstNode) -> BasicTypeEnum<'ctx> {
         let mut field_types: Vec<BasicTypeEnum<'ctx>> = Vec::new();
+        // Track current bitfield group to pack consecutive bitfields into a single storage unit
+        let mut bitfield_group: Option<(u16, u32, u32)> = None; // (base_kind, bits_used, capacity)
         let mut member_off = node.first_child;
         while member_off != NodeOffset::NULL {
             if let Some(member) = arena.get(member_off) {
-                let member_kind = arena.get(member.first_child).map(|n| n.kind).unwrap_or(2);
-                let ft = self.node_kind_to_llvm_type(member_kind);
-                field_types.push(ft);
+                // Walk children to detect type and bitfield
+                let mut base_kind = 2u16;
+                let mut has_pointer = false;
+                let mut bitfield_width: Option<u32> = None;
+                let mut check_off = member.first_child;
+                while check_off != NodeOffset::NULL {
+                    if let Some(cn) = arena.get(check_off) {
+                        match cn.kind {
+                            1..=6 | 10..=13 | 83 | 84 => base_kind = cn.kind,
+                            7 => has_pointer = true,
+                            27 => {
+                                if cn.data > 0 {
+                                    bitfield_width = Some(cn.data);
+                                }
+                            }
+                            _ => {}
+                        }
+                        check_off = cn.next_sibling;
+                    } else {
+                        break;
+                    }
+                }
+
+                if let Some(bw) = bitfield_width {
+                    let storage_bits = self.node_kind_bit_width(base_kind);
+                    if let Some((grp_kind, ref mut bits_used, capacity)) = bitfield_group {
+                        if grp_kind == base_kind && *bits_used + bw <= capacity {
+                            *bits_used += bw;
+                            // Same storage unit – no new field_type
+                        } else {
+                            field_types.push(self.node_kind_to_llvm_type(base_kind));
+                            bitfield_group = Some((base_kind, bw, storage_bits));
+                        }
+                    } else {
+                        field_types.push(self.node_kind_to_llvm_type(base_kind));
+                        bitfield_group = Some((base_kind, bw, storage_bits));
+                    }
+                } else {
+                    bitfield_group = None;
+                    if has_pointer {
+                        field_types.push(self.context.ptr_type(AddressSpace::default()).as_basic_type_enum());
+                    } else {
+                        field_types.push(self.node_kind_to_llvm_type(base_kind));
+                    }
+                }
+
                 member_off = member.next_sibling;
             } else {
                 break;
@@ -1380,6 +1567,27 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                             if let Some(name) = arena.get_string(NodeOffset(child.data)) {
                                 names.push(name.to_string());
                                 found = true;
+                                break;
+                            }
+                        }
+                        // Descend into bitfield wrapper (kind=27) to find ident
+                        if child.kind == 27 && !found {
+                            let mut inner = child.first_child;
+                            while inner != NodeOffset::NULL {
+                                if let Some(inner_n) = arena.get(inner) {
+                                    if inner_n.kind == 60 {
+                                        if let Some(name) = arena.get_string(NodeOffset(inner_n.data)) {
+                                            names.push(name.to_string());
+                                            found = true;
+                                            break;
+                                        }
+                                    }
+                                    inner = inner_n.next_sibling;
+                                } else {
+                                    break;
+                                }
+                            }
+                            if found {
                                 break;
                             }
                         }
@@ -1701,6 +1909,7 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
         }
         self.struct_fields.clear();
         self.pointer_struct_types.clear();
+        self.var_struct_tag.clear();
         self.label_blocks.clear();
         self.current_return_type = if is_void_ret { None } else { Some(ret_llvm) };
 
@@ -3949,6 +4158,38 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
         let Some((field_ptr, field_llvm_type)) = self.lower_member_access_ptr(arena, node)? else {
             return Ok(None);
         };
+
+        // Check if this was a bitfield access (set by lower_member_access_ptr)
+        if let Some((bit_offset, bit_width)) = self.last_bitfield_access.take() {
+            // Bitfield READ: load storage unit, shift right, mask
+            let storage_val = self
+                .builder
+                .build_load(field_llvm_type, field_ptr, "bf.storage")
+                .map_err(|_| BackendError::InvalidNode)?;
+            let int_val = storage_val.into_int_value();
+            let int_type = int_val.get_type();
+
+            // Right-shift by bit_offset
+            let shifted = if bit_offset > 0 {
+                let shift_amt = int_type.const_int(bit_offset as u64, false);
+                self.builder
+                    .build_right_shift(int_val, shift_amt, false, "bf.shr")
+                    .map_err(|_| BackendError::InvalidNode)?
+            } else {
+                int_val
+            };
+
+            // AND-mask with (1 << bit_width) - 1
+            let mask_val = (1u64 << bit_width) - 1;
+            let mask = int_type.const_int(mask_val, false);
+            let masked = self
+                .builder
+                .build_and(shifted, mask, "bf.mask")
+                .map_err(|_| BackendError::InvalidNode)?;
+
+            return Ok(Some(masked.into()));
+        }
+
         let val = self
             .builder
             .build_load(field_llvm_type, field_ptr, &field_name)
@@ -4083,6 +4324,91 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
         let Some((lhs_ptr, lhs_type)) = self.lower_lvalue_ptr(arena, lhs_offset)? else {
             return Ok(Some(rhs_val));
         };
+
+        // Check if the lvalue target is a bitfield (set by lower_member_access_ptr
+        // via lower_lvalue_ptr → kind=69 path)
+        if let Some((bit_offset, bit_width)) = self.last_bitfield_access.take() {
+            // Bitfield WRITE: read-modify-write on the storage unit
+            let new_val = if node.data == 19 {
+                rhs_val
+            } else {
+                // For compound assignment, read the current bitfield value first
+                let storage_val = self
+                    .builder
+                    .build_load(lhs_type, lhs_ptr, "bf.assign.storage")
+                    .map_err(|_| BackendError::InvalidNode)?;
+                let int_val = storage_val.into_int_value();
+                let int_type = int_val.get_type();
+                let shifted = if bit_offset > 0 {
+                    let sh = int_type.const_int(bit_offset as u64, false);
+                    self.builder.build_right_shift(int_val, sh, false, "bf.ca.shr")
+                        .map_err(|_| BackendError::InvalidNode)?
+                } else {
+                    int_val
+                };
+                let field_mask = int_type.const_int((1u64 << bit_width) - 1, false);
+                let current_bf = self.builder.build_and(shifted, field_mask, "bf.ca.cur")
+                    .map_err(|_| BackendError::InvalidNode)?;
+                self.apply_assignment_op(node.data, current_bf.into(), rhs_val)?
+            };
+
+            // Load current storage unit
+            let old_storage = self
+                .builder
+                .build_load(lhs_type, lhs_ptr, "bf.old")
+                .map_err(|_| BackendError::InvalidNode)?
+                .into_int_value();
+            let int_type = old_storage.get_type();
+
+            // Clear the bitfield's bits: old & ~(field_mask << bit_offset)
+            let field_mask_val = (1u64 << bit_width) - 1;
+            let positioned_mask = field_mask_val << bit_offset;
+            let clear_mask = int_type.const_int(!positioned_mask, false);
+            let cleared = self
+                .builder
+                .build_and(old_storage, clear_mask, "bf.cleared")
+                .map_err(|_| BackendError::InvalidNode)?;
+
+            // Position the new value: (new_val & field_mask) << bit_offset
+            let new_int = if new_val.is_int_value() {
+                let nv = new_val.into_int_value();
+                if nv.get_type().get_bit_width() != int_type.get_bit_width() {
+                    self.builder
+                        .build_int_z_extend_or_bit_cast(nv, int_type, "bf.zext")
+                        .map_err(|_| BackendError::InvalidNode)?
+                } else {
+                    nv
+                }
+            } else {
+                int_type.const_int(0, false)
+            };
+            let field_mask_const = int_type.const_int(field_mask_val, false);
+            let masked_new = self
+                .builder
+                .build_and(new_int, field_mask_const, "bf.new.masked")
+                .map_err(|_| BackendError::InvalidNode)?;
+            let shifted_new = if bit_offset > 0 {
+                let sh = int_type.const_int(bit_offset as u64, false);
+                self.builder
+                    .build_left_shift(masked_new, sh, "bf.new.shl")
+                    .map_err(|_| BackendError::InvalidNode)?
+            } else {
+                masked_new
+            };
+
+            // OR together: cleared | shifted_new
+            let result = self
+                .builder
+                .build_or(cleared, shifted_new, "bf.insert")
+                .map_err(|_| BackendError::InvalidNode)?;
+
+            self.builder
+                .build_store(lhs_ptr, result)
+                .map_err(|_| BackendError::InvalidNode)?;
+
+            // Return the written bitfield value (masked, not the whole storage unit)
+            return Ok(Some(masked_new.into()));
+        }
 
         let value_to_store = if node.data == 19 {
             rhs_val
@@ -5980,5 +6306,256 @@ mod tests {
                 "Expected store of 3 for .a:\n{}", ir);
         assert!(ir.contains("store i32 7"),
                 "Expected store of 7 for .b:\n{}", ir);
+    }
+
+    // ------------------------------------------------------------------ //
+    //  Bitfield codegen tests
+    // ------------------------------------------------------------------ //
+
+    #[test]
+    fn test_bitfield_struct_type() {
+        // Three 1-bit bitfields of unsigned int should pack into a single i32
+        let ir = compile_c_to_ir(
+            "struct flags { \
+                 unsigned int readable : 1; \
+                 unsigned int writable : 1; \
+                 unsigned int executable : 1; \
+             }; \
+             int test(void) { \
+                 struct flags f; \
+                 f.readable = 1; \
+                 f.writable = 0; \
+                 f.executable = 1; \
+                 return f.readable + f.executable; \
+             }"
+        );
+        // The struct should be { i32 } (one storage unit), not { i32, i32, i32 }
+        assert!(ir.contains("{ i32 }"),
+                "Expected packed bitfield struct {{ i32 }}:\n{}", ir);
+        // Bitfield writes should use OR to insert bits
+        assert!(ir.contains("bf.insert"),
+                "Expected bf.insert (OR) for bitfield write:\n{}", ir);
+        // Bitfield writes should clear old bits with AND
+        assert!(ir.contains("bf.cleared"),
+                "Expected bf.cleared (AND) for bitfield clear:\n{}", ir);
+        // Bitfield reads should use AND mask
+        assert!(ir.contains("bf.mask"),
+                "Expected bf.mask (AND) for bitfield read:\n{}", ir);
+    }
+
+    #[test]
+    fn test_bitfield_read_shift_mask() {
+        // Verify the second bitfield (writable at bit_offset=1) uses a shift
+        let ir = compile_c_to_ir(
+            "struct flags { \
+                 unsigned int readable : 1; \
+                 unsigned int writable : 1; \
+             }; \
+             int get_writable(void) { \
+                 struct flags f; \
+                 f.readable = 1; \
+                 f.writable = 1; \
+                 return f.writable; \
+             }"
+        );
+        // Reading writable (bit_offset=1) needs lshr by 1
+        assert!(ir.contains("bf.shr"),
+                "Expected bf.shr (right shift) for non-zero bit_offset read:\n{}", ir);
+        assert!(ir.contains("bf.mask"),
+                "Expected bf.mask for bitfield read:\n{}", ir);
+    }
+
+    #[test]
+    fn test_bitfield_write_shift() {
+        // Verify writing to a non-zero bit_offset field uses shl
+        // Use a function parameter so LLVM can't constant-fold the shift
+        let ir = compile_c_to_ir(
+            "struct flags { \
+                 unsigned int readable : 1; \
+                 unsigned int writable : 1; \
+             }; \
+             void set_writable(int val) { \
+                 struct flags f; \
+                 f.writable = val; \
+             }"
+        );
+        // Writing writable (bit_offset=1) needs shl by 1
+        assert!(ir.contains("bf.new.shl"),
+                "Expected bf.new.shl (left shift) for non-zero bit_offset write:\n{}", ir);
+        assert!(ir.contains("bf.insert"),
+                "Expected bf.insert (OR) for bitfield write:\n{}", ir);
+    }
+
+    // ===== Multi-Translation-Unit (multi-TU) IR-level tests =====
+
+    #[test]
+    fn test_multi_tu_helper_defines_add() {
+        // Simulate helper.c: defines a function `add`
+        let ir = compile_c_to_ir(
+            "int add(int a, int b) { return a + b; }"
+        );
+        // The helper TU should have a `define` for `add`, not a `declare`
+        assert!(ir.contains("define i32 @add(i32"),
+                "Expected define i32 @add in helper TU:\n{}", ir);
+        assert!(!ir.contains("declare i32 @add"),
+                "Helper TU should NOT have declare for add:\n{}", ir);
+    }
+
+    #[test]
+    fn test_multi_tu_main_declares_extern_add() {
+        // Simulate main.c: declares extern add and calls it from main
+        let ir = compile_c_to_ir(
+            "extern int add(int a, int b); \
+             int main(void) { return add(3, 4); }"
+        );
+        // The main TU should have a `declare` for `add` (extern, not defined here)
+        assert!(ir.contains("declare i32 @add(i32"),
+                "Expected declare i32 @add in main TU:\n{}", ir);
+        // The main TU should have a `define` for `main`
+        assert!(ir.contains("define i32 @main"),
+                "Expected define i32 @main in main TU:\n{}", ir);
+        // The main TU should NOT have a `define` for `add`
+        assert!(!ir.contains("define i32 @add"),
+                "Main TU should NOT define add:\n{}", ir);
+        // Should contain a call to @add with two i32 arguments
+        assert!(ir.contains("call i32 @add(i32"),
+                "Expected call i32 @add(i32 ...) in main TU:\n{}", ir);
+    }
+
+    #[test]
+    fn test_multi_tu_extern_with_pointer_params() {
+        // Helper TU: defines a function operating on pointer params
+        let helper_ir = compile_c_to_ir(
+            "int string_length(const char *s) { \
+                 int len = 0; \
+                 while (s[len]) len = len + 1; \
+                 return len; \
+             }"
+        );
+        assert!(helper_ir.contains("define i32 @string_length(ptr"),
+                "Expected define i32 @string_length(ptr) in helper TU:\n{}", helper_ir);
+
+        // Main TU: declares extern and calls it
+        let main_ir = compile_c_to_ir(
+            "extern int string_length(const char *s); \
+             int main(void) { return string_length(\"hello\"); }"
+        );
+        assert!(main_ir.contains("declare i32 @string_length(ptr"),
+                "Expected declare i32 @string_length(ptr) in main TU:\n{}", main_ir);
+        assert!(main_ir.contains("call i32 @string_length(ptr"),
+                "Expected call to string_length in main TU:\n{}", main_ir);
+    }
+
+    #[test]
+    fn test_multi_tu_extern_void_function() {
+        // Helper TU: defines a void function
+        let helper_ir = compile_c_to_ir(
+            "int global_val; \
+             void set_value(int v) { global_val = v; }"
+        );
+        assert!(helper_ir.contains("define void @set_value(i32"),
+                "Expected define void @set_value in helper TU:\n{}", helper_ir);
+
+        // Main TU: declares extern void function and calls it
+        let main_ir = compile_c_to_ir(
+            "extern void set_value(int v); \
+             int main(void) { set_value(42); return 0; }"
+        );
+        assert!(main_ir.contains("declare void @set_value(i32"),
+                "Expected declare void @set_value in main TU:\n{}", main_ir);
+        assert!(!main_ir.contains("define void @set_value"),
+                "Main TU should NOT define set_value:\n{}", main_ir);
+    }
+
+    #[test]
+    fn test_multi_tu_multiple_extern_decls() {
+        // Main TU: declares multiple externs from different hypothetical TUs
+        let ir = compile_c_to_ir(
+            "extern int add(int a, int b); \
+             extern int multiply(int a, int b); \
+             int main(void) { return add(2, 3) + multiply(4, 5); }"
+        );
+        assert!(ir.contains("declare i32 @add(i32"),
+                "Expected declare for add:\n{}", ir);
+        assert!(ir.contains("declare i32 @multiply(i32"),
+                "Expected declare for multiply:\n{}", ir);
+        assert!(ir.contains("define i32 @main"),
+                "Expected define for main:\n{}", ir);
+        assert!(ir.contains("call i32 @add(i32"),
+                "Expected call to add:\n{}", ir);
+        assert!(ir.contains("call i32 @multiply(i32"),
+                "Expected call to multiply:\n{}", ir);
+    }
+
+    #[test]
+    fn test_multi_tu_ir_verifies_for_both_sides() {
+        // Verify that both TUs produce valid LLVM IR (module verification)
+        use crate::frontend::parser::Parser;
+        use tempfile::NamedTempFile;
+
+        // Helper TU
+        {
+            let temp_file = NamedTempFile::new().unwrap();
+            let arena = Arena::new(temp_file.path(), 65536).unwrap();
+            let mut parser = Parser::new(arena);
+            let root = parser.parse("int add(int a, int b) { return a + b; }").expect("parse failed");
+
+            let context = Context::create();
+            let ts = TypeSystem::new();
+            let mut backend = LlvmBackend::with_types(&context, "helper", &ts);
+            backend.compile(&parser.arena, root).expect("compile failed");
+            backend.verify().expect("helper TU LLVM verification failed");
+        }
+
+        // Main TU
+        {
+            let temp_file = NamedTempFile::new().unwrap();
+            let arena = Arena::new(temp_file.path(), 65536).unwrap();
+            let mut parser = Parser::new(arena);
+            let root = parser.parse(
+                "extern int add(int a, int b); \
+                 int main(void) { return add(3, 4); }"
+            ).expect("parse failed");
+
+            let context = Context::create();
+            let ts = TypeSystem::new();
+            let mut backend = LlvmBackend::with_types(&context, "main", &ts);
+            backend.compile(&parser.arena, root).expect("compile failed");
+            backend.verify().expect("main TU LLVM verification failed");
+        }
+    }
+
+    #[test]
+    fn test_multi_tu_signature_consistency() {
+        // Verify that the define in helper and declare in main have matching signatures
+        let helper_ir = compile_c_to_ir(
+            "int add(int a, int b) { return a + b; }"
+        );
+        let main_ir = compile_c_to_ir(
+            "extern int add(int a, int b); \
+             int main(void) { return add(1, 2); }"
+        );
+
+        // Extract the signature of add from both TUs
+        // Helper should have: define i32 @add(i32 %..., i32 %...)
+        // Main should have:   declare i32 @add(i32, i32)
+        // Both use i32 return type and two i32 params
+        let helper_has_i32_ret = helper_ir.contains("define i32 @add(");
+        let main_has_i32_ret = main_ir.contains("declare i32 @add(");
+        assert!(helper_has_i32_ret, "Helper TU add should return i32:\n{}", helper_ir);
+        assert!(main_has_i32_ret, "Main TU add declare should return i32:\n{}", main_ir);
+
+        // Count i32 params: both should have exactly 2
+        let helper_add_line = helper_ir.lines()
+            .find(|l| l.contains("define i32 @add("))
+            .expect("no define line for add");
+        let main_add_line = main_ir.lines()
+            .find(|l| l.contains("declare i32 @add("))
+            .expect("no declare line for add");
+
+        let helper_param_count = helper_add_line.matches("i32").count() - 1; // subtract return type
+        let main_param_count = main_add_line.matches("i32").count() - 1;
+        assert_eq!(helper_param_count, 2, "Helper add should have 2 i32 params: {}", helper_add_line);
+        assert_eq!(main_param_count, 2, "Main add declare should have 2 i32 params: {}", main_add_line);
     }
 }
