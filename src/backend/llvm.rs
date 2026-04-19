@@ -1811,11 +1811,16 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
         //   cond_wrap.first_child=condition_expr, cond_wrap.next_sibling=body
         let cond_wrap_offset = node.first_child;
 
-        // do-while: data=1, first_child=body, next_sibling=condition
+        // do-while: data=1, first_child=body, body.next_sibling=condition
         let is_do_while = node.data == 1;
 
         let (cond_offset, body_offset) = if is_do_while {
-            (node.next_sibling, node.first_child)
+            let body_off = node.first_child;
+            let cond_off = arena
+                .get(body_off)
+                .map(|b| b.next_sibling)
+                .unwrap_or(NodeOffset::NULL);
+            (cond_off, body_off)
         } else {
             let co = arena
                 .get(cond_wrap_offset)
@@ -2923,7 +2928,7 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
             68 => self.lower_array_index(arena, &node),
             69 => self.lower_member_access(arena, &node),
             70 => self.lower_cast_expr(arena, &node),
-            71 => self.lower_sizeof_expr(&node),
+            71 => self.lower_sizeof_expr(arena, &node),
             72 => self.lower_comma_expr(arena, &node),
             73 => self.lower_assign_expr(arena, &node),
             80 => self.lower_int_const(&node),
@@ -3471,24 +3476,44 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
         arena: &Arena,
         node: &CAstNode,
     ) -> Result<Option<BasicValueEnum<'ctx>>, BackendError> {
+        // AST layout: kind=66, first_child=condition, next_sibling=wrapper(kind=0)
+        //   wrapper: first_child=then_expr, next_sibling=else_expr
         let cond_offset = node.first_child;
-        let then_offset = if let Some(c) = arena.get(cond_offset) {
-            c.next_sibling
+        let wrapper_offset = node.next_sibling;
+
+        let (then_offset, else_offset) = if let Some(wrapper) = arena.get(wrapper_offset) {
+            (wrapper.first_child, wrapper.next_sibling)
         } else {
-            NodeOffset::NULL
-        };
-        let else_offset = if let Some(c) = arena.get(then_offset) {
-            c.next_sibling
-        } else {
-            NodeOffset::NULL
+            (NodeOffset::NULL, NodeOffset::NULL)
         };
 
-        let cond_val = self.lower_expr(arena, cond_offset)?;
+        let cond_val = match self.lower_expr(arena, cond_offset)? {
+            Some(v) => v,
+            None => return Ok(None),
+        };
+
+        let cond_bool = self.coerce_to_bool(cond_val)?;
+
         let then_val = self.lower_expr(arena, then_offset)?;
         let else_val = self.lower_expr(arena, else_offset)?;
 
-        let _ = else_val;
-        Ok(then_val)
+        match (then_val, else_val) {
+            (Some(tv), Some(ev)) => {
+                if tv.get_type() == ev.get_type() {
+                    let result = self
+                        .builder
+                        .build_select(cond_bool, tv, ev, "ternary")
+                        .map_err(|_| BackendError::InvalidNode)?;
+                    Ok(Some(result))
+                } else {
+                    // Type mismatch — return then value as fallback
+                    Ok(Some(tv))
+                }
+            }
+            (Some(tv), None) => Ok(Some(tv)),
+            (None, Some(ev)) => Ok(Some(ev)),
+            (None, None) => Ok(None),
+        }
     }
 
     fn lower_call_expr(
@@ -3708,14 +3733,67 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
 
     fn lower_sizeof_expr(
         &self,
-        _node: &CAstNode,
+        arena: &Arena,
+        node: &CAstNode,
     ) -> Result<Option<BasicValueEnum<'ctx>>, BackendError> {
-        Ok(Some(
-            self.context
-                .i64_type()
-                .const_int(std::mem::size_of::<i32>() as u64, false)
-                .into(),
-        ))
+        // sizeof(type): outer kind=71 wraps inner kind=71 which wraps type specifier
+        // sizeof(expr): outer kind=71 wraps inner kind=71(data=1) which wraps expr
+        let inner_offset = node.first_child;
+        let inner = arena.get(inner_offset);
+
+        // Unwrap nested kind=71 if present
+        let (data, child_offset) = if let Some(inner_node) = inner {
+            if inner_node.kind == 71 {
+                (inner_node.data, inner_node.first_child)
+            } else {
+                (node.data, inner_offset)
+            }
+        } else {
+            return Ok(Some(
+                self.context.i64_type().const_int(4, false).into(),
+            ));
+        };
+
+        if data == 0 {
+            // sizeof(type) — examine type specifier node kind
+            let size = self.sizeof_type_from_ast(arena, child_offset);
+            Ok(Some(
+                self.context.i64_type().const_int(size, false).into(),
+            ))
+        } else {
+            // sizeof(expr) — default to 4 for int expressions
+            Ok(Some(
+                self.context.i64_type().const_int(4, false).into(),
+            ))
+        }
+    }
+
+    fn sizeof_type_from_ast(&self, arena: &Arena, offset: NodeOffset) -> u64 {
+        let node = match arena.get(offset) {
+            Some(n) => n,
+            None => return 4,
+        };
+
+        // Type specifier nodes have specific kinds from parse_type_specifier
+        match node.kind {
+            1 => 0,   // void → size 0 (GCC returns 1 as extension, but 0 is standard)
+            2 => 4,   // int
+            3 => 1,   // char
+            10 => 2,  // short
+            11 => {   // long — check if "long long" by looking at sibling
+                let sibling = arena.get(node.next_sibling);
+                if sibling.map(|s| s.kind) == Some(11) { 8 } else { 8 } // long = 8, long long = 8
+            }
+            12 => 4,  // signed (defaults to signed int)
+            13 => 4,  // unsigned (defaults to unsigned int)
+            14 => 1,  // _Bool
+            83 => 4,  // float
+            84 => 8,  // double
+            _ => {
+                // For struct/pointer/unknown, assume pointer size
+                8
+            }
+        }
     }
 
     fn lower_comma_expr(

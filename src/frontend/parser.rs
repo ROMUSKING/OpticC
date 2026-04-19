@@ -1715,7 +1715,12 @@ impl Parser {
         self.expect(")")?;
         self.skip_punctuator(";");
 
-        Ok(self.alloc_node(42, 1, NodeOffset::NULL, body, condition))
+        // Link condition as sibling of body so it survives link_siblings in compound
+        // AST layout: kind=42 data=1, first_child=body→condition
+        if let Some(b) = self.arena.get_mut(body) {
+            b.next_sibling = condition;
+        }
+        Ok(self.alloc_node(42, 1, NodeOffset::NULL, body, NodeOffset::NULL))
     }
 
     fn parse_switch_statement(&mut self) -> Result<NodeOffset, ParseError> {
@@ -1952,21 +1957,20 @@ impl Parser {
     fn parse_sizeof_expression(&mut self) -> Result<NodeOffset, ParseError> {
         self.advance();
 
-        let operand = if self.skip_punctuator("(") {
+        if self.skip_punctuator("(") {
             if self.is_type_specifier() {
                 let specifiers = self.parse_declaration_specifiers()?;
                 self.expect(")")?;
-                self.alloc_node(71, 0, NodeOffset::NULL, specifiers, NodeOffset::NULL)
+                Ok(self.alloc_node(71, 0, NodeOffset::NULL, specifiers, NodeOffset::NULL))
             } else {
                 let expr = self.parse_expression()?;
                 self.expect(")")?;
-                self.alloc_node(71, 1, NodeOffset::NULL, expr, NodeOffset::NULL)
+                Ok(self.alloc_node(71, 1, NodeOffset::NULL, expr, NodeOffset::NULL))
             }
         } else {
-            self.parse_unary_expression()?
-        };
-
-        Ok(self.alloc_node(71, 0, NodeOffset::NULL, operand, NodeOffset::NULL))
+            let operand = self.parse_unary_expression()?;
+            Ok(self.alloc_node(71, 1, NodeOffset::NULL, operand, NodeOffset::NULL))
+        }
     }
 
     fn parse_cast_expression(&mut self) -> Result<NodeOffset, ParseError> {
