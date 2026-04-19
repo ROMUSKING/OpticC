@@ -55,8 +55,8 @@ The parser now chains child nodes entirely via first_child chains, not via next_
 - [x] **P0: Struct pointer field types**: Fixed. register_struct_types_in_node walks member children for pointer declarators (kind=7) and uses ptr type instead of i32.
 - [x] **P0: Struct field name extraction**: Fixed. collect_struct_field_names descends into pointer/array declarators to find identifiers.
 - [x] **P0: Nested member access**: Fixed. lower_member_access_ptr supports chained arrow operators (e.g., head->next->value) via recursive base expression lowering and find_member_access_root_var.
-- [ ] **P1: Struct return types**: `return (struct point){.x = x, .y = y}` lowers as `ret i32 0`. Compound literals and struct return values need alloca+store+load+ret pattern.
-- [ ] **P1: Assignment expression comparison**: `(x = 42) > 0` evaluates comparison at compile-time as `br i1 true`. The comparison operand should be the runtime load result.
+- [x] **P1: Struct return types**: Fixed. specifier_to_llvm_type resolves struct specifiers (kind=4/5) to LLVM struct types. lower_return_stmt handles StructType returns via build_return with struct values.
+- [x] **P1: Assignment expression comparison**: Fixed. lower_assign_expr loads back from lvalue after store, returning runtime instruction instead of compile-time constant. Prevents LLVM constant folding in `(x = 42) > 0`.
 - [ ] **P1: Multi-variable complex declarators**: `int *p = &x, a[10]` — mixed pointer/array declarators in the same declaration may fail.
 - [ ] **P2: Bitfield struct members**: `unsigned int readable : 1` — not handled in struct layout or access patterns.
 - [ ] **P2: Designated initializer codegen**: `.field = value` parsed as kind=205 but lowered as no-op.

@@ -7,7 +7,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-2024-blue.svg)](https://www.rust-lang.org)
 [![LLVM](https://img.shields.io/badge/LLVM-18.1-blue.svg)](https://llvm.org)
-[![Tests](https://img.shields.io/badge/tests-339%20passing-brightgreen.svg)]()
+[![Tests](https://img.shields.io/badge/tests-341%20passing-brightgreen.svg)]()
 
 </div>
 
@@ -148,7 +148,7 @@ rustc --version  # rustc 1.95.0
 ### Build
 ```bash
 cargo build        # 0 errors
-cargo test         # 333 passing
+cargo test         # 341 passing
 ```
 
 ### Usage

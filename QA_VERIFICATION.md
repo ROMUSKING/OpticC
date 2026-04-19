@@ -2,7 +2,7 @@
 
 **Generated:** 2026-04-19
 **Project:** Optic C-Compiler
-**Status:** PHASE 3 IN PROGRESS — M6b CODEGEN FIXES IN PROGRESS, 339 TESTS PASS
+**Status:** PHASE 3 IN PROGRESS — M6b P0+P1 FIXED, 341 TESTS PASS
 
 ---
 
@@ -180,7 +180,7 @@ cat /tmp/optic_vfs/path/to/source.c
 cd optic_c && cargo build
 
 # Run all tests
-cargo test   # 333 passed, 0 failed
+cargo test   # 341 passed, 0 failed
 
 # Run specific component tests
 cargo test --lib arena

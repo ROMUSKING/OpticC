@@ -621,6 +621,18 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
         }
     }
 
+    /// Resolve a type specifier node to its LLVM type, including struct/union types.
+    /// For struct/union (kind=4/5), looks up struct_tag_types or builds inline.
+    fn specifier_to_llvm_type(&self, arena: &Arena, spec_node: &CAstNode) -> BasicTypeEnum<'ctx> {
+        if matches!(spec_node.kind, 4 | 5) {
+            self.struct_info_for_spec(arena, Some(spec_node))
+                .map(|(st, _)| st.as_basic_type_enum())
+                .unwrap_or_else(|| self.context.i32_type().as_basic_type_enum())
+        } else {
+            self.node_kind_to_llvm_type(spec_node.kind)
+        }
+    }
+
     /// Extract (llvm_type, param_name) from a kind=24 parameter declaration node.
     /// Layout after parser fix: first_child chain = type_spec -> kind=60(name)
     fn extract_param_type_name(
@@ -1413,7 +1425,7 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                     1..=6 | 83 => {
                         is_void_ret = child.kind == 1;
                         if !is_void_ret {
-                            return_llvm_type = Some(self.node_kind_to_llvm_type(child.kind));
+                            return_llvm_type = Some(self.specifier_to_llvm_type(arena, child));
                         }
                     }
                     7..=9 => {
@@ -1494,7 +1506,7 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                     1..=6 | 83 => {
                         is_void_ret = child.kind == 1;
                         if !is_void_ret {
-                            return_llvm_type = Some(self.node_kind_to_llvm_type(child.kind));
+                            return_llvm_type = Some(self.specifier_to_llvm_type(arena, child));
                         }
                     }
                     7..=9 => {
@@ -1588,7 +1600,7 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                     1..=6 | 83 => {
                         is_void_ret = child.kind == 1;
                         if !is_void_ret {
-                            return_llvm_type = Some(self.node_kind_to_llvm_type(child.kind));
+                            return_llvm_type = Some(self.specifier_to_llvm_type(arena, child));
                         }
                     }
                     7..=9 => {
@@ -2934,6 +2946,18 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                             .build_return(Some(&ptr_type.const_null()))
                             .map_err(|_| BackendError::InvalidNode)?;
                     }
+                } else if let Some(BasicTypeEnum::StructType(_st)) = self.current_return_type {
+                    // Struct return: the value should be a struct value from a load
+                    if val.is_struct_value() {
+                        self.builder
+                            .build_return(Some(&val.into_struct_value()))
+                            .map_err(|_| BackendError::InvalidNode)?;
+                    } else {
+                        // Value type mismatch — return zeroinitializer
+                        self.builder
+                            .build_return(Some(&_st.const_zero()))
+                            .map_err(|_| BackendError::InvalidNode)?;
+                    }
                 } else if let Some(BasicTypeEnum::FloatType(_ft)) = self.current_return_type {
                     if val.is_float_value() {
                         self.builder
@@ -3055,6 +3079,11 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                             .build_return(Some(&ft.const_float(0.0)))
                             .map_err(|_| BackendError::InvalidNode)?;
                     }
+                    Some(BasicTypeEnum::StructType(st)) => {
+                        self.builder
+                            .build_return(Some(&st.const_zero()))
+                            .map_err(|_| BackendError::InvalidNode)?;
+                    }
                     Some(ret_ty) if ret_ty.is_int_type() => {
                         let int_type = ret_ty.into_int_type();
                         self.builder
@@ -3085,6 +3114,11 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                 Some(BasicTypeEnum::FloatType(ft)) => {
                     self.builder
                         .build_return(Some(&ft.const_float(0.0)))
+                        .map_err(|_| BackendError::InvalidNode)?;
+                }
+                Some(BasicTypeEnum::StructType(st)) => {
+                    self.builder
+                        .build_return(Some(&st.const_zero()))
                         .map_err(|_| BackendError::InvalidNode)?;
                 }
                 Some(ret_ty) => {
@@ -4053,7 +4087,14 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                 .map_err(|_| BackendError::InvalidNode)?;
         }
 
-        Ok(Some(value_to_store))
+        // Load back from the lvalue so the result is a runtime instruction,
+        // not a compile-time constant. This prevents LLVM from constant-folding
+        // expressions like (x = 42) > 0 into `br i1 true`.
+        let result = self
+            .builder
+            .build_load(lhs_type, lhs_ptr, "assign_result")
+            .map_err(|_| BackendError::InvalidNode)?;
+        Ok(Some(result))
     }
 
     fn lower_typeof(
@@ -5461,5 +5502,32 @@ mod tests {
         assert!(ir.contains("i32 0, i32 1"), "Expected GEP for next (index 1):\n{}", ir);
         assert!(ir.contains("chain.gep"), "Expected chained GEP for nested access:\n{}", ir);
         assert!(ir.contains("ret i32 %value"), "Expected return of value field:\n{}", ir);
+    }
+
+    #[test]
+    fn test_assign_expr_comparison() {
+        let ir = compile_c_to_ir(
+            "int test_assign_cmp(void) { int x; if ((x = 42) > 0) { return x; } return -1; }"
+        );
+        // The comparison should be a runtime icmp on the assign_result load,
+        // not a constant-folded `br i1 true`
+        assert!(ir.contains("assign_result"), "Expected assign_result load:\n{}", ir);
+        assert!(ir.contains("icmp sgt"), "Expected runtime icmp sgt:\n{}", ir);
+        assert!(!ir.contains("br i1 true"), "Should NOT have constant-folded branch:\n{}", ir);
+    }
+
+    #[test]
+    fn test_struct_return_type() {
+        let ir = compile_c_to_ir(
+            "struct point { int x; int y; }; \
+             struct point make_point(int x, int y) { \
+                 struct point p; p.x = x; p.y = y; return p; \
+             }"
+        );
+        // Function should return { i32, i32 }, not i32
+        assert!(ir.contains("define { i32, i32 } @make_point"),
+                "Expected struct return type:\n{}", ir);
+        assert!(ir.contains("ret { i32, i32 }"),
+                "Expected struct ret instruction:\n{}", ir);
     }
 }
