@@ -39,14 +39,21 @@ Arena, DB, Lexer, Macro, Parser, LLVM backend, analysis, and VFS code are all pr
 - [x] 7 new tests (4 attribute backend, 3 platform macro preprocessor)
 - [x] 333 tests pass, 0 failures
 
-**Milestone 6b — System Headers & Multi-File** (NEXT PRIORITY):
+**Milestone 6b — Codegen Correctness** (NEXT PRIORITY — blockers found via testing):
+- [ ] **P0: Extern function signatures**: `extern int puts(const char *s)` lowered as `declare i32 @puts(...)` instead of `declare i32 @puts(ptr)`. Functions with explicit prototypes must use the declared param types, not variadic fallback.
+- [ ] **P0: Pointer array indexing**: `argv[i]` (char **argv) generates `getelementptr i32` instead of `getelementptr ptr`. Array index GEP must use the pointee element type, not always i32.
+- [ ] **P0: Nested member access**: `head->next->value` returns 0 instead of chaining through intermediate pointer loads. `lower_member_access` needs recursive base-expression support.
+- [ ] **P1: Struct return types**: `return (struct point){.x = x}` lowers as `ret i32 0` — compound literal + struct return not implemented. Need alloca+store pattern.
+- [ ] **P1: Assignment expression comparison**: `(x = 42) > 0` evaluates at compile-time as `true` instead of runtime `icmp sgt`. The assignment value must feed into the comparison operand.
+- [ ] **P1: Bitfield support**: struct bitfields (`unsigned int readable : 1`) need shift/mask patterns in GEP.
+- [ ] **P2: Designated initializers codegen**: `.field = value` parsed (kind=205) but not lowered to struct GEP+store.
+- [ ] **P2: Compound literals**: `(struct foo){.x = 1}` needs alloca+store+load pattern.
+
+**Milestone 6c — System Headers & Multi-File** (after 6b correctness):
 - [ ] Preprocessor: resolve `#include <stdio.h>` from system include paths (`-I /usr/include`)
 - [ ] Preprocessor: handle `-D` command-line defines for cross-compilation
 - [ ] Build system: multi-translation-unit compilation with shared symbol tables
 - [ ] Linker integration: generate relocatable .o files via LLC, link with system ld
-- [ ] Bitfield support in struct layout (shift/mask patterns)
-- [ ] Designated initializers (`.field = value`, `[index] = value`)
-- [ ] Compound literals (`(struct foo){.x = 1}`)
 
 **Milestone 7 — Kernel-Scale Validation**:
 - [ ] Compile a minimal out-of-tree kernel module (.ko) with OpticC
@@ -60,10 +67,11 @@ Optimization passes, debug info, LTO, cross-compilation, and general polish.
 1. Read `00_protocol.md` for the current workflow rules.
 2. Inspect `README.md`, `QA_VERIFICATION.md`, `Cargo.toml`, and the relevant `src/` modules.
 3. Use the files in `jules_prompts/` as the shared agent memory for status, lessons learned, and blockers.
-4. **Priority: Milestone 6b** — system header include paths, multi-TU compilation, bitfields, designated initializers.
-5. **Intermediate validation**: attempt to compile a small real-world C file (e.g., `echo.c` from coreutils) end-to-end.
-6. Verify changes with `cargo test` and CLI smoke tests before reporting.
-7. Record only confirmed status and remaining blockers in the appropriate prompt file.
+4. **Priority: Milestone 6b P0 bugs** — extern function signatures, pointer array indexing, nested member access.
+5. **Validation test files**: Use `/tmp/test_m6b.c` and `/tmp/test_echo.c` patterns to verify fixes (simplified echo.c and struct/pointer test).
+6. **Intermediate validation**: attempt to compile a simplified `echo.c` (no includes, extern puts) and verify correct IR.
+7. Verify changes with `cargo test` and CLI smoke tests before reporting.
+8. Record only confirmed status and remaining blockers in the appropriate prompt file.
 
 ## LESSONS LEARNED (Post-Execution Addendum)
 - **Prompt files are the live coordination layer**: this repo snapshot does not ship the old `.optic` spec/task directories, so status should be kept current in `jules_prompts/` instead.

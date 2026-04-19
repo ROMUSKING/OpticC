@@ -44,16 +44,19 @@ The parser now chains child nodes entirely via first_child chains, not via next_
 - `kind=69` (member_access): `first_child=base_expr`, `next_sibling=field_ident`. NOTE: next_sibling here is the field name, not a sibling statement.
 - `kind=9.next_sibling` is safe for link_siblings (params not stored there anymore).
 
-### REMAINING BUGS (blockers for SQLite)
+### REMAINING BUGS (blockers for real-world C — tested 2026-04-19)
 - [x] **sizeof(type) returns 0**: Fixed. Root cause: `sizeof` tokenized as Keyword but `parse_unary_expression` only checked Punctuator branch; `sizeof(int)` was misinterpreted as cast expression `(int)`. Fix: added Keyword check before Punctuator match.
 - [x] **Ternary operator always returned RHS**: Fixed. `lower_cond_expr` now uses `coerce_to_bool` + `build_select` with correct AST navigation (wrapper node for then/else).
 - [x] **Comma operator returned first value**: Fixed. `lower_comma_expr` now evaluates left for side effects, returns right (matches kind=72 AST layout: first_child=left, next_sibling=right).
 - [x] **Do-while loop condition never evaluated**: Fixed. Condition stored as `body.next_sibling` to survive `link_siblings` overwrites.
-- [ ] **Multi-variable declarations**: `int a = 0, b = 1, c;` — now works correctly for simple cases, but complex declarator chains may still have issues.
-- [ ] **if-then missing return**: `if (n <= 1) return n;` — the return in the then-branch is generated but `lower_if_stmt` creates a merge block regardless, causing incorrect flow after early return.
-- [ ] **Assignment expression comparison**: `(x = 42) > 0` stores correctly but the comparison is evaluated at compile-time as `true` instead of runtime comparison.
-- [ ] **Nested member bases**: `lower_member_access` / `lower_lvalue_ptr` handle `p->field`, but chained forms like `p->next->field` still need recursive base-expression support.
-- [ ] **printf/variadic**: Auto-declaration with variadic signature is incorrect for most libc functions. Need proper declaration matching.
+- [ ] **P0: Extern function signatures**: `extern int puts(const char *s)` lowered as `declare i32 @puts(...)` instead of `declare i32 @puts(ptr)`. Root cause: `pre_register_func_def` only handles function definitions; extern declarations with prototypes still fall back to variadic auto-declaration in `lower_call_expr`. Fix: parse extern declarations and register their signatures before codegen.
+- [ ] **P0: Pointer array indexing type**: `argv[i]` (where argv is `char **`) generates `getelementptr i32` instead of `getelementptr ptr`. Root cause: `lower_array_index` always uses `i32` element type. Fix: track pointer-to-pointer types and use correct GEP element type.
+- [ ] **P0: Nested member access**: `head->next->value` returns `ret i32 0` — only one level of member access works. Root cause: `lower_member_access` resolves the base as an identifier name, not recursively as an expression. Fix: make base resolution recursive (lower the base expression, then GEP from its result).
+- [ ] **P1: Struct return types**: `return (struct point){.x = x, .y = y, .z = 0}` lowers as `ret i32 0`. Compound literals and struct return values need alloca+store+load+ret pattern.
+- [ ] **P1: Assignment expression comparison**: `(x = 42) > 0` evaluates comparison at compile-time as `br i1 true`. Root cause: `lower_assign_expr` returns the stored value, but the comparison with `0` is folded. The comparison operand should be the runtime load result, not a constant.
+- [ ] **P1: Multi-variable complex declarators**: `int *p = &x, a[10]` — simple `int a, b, c` works, but mixed pointer/array declarators in the same declaration may fail.
+- [ ] **P2: Bitfield struct members**: `unsigned int readable : 1` — not handled in struct layout or access patterns.
+- [ ] **P2: Designated initializer codegen**: `.field = value` parsed as kind=205 but lowered as no-op.
 
 ### KERNEL-PATH NEXT STEPS (Phase 3, Milestones 6b–7)
 - [x] **Inline asm codegen (M4)**: `lower_asm_stmt` implemented. Reads template from arena, builds constraint string from operand children, creates InlineAsm via `context.create_inline_asm()`, calls via `build_indirect_call()`, stores outputs to lvalue pointers. Handles volatile, memory/cc clobbers, readwrite operands.

@@ -281,7 +281,7 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
             }
         }
 
-        // === Pass 1: Pre-register all function definitions with correct signatures ===
+        // === Pass 1: Pre-register all function definitions AND declarations with correct signatures ===
         // This prevents auto-declarations with wrong types when functions call
         // each other before their definitions are reached.
         let mut prescan_offset = offset;
@@ -289,6 +289,8 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
             if let Some(node) = arena.get(prescan_offset) {
                 if node.kind == 23 {
                     let _ = self.pre_register_func_def(arena, node);
+                } else if node.kind == 22 {
+                    let _ = self.lower_func_decl(arena, node);
                 }
                 prescan_offset = node.next_sibling;
             } else {
@@ -1040,11 +1042,26 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
             }
         }
 
+        // Fallback: evaluate base as expression, determine element type
+        // Try to infer element type from the base variable's pointee type
+        let mut elem_type = self.context.i32_type().as_basic_type_enum();
+        if let Some(base_node) = arena.get(node.first_child) {
+            if base_node.kind == 60 {
+                if let Some(name) = arena.get_string(NodeOffset(base_node.data)) {
+                    if let Some(binding) = self.variables.get(name).copied() {
+                        // If the variable is a pointer (pointee_type is ptr), then
+                        // loading it gives a pointer, and indexing into it should use ptr element type
+                        if binding.pointee_type.is_pointer_type() {
+                            elem_type = self.context.ptr_type(AddressSpace::default()).as_basic_type_enum();
+                        }
+                    }
+                }
+            }
+        }
         let base_ptr = match self.lower_expr(arena, node.first_child)? {
             Some(BasicValueEnum::PointerValue(ptr)) => ptr,
             _ => return Ok(None),
         };
-        let elem_type = self.context.i32_type().as_basic_type_enum();
         let ptr = unsafe {
             self.builder
                 .build_gep(elem_type, base_ptr, &[index_val], "arrayidx")
@@ -1348,12 +1365,83 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
     }
 
     fn lower_func_decl(&mut self, arena: &Arena, node: &CAstNode) -> Result<(), BackendError> {
-        let name = self.find_ident_name(arena, node);
-        let func_name = name.as_deref().unwrap_or("func");
-        let fn_type = self.context.i32_type().fn_type(&[], false);
-        let function = self.module.add_function(func_name, fn_type, None);
-        if let Some(n) = name {
-            self.functions.insert(n, function);
+        // Use the same logic as pre_register_func_def to get correct param types
+        let mut func_name = "func".to_string();
+        let mut param_types: Vec<BasicMetadataTypeEnum> = Vec::new();
+        let mut return_llvm_type: Option<BasicTypeEnum<'ctx>> = None;
+        let mut is_void_ret = false;
+        let mut is_variadic = false;
+
+        let mut child_offset = node.first_child;
+        while child_offset != NodeOffset::NULL {
+            if let Some(child) = arena.get(child_offset) {
+                match child.kind {
+                    1..=6 | 83 => {
+                        is_void_ret = child.kind == 1;
+                        if !is_void_ret {
+                            return_llvm_type = Some(self.node_kind_to_llvm_type(child.kind));
+                        }
+                    }
+                    7..=9 => {
+                        if let Some(func_decl_offset) =
+                            self.find_function_declarator_offset(arena, child_offset)
+                        {
+                            if let Some(func_decl) = arena.get(func_decl_offset) {
+                                if func_decl.data == 1 {
+                                    is_variadic = true;
+                                }
+                                if !is_void_ret {
+                                    return_llvm_type = Some(self.declarator_llvm_type(
+                                        arena,
+                                        Some(child),
+                                        return_llvm_type.unwrap_or_else(|| {
+                                            self.context.i32_type().as_basic_type_enum()
+                                        }),
+                                    ));
+                                }
+                                if let Some(ident) = arena.get(func_decl.first_child) {
+                                    if ident.kind == 60 {
+                                        if let Some(name) = arena.get_string(NodeOffset(ident.data)) {
+                                            func_name = name.to_string();
+                                        }
+                                    }
+                                    let mut param_off = ident.next_sibling;
+                                    while param_off != NodeOffset::NULL {
+                                        if let Some(param) = arena.get(param_off) {
+                                            if param.kind == 24 {
+                                                let (ptype, _, _) =
+                                                    self.extract_param_type_name(arena, param);
+                                                param_types.push(ptype.into());
+                                            }
+                                            param_off = param.next_sibling;
+                                        } else {
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+                child_offset = child.next_sibling;
+            } else {
+                break;
+            }
+        }
+
+        let ret_llvm = return_llvm_type.unwrap_or_else(|| self.context.i32_type().as_basic_type_enum());
+        let fn_type = if is_void_ret {
+            self.context.void_type().fn_type(&param_types, is_variadic)
+        } else {
+            ret_llvm.fn_type(&param_types, is_variadic)
+        };
+        // Only add if not already registered (pre_register may have added it)
+        if self.module.get_function(&func_name).is_none() {
+            let function = self.module.add_function(&func_name, fn_type, None);
+            let attrs = self.extract_attributes(arena, node);
+            self.apply_function_attributes(function, &attrs);
+            self.functions.insert(func_name, function);
         }
         Ok(())
     }
@@ -3531,7 +3619,13 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
             let mut arg_offset = fc.next_sibling;
             while arg_offset != NodeOffset::NULL {
                 if let Some(arg_node) = arena.get(arg_offset) {
-                    if let Some(arg_val) = self.lower_expr(arena, arg_offset)? {
+                    // kind=74 is an arg-wrapper node; unwrap it to get the actual expression
+                    let expr_offset = if arg_node.kind == 74 {
+                        arg_node.first_child
+                    } else {
+                        arg_offset
+                    };
+                    if let Some(arg_val) = self.lower_expr(arena, expr_offset)? {
                         args.push(arg_val.into());
                     }
                     arg_offset = arg_node.next_sibling;
@@ -3640,7 +3734,19 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                 }));
             }
 
-            let fn_type = self.context.i32_type().fn_type(&[], true);
+            // Auto-declare external function using actual argument types from the call site
+            let param_types: Vec<inkwell::types::BasicMetadataTypeEnum> = args
+                .iter()
+                .map(|a| match a {
+                    inkwell::values::BasicMetadataValueEnum::IntValue(v) => v.get_type().into(),
+                    inkwell::values::BasicMetadataValueEnum::FloatValue(v) => v.get_type().into(),
+                    inkwell::values::BasicMetadataValueEnum::PointerValue(_) => {
+                        self.context.ptr_type(AddressSpace::default()).into()
+                    }
+                    _ => self.context.i32_type().into(),
+                })
+                .collect();
+            let fn_type = self.context.i32_type().fn_type(&param_types, false);
             let ext_func = self.module.add_function(name, fn_type, None);
             self.functions.insert(name.to_string(), ext_func);
             let call_site = self

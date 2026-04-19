@@ -2076,7 +2076,10 @@ impl Parser {
         if self.current_token().text != ")" {
             loop {
                 let arg = self.parse_assignment_expression()?;
-                self.link_siblings(&mut first_arg, &mut last_arg, arg);
+                // Wrap each argument in an arg-wrapper node (kind=74) to isolate
+                // expression-internal next_sibling chains from the argument list chain.
+                let wrapper = self.alloc_node(74, 0, NodeOffset::NULL, arg, NodeOffset::NULL);
+                self.link_siblings(&mut first_arg, &mut last_arg, wrapper);
 
                 if self.current_token().text == ")" {
                     break;

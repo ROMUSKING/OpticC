@@ -50,12 +50,14 @@ OpticC already contains implementations for the core compiler pipeline plus the 
 - ⚠️ Remaining work: system header include paths, multi-TU compilation, bitfields, designated initializers, compound literals
 
 ### Immediate Priorities for Agents
-1. **Milestone 6b (System Headers & Multi-File)**: Add `-I` include path support, multi-TU compilation, bitfields, designated initializers.
-2. **Backend correctness**: Fix multi-variable declarations, assignment expressions, nested member access, string literals (see `07_backend_llvm.md` REMAINING BUGS).
-3. **Intermediate validation**: Try compiling real C files (echo.c, cat.c from coreutils) to find gaps.
-4. **Milestone 7 (Kernel-Scale)**: Compile minimal kernel module after M6b completes.
-5. Verify changes with `cargo test` and CLI smoke tests before reporting.
-6. Record only confirmed status and remaining blockers in the appropriate prompt file.
+1. **Milestone 6b P0 (Codegen Correctness)**: Fix extern function signatures, pointer array indexing types, and nested member access — these block even simple programs like echo.c.
+2. **Milestone 6b P1 (Richer Lowering)**: Struct return types, assignment expression comparison, compound literals.
+3. **Milestone 6b P2 (Kernel Features)**: Bitfields, designated initializer codegen.
+4. **Milestone 6c (System Headers)**: Add `-I` include path support, multi-TU compilation after codegen correctness is solid.
+5. **Intermediate validation**: Compile simplified echo.c (`extern int puts(const char *s); int main(int argc, char **argv) { ... }`) end-to-end.
+6. **Milestone 7 (Kernel-Scale)**: Compile minimal kernel module after M6b/6c complete.
+7. Verify changes with `cargo test` and CLI smoke tests before reporting.
+8. Record only confirmed status and remaining blockers in the appropriate prompt file.
 
 ### Environment Notes
 - Target environment is the current dev container on Ubuntu 24.04
