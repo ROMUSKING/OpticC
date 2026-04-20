@@ -145,6 +145,63 @@ impl std::hash::Hash for CacheKey {
     }
 }
 
+fn cache_key_hex(key: &CacheKey) -> String {
+    key.source_hash
+        .iter()
+        .chain(key.flags_hash.iter())
+        .map(|byte| format!("{:02x}", byte))
+        .collect()
+}
+
+fn opticc_cache_dir() -> PathBuf {
+    std::env::temp_dir().join("opticc-cache")
+}
+
+fn build_cache_key(
+    source: &Path,
+    include_paths: &[PathBuf],
+    defines: &HashMap<String, String>,
+    optimization: u32,
+) -> Result<CacheKey, BuildError> {
+    let source_text = fs::read_to_string(source)
+        .map_err(|e| BuildError::CompileError(source.display().to_string(), e.to_string()))?;
+
+    let mut flags: Vec<String> = include_paths
+        .iter()
+        .map(|path| format!("-I{}", path.display()))
+        .collect();
+
+    let mut define_entries: Vec<_> = defines.iter().collect();
+    define_entries.sort_by(|a, b| a.0.cmp(b.0));
+    for (name, value) in define_entries {
+        flags.push(format!("-D{}={}", name, value));
+    }
+    flags.push(format!("-O{}", optimization));
+
+    Ok(CacheKey::new(&source_text, &flags))
+}
+
+fn restore_cached_object(cache_key: &CacheKey, obj_path: &Path) -> Result<bool, BuildError> {
+    let cached_object = opticc_cache_dir().join(format!("{}.o", cache_key_hex(cache_key)));
+    if !cached_object.exists() {
+        return Ok(false);
+    }
+
+    if let Some(parent) = obj_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::copy(&cached_object, obj_path)?;
+    Ok(true)
+}
+
+fn store_cached_object(cache_key: &CacheKey, obj_path: &Path) -> Result<(), BuildError> {
+    let cache_dir = opticc_cache_dir();
+    fs::create_dir_all(&cache_dir)?;
+    let cached_object = cache_dir.join(format!("{}.o", cache_key_hex(cache_key)));
+    fs::copy(obj_path, cached_object)?;
+    Ok(())
+}
+
 pub struct BuildConfig {
     pub source_files: Vec<PathBuf>,
     pub output: PathBuf,
@@ -642,6 +699,14 @@ fn compile_single_file_impl(
     Ok(())
 }
 
+pub fn clear_compile_cache() -> Result<(), BuildError> {
+    let cache_dir = opticc_cache_dir();
+    if cache_dir.exists() {
+        fs::remove_dir_all(cache_dir)?;
+    }
+    Ok(())
+}
+
 pub fn compile_source_to_object_with_stats(
     input_path: &Path,
     output_path: &Path,
@@ -716,6 +781,11 @@ fn compile_source_to_object_with_stats_impl(
     defines: &HashMap<String, String>,
     optimization: u32,
 ) -> Result<CompilePhaseTimings, BuildError> {
+    let cache_key = build_cache_key(source, include_paths, defines, optimization)?;
+    if restore_cached_object(&cache_key, obj_path)? {
+        return Ok(CompilePhaseTimings::default());
+    }
+
     let compile_id = next_compile_invocation_id();
     let artifacts = compile_to_ir_artifacts(
         source,
@@ -746,6 +816,7 @@ fn compile_source_to_object_with_stats_impl(
     let llc = find_tool(&["llc-18", "llc", "llc-17", "llc-16"])?;
     let llc_start = Instant::now();
     let llc_output = Command::new(&llc)
+        .arg("-relocation-model=pic")
         .arg("-filetype=obj")
         .arg("-o")
         .arg(obj_path)
@@ -763,6 +834,8 @@ fn compile_source_to_object_with_stats_impl(
             message: stderr.to_string(),
         });
     }
+
+    store_cached_object(&cache_key, obj_path)?;
 
     Ok(timings)
 }

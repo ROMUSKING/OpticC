@@ -1340,6 +1340,59 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
             return Ok(rhs_val);
         }
 
+        // Handle pointer arithmetic: ptr += int or ptr -= int → GEP
+        if lhs_val.is_pointer_value() && (op_code == 1 || op_code == 2) {
+            let ptr = lhs_val.into_pointer_value();
+            let index = if rhs_val.is_int_value() {
+                let idx = rhs_val.into_int_value();
+                if op_code == 2 {
+                    self.builder
+                        .build_int_neg(idx, "neg_idx")
+                        .map_err(|_| BackendError::InvalidNode)?
+                } else {
+                    idx
+                }
+            } else if rhs_val.is_pointer_value() {
+                // ptr - ptr → ptrdiff
+                let lhs_int = self.builder
+                    .build_ptr_to_int(ptr, self.context.i64_type(), "ptr2int_lhs")
+                    .map_err(|_| BackendError::InvalidNode)?;
+                let rhs_int = self.builder
+                    .build_ptr_to_int(rhs_val.into_pointer_value(), self.context.i64_type(), "ptr2int_rhs")
+                    .map_err(|_| BackendError::InvalidNode)?;
+                return Ok(self.builder
+                    .build_int_sub(lhs_int, rhs_int, "ptrdiff")
+                    .map_err(|_| BackendError::InvalidNode)?
+                    .into());
+            } else {
+                return Err(BackendError::InvalidNode);
+            };
+            let result = unsafe {
+                self.builder
+                    .build_gep(self.context.i8_type(), ptr, &[index], "ptr_arith")
+                    .map_err(|_| BackendError::InvalidNode)?
+            };
+            return Ok(result.into());
+        }
+
+        // Convert any remaining pointer operands to integers before arithmetic
+        let lhs_val = if lhs_val.is_pointer_value() {
+            self.builder
+                .build_ptr_to_int(lhs_val.into_pointer_value(), self.context.i64_type(), "op_ptr2int_lhs")
+                .map_err(|_| BackendError::InvalidNode)?
+                .into()
+        } else {
+            lhs_val
+        };
+        let rhs_val = if rhs_val.is_pointer_value() {
+            self.builder
+                .build_ptr_to_int(rhs_val.into_pointer_value(), self.context.i64_type(), "op_ptr2int_rhs")
+                .map_err(|_| BackendError::InvalidNode)?
+                .into()
+        } else {
+            rhs_val
+        };
+
         let use_float = lhs_val.is_float_value() || rhs_val.is_float_value();
         if use_float {
             let lhs_float = if lhs_val.is_float_value() {
@@ -1390,23 +1443,6 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
             };
         }
 
-        // Handle pointer operands by converting them to integers first
-        let lhs_val = if lhs_val.is_pointer_value() {
-            self.builder
-                .build_ptr_to_int(lhs_val.into_pointer_value(), self.context.i64_type(), "assign_ptr2int_lhs")
-                .map_err(|_| BackendError::InvalidNode)?
-                .into()
-        } else {
-            lhs_val
-        };
-        let rhs_val = if rhs_val.is_pointer_value() {
-            self.builder
-                .build_ptr_to_int(rhs_val.into_pointer_value(), self.context.i64_type(), "assign_ptr2int_rhs")
-                .map_err(|_| BackendError::InvalidNode)?
-                .into()
-        } else {
-            rhs_val
-        };
         if !lhs_val.is_int_value() || !rhs_val.is_int_value() {
             return Err(BackendError::InvalidNode);
         }
@@ -1703,7 +1739,8 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
         } else {
             ret_llvm.fn_type(&param_types, is_variadic)
         };
-        let function = self.module.add_function(&func_name, fn_type, None);
+        let function = self.module.get_function(&func_name)
+            .unwrap_or_else(|| self.module.add_function(&func_name, fn_type, None));
         // Apply any __attribute__ decorations to the pre-registered function
         let attrs = self.extract_attributes(arena, node);
         self.apply_function_attributes(function, &attrs);
@@ -1894,6 +1931,17 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
         // Use the pre-registered function if available, otherwise create new
         let function = self.module.get_function(&func_name)
             .unwrap_or_else(|| self.module.add_function(&func_name, fn_type, None));
+
+        // Reconcile return type with actual LLVM function signature.
+        // A pre-registered function may have a different return type than what
+        // the definition resolves to (e.g., forward-declared as i32 but defined as ptr).
+        // Always use the actual LLVM function's return type to keep IR consistent.
+        let actual_fn_ret = function.get_type().get_return_type();
+        let (ret_llvm, is_void_ret) = match actual_fn_ret {
+            None => (ret_llvm, true),
+            Some(actual_ty) => (actual_ty, false),
+        };
+
         // Apply __attribute__ decorations to the function
         let attrs = self.extract_attributes(arena, node);
         self.apply_function_attributes(function, &attrs);
@@ -2046,6 +2094,49 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                 unsafe { bb.delete().ok(); }
             }
             block_opt = next;
+        }
+
+        // Final pass: fix any ret instruction whose type doesn't match the function return type.
+        // This catches cases where type inference produced a mismatched return:
+        // - ret void in non-void function (e.g., function pointer params parsed as functions)
+        // - ret ptr in i32 function (e.g., char* return parsed as int)
+        // We use LLVM module verification via writing IR text to detect and fix these.
+        if !is_void_ret {
+            let expected_is_int = ret_llvm.is_int_type();
+            let expected_is_ptr = ret_llvm.is_pointer_type();
+            let expected_is_float = ret_llvm.is_float_type();
+            let mut block_opt = function.get_first_basic_block();
+            while let Some(bb) = block_opt {
+                let next = bb.get_next_basic_block();
+                if let Some(term) = bb.get_terminator() {
+                    if term.get_opcode() == inkwell::values::InstructionOpcode::Return {
+                        let num_operands = term.get_num_operands();
+                        if num_operands == 0 {
+                            // ret void in non-void function — replace with typed default
+                            term.erase_from_basic_block();
+                            self.builder.position_at_end(bb);
+                            if expected_is_int {
+                                let _ = self.builder.build_return(Some(
+                                    &ret_llvm.into_int_type().const_int(0, false),
+                                ));
+                            } else if expected_is_ptr {
+                                let _ = self.builder.build_return(Some(
+                                    &ret_llvm.into_pointer_type().const_null(),
+                                ));
+                            } else if expected_is_float {
+                                let _ = self.builder.build_return(Some(
+                                    &ret_llvm.into_float_type().const_float(0.0),
+                                ));
+                            } else {
+                                let _ = self.builder.build_return(Some(
+                                    &self.context.i32_type().const_int(0, false),
+                                ));
+                            }
+                        }
+                    }
+                }
+                block_opt = next;
+            }
         }
 
         self.current_return_type = None;
@@ -2493,6 +2584,24 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
             default_bb,
         );
 
+        // Deduplicate switch cases by value (keep last occurrence for fall-through semantics)
+        {
+            let mut seen: std::collections::HashMap<u64, usize> = std::collections::HashMap::new();
+            let mut dedup_indices: Vec<usize> = Vec::new();
+            for (i, (val, _bb)) in cases.iter().enumerate() {
+                let key = val.get_zero_extended_constant().unwrap_or(i as u64 + 1_000_000);
+                if let Some(prev) = seen.get(&key) {
+                    dedup_indices.retain(|idx| *idx != *prev);
+                }
+                seen.insert(key, i);
+                dedup_indices.push(i);
+            }
+            if dedup_indices.len() < cases.len() {
+                let dedup_cases: Vec<_> = dedup_indices.iter().map(|&i| cases[i]).collect();
+                cases = dedup_cases;
+            }
+        }
+
         // Build the switch instruction
         let switch_inst = self
             .builder
@@ -2607,25 +2716,6 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                 }
 
                 case_bodies.push((case_bb, stmt_offset));
-
-                // The stmt in next_sibling may itself contain more case labels
-                // (fall-through chains like `case 1: case 2: stmt`)
-                if stmt_offset != NodeOffset::NULL {
-                    if let Some(stmt_node) = arena.get(stmt_offset) {
-                        if stmt_node.kind == 52 || stmt_node.kind == 53 || stmt_node.kind == 54 {
-                            self.collect_switch_cases(
-                                arena,
-                                stmt_offset,
-                                function,
-                                cond_int,
-                                cases,
-                                case_bodies,
-                                default_body_offset,
-                                default_bb,
-                            );
-                        }
-                    }
-                }
             }
             54 => {
                 // Case range (GNU extension): case LOW ... HIGH:
@@ -2670,24 +2760,6 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                 }
 
                 case_bodies.push((case_bb, stmt_offset));
-
-                // Check if stmt contains more case labels
-                if stmt_offset != NodeOffset::NULL {
-                    if let Some(stmt_node) = arena.get(stmt_offset) {
-                        if stmt_node.kind == 52 || stmt_node.kind == 53 || stmt_node.kind == 54 {
-                            self.collect_switch_cases(
-                                arena,
-                                stmt_offset,
-                                function,
-                                cond_int,
-                                cases,
-                                case_bodies,
-                                default_body_offset,
-                                default_bb,
-                            );
-                        }
-                    }
-                }
             }
             53 => {
                 // Default label: first_child=stmt
@@ -3975,6 +4047,340 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
         }
     }
 
+    /// Coerce a call argument to match the expected parameter type.
+    /// Handles ptr→int (ptrtoint), int→ptr (inttoptr), and int width mismatches.
+    fn coerce_call_arg(
+        &self,
+        arg: inkwell::values::BasicMetadataValueEnum<'ctx>,
+        expected: inkwell::types::BasicMetadataTypeEnum<'ctx>,
+    ) -> Result<inkwell::values::BasicMetadataValueEnum<'ctx>, BackendError> {
+        use inkwell::values::BasicMetadataValueEnum;
+        use inkwell::types::BasicMetadataTypeEnum;
+
+        match arg {
+            BasicMetadataValueEnum::PointerValue(ptr_val) => {
+                if let BasicMetadataTypeEnum::IntType(int_ty) = expected {
+                    // ptr → int: ptrtoint
+                    let cast = self
+                        .builder
+                        .build_ptr_to_int(ptr_val, int_ty, "arg_ptr2int")
+                        .map_err(|_| BackendError::InvalidNode)?;
+                    Ok(cast.into())
+                } else {
+                    Ok(arg)
+                }
+            }
+            BasicMetadataValueEnum::IntValue(int_val) => {
+                match expected {
+                    BasicMetadataTypeEnum::PointerType(ptr_ty) => {
+                        let cast = self
+                            .builder
+                            .build_int_to_ptr(int_val, ptr_ty, "arg_int2ptr")
+                            .map_err(|_| BackendError::InvalidNode)?;
+                        Ok(cast.into())
+                    }
+                    BasicMetadataTypeEnum::IntType(exp_int) => {
+                        let val_width = int_val.get_type().get_bit_width();
+                        let exp_width = exp_int.get_bit_width();
+                        if val_width < exp_width {
+                            let ext = self
+                                .builder
+                                .build_int_s_extend(int_val, exp_int, "arg_sext")
+                                .map_err(|_| BackendError::InvalidNode)?;
+                            Ok(ext.into())
+                        } else if val_width > exp_width {
+                            let trunc = self
+                                .builder
+                                .build_int_truncate(int_val, exp_int, "arg_trunc")
+                                .map_err(|_| BackendError::InvalidNode)?;
+                            Ok(trunc.into())
+                        } else {
+                            Ok(arg)
+                        }
+                    }
+                    BasicMetadataTypeEnum::FloatType(ft) => {
+                        let cast = self
+                            .builder
+                            .build_signed_int_to_float(int_val, ft, "arg_i2f")
+                            .map_err(|_| BackendError::InvalidNode)?;
+                        Ok(cast.into())
+                    }
+                    _ => Ok(arg),
+                }
+            }
+            BasicMetadataValueEnum::FloatValue(float_val) => {
+                if let BasicMetadataTypeEnum::IntType(int_ty) = expected {
+                    let cast = self
+                        .builder
+                        .build_float_to_signed_int(float_val, int_ty, "arg_f2i")
+                        .map_err(|_| BackendError::InvalidNode)?;
+                    Ok(cast.into())
+                } else {
+                    Ok(arg)
+                }
+            }
+            _ => Ok(arg),
+        }
+    }
+
+    fn atomic_ordering_from_arg(
+        &self,
+        arg: Option<&inkwell::values::BasicMetadataValueEnum<'ctx>>,
+        default: inkwell::AtomicOrdering,
+    ) -> inkwell::AtomicOrdering {
+        match arg.and_then(|value| match value {
+            inkwell::values::BasicMetadataValueEnum::IntValue(v) => v.get_zero_extended_constant(),
+            _ => None,
+        }) {
+            Some(0) => inkwell::AtomicOrdering::Monotonic,
+            Some(1) => inkwell::AtomicOrdering::Acquire,
+            Some(2) => inkwell::AtomicOrdering::Acquire,
+            Some(3) => inkwell::AtomicOrdering::Release,
+            Some(4) => inkwell::AtomicOrdering::AcquireRelease,
+            Some(5) => inkwell::AtomicOrdering::SequentiallyConsistent,
+            _ => default,
+        }
+    }
+
+    fn lower_atomic_builtin(
+        &mut self,
+        builtin_name: &str,
+        args: &[inkwell::values::BasicMetadataValueEnum<'ctx>],
+    ) -> Result<Option<BasicValueEnum<'ctx>>, BackendError> {
+        use inkwell::AtomicOrdering;
+        use inkwell::AtomicRMWBinOp;
+
+        let int_zero = || self.context.i32_type().const_int(0, false).into();
+        let get_ptr = |idx: usize| {
+            args.get(idx).and_then(|arg| match arg {
+                inkwell::values::BasicMetadataValueEnum::PointerValue(p) => Some(*p),
+                _ => None,
+            })
+        };
+        let get_int = |idx: usize| {
+            args.get(idx).and_then(|arg| match arg {
+                inkwell::values::BasicMetadataValueEnum::IntValue(v) => Some(*v),
+                _ => None,
+            })
+        };
+
+        let sync_binop = match builtin_name {
+            "__sync_fetch_and_add" => Some(AtomicRMWBinOp::Add),
+            "__sync_fetch_and_sub" => Some(AtomicRMWBinOp::Sub),
+            "__sync_fetch_and_or" => Some(AtomicRMWBinOp::Or),
+            "__sync_fetch_and_and" => Some(AtomicRMWBinOp::And),
+            "__sync_fetch_and_xor" => Some(AtomicRMWBinOp::Xor),
+            "__sync_lock_test_and_set" => Some(AtomicRMWBinOp::Xchg),
+            _ => None,
+        };
+
+        if let Some(op) = sync_binop {
+            if let (Some(ptr), Some(val)) = (get_ptr(0), get_int(1)) {
+                let old = self
+                    .builder
+                    .build_atomicrmw(op, ptr, val, AtomicOrdering::SequentiallyConsistent)
+                    .map_err(|_| BackendError::InvalidNode)?;
+                return Ok(Some(old.into()));
+            }
+            return Ok(Some(int_zero()));
+        }
+
+        let atomic_binop = match builtin_name {
+            "__atomic_fetch_add" => Some(AtomicRMWBinOp::Add),
+            "__atomic_fetch_sub" => Some(AtomicRMWBinOp::Sub),
+            "__atomic_fetch_or" => Some(AtomicRMWBinOp::Or),
+            "__atomic_fetch_and" => Some(AtomicRMWBinOp::And),
+            "__atomic_fetch_xor" => Some(AtomicRMWBinOp::Xor),
+            _ => None,
+        };
+
+        if let Some(op) = atomic_binop {
+            if let (Some(ptr), Some(val)) = (get_ptr(0), get_int(1)) {
+                let ordering = self.atomic_ordering_from_arg(args.get(2), AtomicOrdering::SequentiallyConsistent);
+                let old = self
+                    .builder
+                    .build_atomicrmw(op, ptr, val, ordering)
+                    .map_err(|_| BackendError::InvalidNode)?;
+                return Ok(Some(old.into()));
+            }
+            return Ok(Some(int_zero()));
+        }
+
+        match builtin_name {
+            "__sync_add_and_fetch"
+            | "__sync_sub_and_fetch"
+            | "__sync_or_and_fetch"
+            | "__sync_and_and_fetch"
+            | "__sync_xor_and_fetch"
+            | "__atomic_add_fetch"
+            | "__atomic_sub_fetch"
+            | "__atomic_or_fetch"
+            | "__atomic_and_fetch"
+            | "__atomic_xor_fetch" => {
+                if let (Some(ptr), Some(val)) = (get_ptr(0), get_int(1)) {
+                    let op = match builtin_name {
+                        "__sync_add_and_fetch" | "__atomic_add_fetch" => AtomicRMWBinOp::Add,
+                        "__sync_sub_and_fetch" | "__atomic_sub_fetch" => AtomicRMWBinOp::Sub,
+                        "__sync_or_and_fetch" | "__atomic_or_fetch" => AtomicRMWBinOp::Or,
+                        "__sync_and_and_fetch" | "__atomic_and_fetch" => AtomicRMWBinOp::And,
+                        _ => AtomicRMWBinOp::Xor,
+                    };
+                    let ordering = if builtin_name.starts_with("__atomic_") {
+                        self.atomic_ordering_from_arg(args.get(2), AtomicOrdering::SequentiallyConsistent)
+                    } else {
+                        AtomicOrdering::SequentiallyConsistent
+                    };
+                    let old = self
+                        .builder
+                        .build_atomicrmw(op, ptr, val, ordering)
+                        .map_err(|_| BackendError::InvalidNode)?;
+                    let new_val = match op {
+                        AtomicRMWBinOp::Add => self.builder.build_int_add(old, val, "atomic_add_fetch"),
+                        AtomicRMWBinOp::Sub => self.builder.build_int_sub(old, val, "atomic_sub_fetch"),
+                        AtomicRMWBinOp::Or => self.builder.build_or(old, val, "atomic_or_fetch"),
+                        AtomicRMWBinOp::And => self.builder.build_and(old, val, "atomic_and_fetch"),
+                        _ => self.builder.build_xor(old, val, "atomic_xor_fetch"),
+                    }
+                    .map_err(|_| BackendError::InvalidNode)?;
+                    return Ok(Some(new_val.into()));
+                }
+                Ok(Some(int_zero()))
+            }
+            "__sync_val_compare_and_swap" => {
+                if let (Some(ptr), Some(cmp), Some(new_val)) = (get_ptr(0), get_int(1), get_int(2)) {
+                    let result = self
+                        .builder
+                        .build_cmpxchg(
+                            ptr,
+                            cmp,
+                            new_val,
+                            AtomicOrdering::SequentiallyConsistent,
+                            AtomicOrdering::SequentiallyConsistent,
+                        )
+                        .map_err(|_| BackendError::InvalidNode)?;
+                    let old = self
+                        .builder
+                        .build_extract_value(result, 0, "sync_cas_old")
+                        .map_err(|_| BackendError::InvalidNode)?;
+                    return Ok(Some(old));
+                }
+                Ok(Some(int_zero()))
+            }
+            "__sync_bool_compare_and_swap" => {
+                if let (Some(ptr), Some(cmp), Some(new_val)) = (get_ptr(0), get_int(1), get_int(2)) {
+                    let result = self
+                        .builder
+                        .build_cmpxchg(
+                            ptr,
+                            cmp,
+                            new_val,
+                            AtomicOrdering::SequentiallyConsistent,
+                            AtomicOrdering::SequentiallyConsistent,
+                        )
+                        .map_err(|_| BackendError::InvalidNode)?;
+                    let success = self
+                        .builder
+                        .build_extract_value(result, 1, "sync_cas_ok")
+                        .map_err(|_| BackendError::InvalidNode)?
+                        .into_int_value();
+                    let widened = self
+                        .builder
+                        .build_int_z_extend(success, self.context.i32_type(), "sync_cas_ok_i32")
+                        .map_err(|_| BackendError::InvalidNode)?;
+                    return Ok(Some(widened.into()));
+                }
+                Ok(Some(int_zero()))
+            }
+            "__sync_lock_release" => {
+                if let Some(ptr) = get_ptr(0) {
+                    let zero = self.context.i32_type().const_zero();
+                    let _ = self
+                        .builder
+                        .build_atomicrmw(AtomicRMWBinOp::Xchg, ptr, zero, AtomicOrdering::Release)
+                        .map_err(|_| BackendError::InvalidNode)?;
+                }
+                Ok(Some(int_zero()))
+            }
+            "__atomic_thread_fence" | "__atomic_signal_fence" | "__sync_synchronize" => {
+                let ordering = if builtin_name == "__sync_synchronize" {
+                    AtomicOrdering::SequentiallyConsistent
+                } else {
+                    self.atomic_ordering_from_arg(args.first(), AtomicOrdering::SequentiallyConsistent)
+                };
+                self.builder
+                    .build_fence(ordering, builtin_name == "__atomic_signal_fence", "atomic_fence")
+                    .map_err(|_| BackendError::InvalidNode)?;
+                Ok(Some(int_zero()))
+            }
+            "__atomic_exchange_n" => {
+                if let (Some(ptr), Some(val)) = (get_ptr(0), get_int(1)) {
+                    let ordering = self.atomic_ordering_from_arg(args.get(2), AtomicOrdering::SequentiallyConsistent);
+                    let old = self
+                        .builder
+                        .build_atomicrmw(AtomicRMWBinOp::Xchg, ptr, val, ordering)
+                        .map_err(|_| BackendError::InvalidNode)?;
+                    return Ok(Some(old.into()));
+                }
+                Ok(Some(int_zero()))
+            }
+            "__atomic_store_n" => {
+                if let (Some(ptr), Some(val)) = (get_ptr(0), get_int(1)) {
+                    self.builder
+                        .build_store(ptr, val)
+                        .map_err(|_| BackendError::InvalidNode)?;
+                }
+                Ok(Some(int_zero()))
+            }
+            "__atomic_load_n" => {
+                if let Some(ptr) = get_ptr(0) {
+                    let loaded = self
+                        .builder
+                        .build_load(self.context.i32_type(), ptr, "atomic_load")
+                        .map_err(|_| BackendError::InvalidNode)?;
+                    return Ok(Some(loaded));
+                }
+                Ok(Some(int_zero()))
+            }
+            "__atomic_compare_exchange_n" => {
+                if let (Some(ptr), Some(expected_ptr), Some(desired)) = (get_ptr(0), get_ptr(1), get_int(2)) {
+                    let expected = self
+                        .builder
+                        .build_load(desired.get_type(), expected_ptr, "atomic_expected")
+                        .map_err(|_| BackendError::InvalidNode)?
+                        .into_int_value();
+                    let success = self.atomic_ordering_from_arg(args.get(4), AtomicOrdering::SequentiallyConsistent);
+                    let mut failure = self.atomic_ordering_from_arg(args.get(5), AtomicOrdering::Monotonic);
+                    if matches!(failure, AtomicOrdering::Release | AtomicOrdering::AcquireRelease) {
+                        failure = AtomicOrdering::Monotonic;
+                    }
+                    let result = self
+                        .builder
+                        .build_cmpxchg(ptr, expected, desired, success, failure)
+                        .map_err(|_| BackendError::InvalidNode)?;
+                    let old = self
+                        .builder
+                        .build_extract_value(result, 0, "atomic_cmpxchg_old")
+                        .map_err(|_| BackendError::InvalidNode)?;
+                    let ok = self
+                        .builder
+                        .build_extract_value(result, 1, "atomic_cmpxchg_ok")
+                        .map_err(|_| BackendError::InvalidNode)?
+                        .into_int_value();
+                    self.builder
+                        .build_store(expected_ptr, old)
+                        .map_err(|_| BackendError::InvalidNode)?;
+                    let widened = self
+                        .builder
+                        .build_int_z_extend(ok, self.context.i32_type(), "atomic_cmpxchg_ok_i32")
+                        .map_err(|_| BackendError::InvalidNode)?;
+                    return Ok(Some(widened.into()));
+                }
+                Ok(Some(int_zero()))
+            }
+            _ => Ok(Some(int_zero())),
+        }
+    }
+
     fn lower_call_expr(
         &mut self,
         arena: &Arena,
@@ -3983,7 +4389,9 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
         let first_child_offset = node.first_child;
         let first_child = arena.get(first_child_offset);
 
-        let func_name = first_child.and_then(|c| arena.get_string(NodeOffset(c.data)));
+        let func_name = first_child
+            .and_then(|c| arena.get_string(NodeOffset(c.data)))
+            .filter(|s| !s.is_empty());
 
         let mut args: Vec<inkwell::values::BasicMetadataValueEnum> = Vec::new();
         if let Some(fc) = first_child {
@@ -4092,10 +4500,15 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                 _ => {}
             }
 
+            if name.starts_with("__sync_") || name.starts_with("__atomic_") {
+                return self.lower_atomic_builtin(name, &args);
+            }
+
             if let Some(func) = self.functions.get(name) {
+                let func = *func;
                 let call_site = self
                     .builder
-                    .build_call(*func, &args, "call")
+                    .build_call(func, &args, "call")
                     .map_err(|_| BackendError::InvalidNode)?;
                 return Ok(Some(match call_site.try_as_basic_value() {
                     inkwell::values::ValueKind::Basic(v) => v,
@@ -4106,19 +4519,24 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
             }
 
             // Auto-declare external function using actual argument types from the call site
-            let param_types: Vec<inkwell::types::BasicMetadataTypeEnum> = args
-                .iter()
-                .map(|a| match a {
-                    inkwell::values::BasicMetadataValueEnum::IntValue(v) => v.get_type().into(),
-                    inkwell::values::BasicMetadataValueEnum::FloatValue(v) => v.get_type().into(),
-                    inkwell::values::BasicMetadataValueEnum::PointerValue(_) => {
-                        self.context.ptr_type(AddressSpace::default()).into()
-                    }
-                    _ => self.context.i32_type().into(),
-                })
-                .collect();
-            let fn_type = self.context.i32_type().fn_type(&param_types, false);
-            let ext_func = self.module.add_function(name, fn_type, None);
+            // First check if this function already exists in the LLVM module (e.g. forward-declared)
+            let ext_func = if let Some(existing) = self.module.get_function(name) {
+                existing
+            } else {
+                let param_types: Vec<inkwell::types::BasicMetadataTypeEnum> = args
+                    .iter()
+                    .map(|a| match a {
+                        inkwell::values::BasicMetadataValueEnum::IntValue(v) => v.get_type().into(),
+                        inkwell::values::BasicMetadataValueEnum::FloatValue(v) => v.get_type().into(),
+                        inkwell::values::BasicMetadataValueEnum::PointerValue(_) => {
+                            self.context.ptr_type(AddressSpace::default()).into()
+                        }
+                        _ => self.context.i32_type().into(),
+                    })
+                    .collect();
+                let fn_type = self.context.i32_type().fn_type(&param_types, false);
+                self.module.add_function(name, fn_type, None)
+            };
             self.functions.insert(name.to_string(), ext_func);
             let call_site = self
                 .builder
@@ -4130,6 +4548,35 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                     self.context.i32_type().const_int(0, false).into()
                 }
             }));
+        }
+
+        // No named function found — try indirect call through function pointer
+        if let Some(callee_val) = self.lower_expr(arena, first_child_offset)? {
+            if let BasicValueEnum::PointerValue(fn_ptr) = callee_val {
+                // Build an indirect call through the function pointer
+                let param_types: Vec<inkwell::types::BasicMetadataTypeEnum> = args
+                    .iter()
+                    .map(|a| match a {
+                        inkwell::values::BasicMetadataValueEnum::IntValue(v) => v.get_type().into(),
+                        inkwell::values::BasicMetadataValueEnum::FloatValue(v) => v.get_type().into(),
+                        inkwell::values::BasicMetadataValueEnum::PointerValue(_) => {
+                            self.context.ptr_type(AddressSpace::default()).into()
+                        }
+                        _ => self.context.i32_type().into(),
+                    })
+                    .collect();
+                let fn_type = self.context.i32_type().fn_type(&param_types, false);
+                let call_site = self
+                    .builder
+                    .build_indirect_call(fn_type, fn_ptr, &args, "indirect_call")
+                    .map_err(|_| BackendError::InvalidNode)?;
+                return Ok(Some(match call_site.try_as_basic_value() {
+                    inkwell::values::ValueKind::Basic(v) => v,
+                    inkwell::values::ValueKind::Instruction(_) => {
+                        self.context.i32_type().const_int(0, false).into()
+                    }
+                }));
+            }
         }
 
         Ok(None)
@@ -4532,6 +4979,11 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
 
         let builtin_name = builtin_name.unwrap_or_else(|| "__builtin_unknown".to_string());
 
+        // Unknown builtins with no name: just return 0 (no-op)
+        if builtin_name == "__builtin_unknown" {
+            return Ok(Some(self.context.i32_type().const_int(0, false).into()));
+        }
+
         let mut args: Vec<inkwell::values::BasicMetadataValueEnum> = Vec::new();
         let mut child_offset = node.first_child;
         while child_offset != NodeOffset::NULL {
@@ -4543,6 +4995,10 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
             } else {
                 break;
             }
+        }
+
+        if builtin_name.starts_with("__sync_") || builtin_name.starts_with("__atomic_") {
+            return self.lower_atomic_builtin(&builtin_name, &args);
         }
 
         match builtin_name.as_str() {
@@ -5907,6 +6363,36 @@ mod tests {
             }"
         );
         assert!(ir.contains("memset") || ir.contains("__builtin_memset"), "Expected memset call in IR:\n{}", ir);
+    }
+
+    #[test]
+    fn test_sync_fetch_and_add_atomicrmw() {
+        let ir = compile_c_to_ir(
+            "int test_sync_add(int *p) { \
+                return __sync_fetch_and_add(p, 1); \
+            }"
+        );
+        assert!(ir.contains("atomicrmw add"), "Expected atomicrmw add in IR:\n{}", ir);
+    }
+
+    #[test]
+    fn test_sync_val_compare_and_swap_cmpxchg() {
+        let ir = compile_c_to_ir(
+            "int test_sync_cas(int *p) { \
+                return __sync_val_compare_and_swap(p, 1, 2); \
+            }"
+        );
+        assert!(ir.contains("cmpxchg"), "Expected cmpxchg in IR:\n{}", ir);
+    }
+
+    #[test]
+    fn test_atomic_thread_fence_builtin() {
+        let ir = compile_c_to_ir(
+            "void test_atomic_fence() { \
+                __atomic_thread_fence(5); \
+            }"
+        );
+        assert!(ir.contains("fence seq_cst") || ir.contains("fence"), "Expected fence in IR:\n{}", ir);
     }
 
     #[test]

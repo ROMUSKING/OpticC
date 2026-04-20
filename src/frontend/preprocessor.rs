@@ -1,4 +1,5 @@
 use crate::db::OpticDb;
+use crate::frontend::gnu_extensions::{AttrKind, BuiltinKind};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::env;
@@ -2099,6 +2100,17 @@ impl Preprocessor {
             Ok((value, j + 1))
         } else if tokens[j].kind == PpTokenKind::Identifier {
             let name = &tokens[j].text;
+            match name.as_str() {
+                "__has_attribute" => return self.parse_feature_probe(tokens, j, |value| self.supports_attribute(value)),
+                "__has_builtin" => return self.parse_feature_probe(tokens, j, |value| self.supports_builtin(value)),
+                "__has_feature" | "__has_extension" => {
+                    return self.parse_feature_probe(tokens, j, |value| self.supports_language_extension(value));
+                }
+                "__has_include" | "__has_include_next" => {
+                    return self.parse_has_include_probe(tokens, j, file);
+                }
+                _ => {}
+            }
             if let Some(def) = self.macros.get(name) {
                 match def {
                     MacroDefinition::ObjectLike { replacement } => {
@@ -2149,6 +2161,131 @@ impl Preprocessor {
                 tokens[j].text
             )))
         }
+    }
+
+    fn parse_feature_probe<F>(
+        &self,
+        tokens: &[PpToken],
+        start: usize,
+        predicate: F,
+    ) -> Result<(i64, usize), PreprocessorError>
+    where
+        F: Fn(&str) -> bool,
+    {
+        let (value, next) = self.parse_feature_probe_argument(tokens, start)?;
+        Ok((if predicate(&value) { 1 } else { 0 }, next))
+    }
+
+    fn parse_has_include_probe(
+        &self,
+        tokens: &[PpToken],
+        start: usize,
+        current_file: &str,
+    ) -> Result<(i64, usize), PreprocessorError> {
+        let (path, next) = self.parse_feature_probe_argument(tokens, start)?;
+        let exists = self.include_file_exists(&path, current_file);
+        Ok((if exists { 1 } else { 0 }, next))
+    }
+
+    fn parse_feature_probe_argument(
+        &self,
+        tokens: &[PpToken],
+        start: usize,
+    ) -> Result<(String, usize), PreprocessorError> {
+        let mut j = start + 1;
+        while j < tokens.len() && tokens[j].kind == PpTokenKind::Whitespace {
+            j += 1;
+        }
+
+        if j >= tokens.len() || tokens[j].text != "(" {
+            return Err(PreprocessorError::ConditionalError(
+                "expected ( after feature probe".to_string(),
+            ));
+        }
+        j += 1;
+
+        while j < tokens.len() && tokens[j].kind == PpTokenKind::Whitespace {
+            j += 1;
+        }
+
+        if j >= tokens.len() {
+            return Err(PreprocessorError::ConditionalError(
+                "unexpected end of feature probe".to_string(),
+            ));
+        }
+
+        let value = if tokens[j].kind == PpTokenKind::StringLit {
+            let text = &tokens[j].text;
+            j += 1;
+            if text.len() >= 2 {
+                text[1..text.len() - 1].to_string()
+            } else {
+                text.clone()
+            }
+        } else if tokens[j].text == "<" {
+            j += 1;
+            let mut path = String::new();
+            while j < tokens.len() && tokens[j].text != ">" {
+                if tokens[j].kind != PpTokenKind::Whitespace {
+                    path.push_str(&tokens[j].text);
+                }
+                j += 1;
+            }
+            if j >= tokens.len() || tokens[j].text != ">" {
+                return Err(PreprocessorError::ConditionalError(
+                    "unterminated angle-bracket include probe".to_string(),
+                ));
+            }
+            j += 1;
+            path
+        } else {
+            let value = tokens[j].text.clone();
+            j += 1;
+            value
+        };
+
+        while j < tokens.len() && tokens[j].kind == PpTokenKind::Whitespace {
+            j += 1;
+        }
+        if j >= tokens.len() || tokens[j].text != ")" {
+            return Err(PreprocessorError::ConditionalError(
+                "expected ) to close feature probe".to_string(),
+            ));
+        }
+
+        Ok((value, j + 1))
+    }
+
+    fn supports_attribute(&self, name: &str) -> bool {
+        !matches!(AttrKind::from_name(name), AttrKind::Other(_))
+    }
+
+    fn supports_builtin(&self, name: &str) -> bool {
+        BuiltinKind::is_builtin(name) || name.starts_with("__sync_") || name.starts_with("__atomic_")
+    }
+
+    fn supports_language_extension(&self, name: &str) -> bool {
+        matches!(
+            name,
+            "c_atomic"
+                | "gnu_asm"
+                | "gnu_attributes"
+                | "statement_expression"
+                | "c_static_assert"
+        )
+    }
+
+    fn include_file_exists(&self, path: &str, current_file: &str) -> bool {
+        let mut search_paths = Vec::new();
+        if let Some(parent) = Path::new(current_file).parent() {
+            search_paths.push(parent.to_path_buf());
+        }
+        search_paths.extend(self.include_paths.iter().cloned());
+
+        search_paths
+            .iter()
+            .map(|search_path| search_path.join(path))
+            .any(|full_path| full_path.exists())
     }
 
     fn parse_defined(
@@ -3221,6 +3358,34 @@ const char *s = STR(hello world);"#;
 
         let non_ws: Vec<&Token> = tokens.iter().filter(|t| !t.is_whitespace()).collect();
         assert!(non_ws.iter().any(|t| t.text == "extension_works"));
+    }
+
+    #[test]
+    fn test_if_expression_has_attribute_and_builtin() {
+        let (mut pp, _temp_dir) = create_test_preprocessor();
+
+        let source = "#if __has_attribute(packed)\nint attr_works = 1;\n#endif\n#if __has_builtin(__builtin_expect)\nint builtin_works = 1;\n#endif";
+        let tokens = pp.process_source(source, "test.c").unwrap();
+
+        let non_ws: Vec<&Token> = tokens.iter().filter(|t| !t.is_whitespace()).collect();
+        assert!(non_ws.iter().any(|t| t.text == "attr_works"));
+        assert!(non_ws.iter().any(|t| t.text == "builtin_works"));
+    }
+
+    #[test]
+    fn test_if_expression_has_include() {
+        let (mut pp, temp_dir) = create_test_preprocessor();
+
+        let header_path = temp_dir.path().join("feature_probe.h");
+        fs::write(&header_path, "#define FEATURE_PROBE 1\n").unwrap();
+        pp.add_include_path(temp_dir.path().to_str().unwrap());
+
+        let source = "#if __has_include(\"feature_probe.h\")\n#include \"feature_probe.h\"\nint include_works = FEATURE_PROBE;\n#endif";
+        let tokens = pp.process_source(source, "test.c").unwrap();
+
+        let non_ws: Vec<&Token> = tokens.iter().filter(|t| !t.is_whitespace()).collect();
+        assert!(non_ws.iter().any(|t| t.text == "include_works"));
+        assert!(non_ws.iter().any(|t| t.text == "1"));
     }
 
     #[test]

@@ -124,11 +124,27 @@ impl IntegrationTest {
     }
 
     pub fn validate_url(url: &str) -> bool {
-        url.starts_with("http://") || url.starts_with("https://")
+        url.starts_with("http://")
+            || url.starts_with("https://")
+            || url.starts_with("file://")
+            || Path::new(url).exists()
     }
 
     pub fn download_sqlite(&self) -> Result<PathBuf, String> {
         let zip_path = self.test_dir.join("sqlite-amalgamation.zip");
+
+        if let Some(local_path) = self.sqlite_url.strip_prefix("file://") {
+            let path = PathBuf::from(local_path);
+            if path.exists() {
+                return Ok(path);
+            }
+            return Err(format!("Local SQLite path does not exist: {}", path.display()));
+        }
+
+        let direct_path = PathBuf::from(&self.sqlite_url);
+        if direct_path.exists() {
+            return Ok(direct_path);
+        }
 
         fs::create_dir_all(&self.test_dir)
             .map_err(|e| format!("Failed to create test directory: {}", e))?;
@@ -173,6 +189,14 @@ impl IntegrationTest {
     }
 
     pub fn extract_sqlite(&self, zip_path: &Path) -> Result<PathBuf, String> {
+        if zip_path.is_dir() {
+            return self.find_sqlite3_c(zip_path);
+        }
+
+        if zip_path.file_name().and_then(|n| n.to_str()) == Some("sqlite3.c") {
+            return Ok(zip_path.to_path_buf());
+        }
+
         let extract_dir = self.test_dir.join("sqlite-extracted");
         fs::create_dir_all(&extract_dir)
             .map_err(|e| format!("Failed to create extract directory: {}", e))?;
@@ -360,6 +384,7 @@ const char *sqlite3_sourceid(void) {
         match cc {
             Ok(compiler) => {
                 let output = Command::new(&compiler)
+                    .arg("-fPIC")
                     .arg("-c")
                     .arg("-o")
                     .arg(obj_path)

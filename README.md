@@ -134,6 +134,12 @@ GNU C extensions, inline assembly, Kbuild integration, 30M+ LOC scale.
 ### Phase 4: Production 📋
 Optimization pipeline, DWARF debug info, LTO, cross-compilation.
 
+### Near-Term Execution Plan 🚀
+1. Use the new SQLite and rebuild suites as the standing performance gate.
+2. Complete M7–M10 for atomics, packed layouts, flexible arrays, and feature-test macros.
+3. Land freestanding CLI compatibility and Kbuild support for kernel subtrees.
+4. Track cold compile, warm recompile, and cache-driven wins against GCC and Clang.
+
 ### Kernel Compilation Target
 **Goal**: Compile a minimal Linux 6.6 LTS kernel (`tinyconfig`, x86_64) that boots in QEMU with serial console.
 
@@ -201,6 +207,12 @@ cargo run -- build --src-dir ./src -o myapp -t executable --link-libs m,pthread
 
 # Run benchmarks
 cargo run -- benchmark --suite all --compilers all --output-dir results
+
+# Benchmark SQLite-oriented workloads or a local sqlite3.c file
+cargo run -- benchmark --suite sqlite --sqlite-source /path/to/sqlite3.c --output-dir results
+
+# Benchmark cold compile vs warm recompile
+cargo run -- benchmark --suite rebuild --compilers all --runs 2 --output-dir results
 
 # Run SQLite integration test
 cargo run -- integration-test --test-dir /tmp/optic_test

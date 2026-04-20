@@ -17,20 +17,20 @@ The Linux kernel build system (Kbuild) invokes `CC` with a large set of GCC flag
 | `-S` | 📋 Missing | Compile to assembly (.s) |
 | `-E` | 📋 Missing | Preprocess only |
 | `-o <file>` | ✅ Implemented | Output file path |
-| `-x c` | 📋 Missing | Explicit language selection |
-| `-pipe` | 📋 Missing | Use pipes between stages (can ignore) |
+| `-x c` | ✅ Implemented | Accepted by driver for explicit C-language selection |
+| `-pipe` | ✅ Implemented | Accepted by driver and ignored safely |
 
 ### Preprocessing Flags
 | Flag | Status | Implementation Notes |
 |------|--------|---------------------|
 | `-I <path>` | ✅ Implemented | Add include search path |
 | `-D <name>=<val>` | ✅ Implemented | Define preprocessor macro |
-| `-U <name>` | 📋 Missing | Undefine preprocessor macro |
-| `-include <file>` | 📋 Missing | Force-include file before source |
-| `-isystem <path>` | 📋 Missing | System include path (lower priority than -I) |
-| `-iquote <path>` | 📋 Missing | Quote-include path |
-| `-nostdinc` | 📋 Missing | No standard system include paths |
-| `-Wp,-MD,<depfile>` | 📋 Missing | Dependency file via preprocessor |
+| `-U <name>` | ✅ Implemented | Undefines a named preprocessor macro in direct-driver mode |
+| `-include <file>` | ✅ Implemented | Accepted by driver; deeper force-include semantics pending |
+| `-isystem <path>` | ✅ Implemented | Accepted and forwarded as an include search path |
+| `-iquote <path>` | ✅ Implemented | Accepted and forwarded as an include search path |
+| `-nostdinc` | ✅ Implemented | Accepted by driver for freestanding flows |
+| `-Wp,-MD,<depfile>` | ✅ Implemented | Minimal make-compatible depfile output |
 
 ### Optimization Flags
 | Flag | Status | Implementation Notes |
@@ -47,14 +47,14 @@ The Linux kernel build system (Kbuild) invokes `CC` with a large set of GCC flag
 ### Warning Flags
 | Flag | Status | Implementation Notes |
 |------|--------|---------------------|
-| `-Wall` | 📋 Missing | Enable common warnings |
-| `-Wextra` | 📋 Missing | Enable extra warnings |
+| `-Wall` | ✅ Implemented | Accepted by driver and ignored safely |
+| `-Wextra` | ✅ Implemented | Accepted by driver and ignored safely |
 | `-Wpedantic` | 📋 Missing | Pedantic warnings |
 | `-Wno-<name>` | 📋 Missing | Disable specific warning |
 | `-Werror` | 📋 Missing | Warnings as errors |
 | `-Werror=<name>` | 📋 Missing | Specific warning as error |
 | `-w` | 📋 Missing | Suppress all warnings |
-| `-Wstrict-prototypes` | 📋 Missing | Kernel uses this |
+| `-Wstrict-prototypes` | ✅ Implemented | Accepted by driver and ignored safely for compatibility |
 
 ### Debug Flags
 | Flag | Status | Implementation Notes |
@@ -79,9 +79,9 @@ The Linux kernel build system (Kbuild) invokes `CC` with a large set of GCC flag
 | Flag | Status | Implementation Notes |
 |------|--------|---------------------|
 | `-m64` | 📋 Missing | 64-bit mode (default on x86_64) |
-| `-mcmodel=kernel` | 📋 Missing | Kernel code model → LLVM CodeModel::Kernel |
+| `-mcmodel=kernel` | ✅ Implemented | Accepted by driver; backend code model work still pending |
 | `-mcmodel=small` | 📋 Missing | Small code model (default) |
-| `-mno-red-zone` | 📋 Missing | Disable red zone → LLVM noredzone attr |
+| `-mno-red-zone` | ✅ Implemented | Accepted by driver; backend attribute hardening still pending |
 | `-march=<cpu>` | 📋 Missing | Target CPU architecture |
 | `-mtune=<cpu>` | 📋 Missing | Tune for CPU |
 | `-mpreferred-stack-boundary=<N>` | 📋 Missing | Stack alignment |
@@ -89,10 +89,10 @@ The Linux kernel build system (Kbuild) invokes `CC` with a large set of GCC flag
 ### Feature Flags
 | Flag | Status | Implementation Notes |
 |------|--------|---------------------|
-| `-ffreestanding` | 📋 Missing | Freestanding environment |
-| `-fno-strict-aliasing` | 📋 Missing | Disable TBAA |
-| `-fno-common` | 📋 Missing | No common symbols |
-| `-fno-PIE` / `-fno-PIC` | 📋 Missing | Position-dependent code |
+| `-ffreestanding` | ✅ Implemented | Accepted by driver and sets hosted macro to 0 |
+| `-fno-strict-aliasing` | ✅ Implemented | Accepted by driver; deep alias metadata control pending |
+| `-fno-common` | ✅ Implemented | Accepted by driver for kernel-style builds |
+| `-fno-PIE` / `-fno-PIC` | ✅ Implemented | Accepted by driver for position-dependent flows |
 | `-fshort-wchar` | 📋 Missing | 2-byte wchar_t |
 | `-fno-asynchronous-unwind-tables` | 📋 Missing | No .eh_frame |
 | `-fdata-sections` | 📋 Missing | Per-data-item sections |
@@ -103,21 +103,21 @@ The Linux kernel build system (Kbuild) invokes `CC` with a large set of GCC flag
 ### Info Flags
 | Flag | Status | Implementation Notes |
 |------|--------|---------------------|
-| `--version` | 📋 Missing | Print version string |
-| `-dumpversion` | 📋 Missing | Print version number only |
-| `-dumpmachine` | 📋 Missing | Print target triple |
-| `-v` | 📋 Missing | Verbose mode |
-| `-###` | 📋 Missing | Print commands without executing |
-| `-print-file-name=<name>` | 📋 Missing | Print path to file (Kbuild uses this) |
+| `--version` | ✅ Implemented | Prints OpticC version string |
+| `-dumpversion` | ✅ Implemented | Prints package version only |
+| `-dumpmachine` | ✅ Implemented | Prints x86_64-linux-gnu |
+| `-v` | ✅ Implemented | Accepted by driver; verbose output expansion pending |
+| `-###` | ✅ Implemented | Accepted by driver; command echo expansion pending |
+| `-print-file-name=<name>` | ✅ Implemented | Supports include path probing |
 
 ### Dependency File Flags
 | Flag | Status | Implementation Notes |
 |------|--------|---------------------|
-| `-MD` | 📋 Missing | Generate dependency file |
-| `-MF <file>` | 📋 Missing | Dependency output file |
-| `-MP` | 📋 Missing | Add phony targets for headers |
-| `-MT <target>` | 📋 Missing | Override dependency target name |
-| `-MMD` | 📋 Missing | Like -MD but skip system headers |
+| `-MD` | ✅ Implemented | Generates a make-compatible depfile |
+| `-MF <file>` | ✅ Implemented | Controls dependency output path |
+| `-MP` | ✅ Implemented | Adds phony dependency targets |
+| `-MT <target>` | ✅ Implemented | Overrides dependency target name |
+| `-MMD` | ✅ Implemented | Accepted as minimal depfile generation |
 
 ## FREESTANDING MODE
 
@@ -144,6 +144,8 @@ include/header2.h:
 - `-Wp,-MD,file.d` is Kbuild's preferred form (passes -MD to preprocessor)
 
 ## RESPONSE FILES
+
+Response files are now accepted by the direct driver and expanded before flag parsing.
 
 Some build systems pass compiler flags via response files:
 ```bash

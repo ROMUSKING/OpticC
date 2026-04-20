@@ -1,4 +1,6 @@
-use crate::build::{compile_source_to_object_with_stats, CompilePhaseTimings};
+use crate::build::{
+    clear_compile_cache, compile_source_to_object_with_stats, BuildConfig, CompilePhaseTimings,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
@@ -19,6 +21,7 @@ pub struct BenchmarkResult {
 #[serde(default)]
 pub struct BenchmarkMetrics {
     pub compile_time_ms: u64,
+    pub warm_compile_time_ms: u64,
     pub output_size_bytes: u64,
     pub peak_memory_kb: u64,
     pub preprocess_time_ms: u64,
@@ -43,6 +46,7 @@ impl BenchmarkMetrics {
     pub fn new() -> Self {
         BenchmarkMetrics {
             compile_time_ms: 0,
+            warm_compile_time_ms: 0,
             output_size_bytes: 0,
             peak_memory_kb: 0,
             preprocess_time_ms: 0,
@@ -61,6 +65,7 @@ impl BenchmarkMetrics {
     pub fn pass(tests: u64) -> Self {
         BenchmarkMetrics {
             compile_time_ms: 0,
+            warm_compile_time_ms: 0,
             output_size_bytes: 0,
             peak_memory_kb: 0,
             preprocess_time_ms: 0,
@@ -79,6 +84,7 @@ impl BenchmarkMetrics {
     pub fn fail(tests: u64, failed: u64) -> Self {
         BenchmarkMetrics {
             compile_time_ms: 0,
+            warm_compile_time_ms: 0,
             output_size_bytes: 0,
             peak_memory_kb: 0,
             preprocess_time_ms: 0,
@@ -107,6 +113,8 @@ pub enum BenchmarkSuite {
     Micro,
     Coreutils,
     Synthetic,
+    Sqlite,
+    Rebuild,
 }
 
 impl std::fmt::Display for BenchmarkSuite {
@@ -115,6 +123,8 @@ impl std::fmt::Display for BenchmarkSuite {
             BenchmarkSuite::Micro => write!(f, "micro"),
             BenchmarkSuite::Coreutils => write!(f, "coreutils"),
             BenchmarkSuite::Synthetic => write!(f, "synthetic"),
+            BenchmarkSuite::Sqlite => write!(f, "sqlite"),
+            BenchmarkSuite::Rebuild => write!(f, "rebuild"),
         }
     }
 }
@@ -240,6 +250,7 @@ pub struct BenchmarkRunner {
     pub optimization_levels: Vec<String>,
     pub results_dir: PathBuf,
     pub runs_per_benchmark: usize,
+    pub sqlite_source: Option<PathBuf>,
 }
 
 impl BenchmarkRunner {
@@ -267,6 +278,7 @@ impl BenchmarkRunner {
             optimization_levels: vec!["O0".to_string()],
             results_dir: PathBuf::from("benchmarks/results"),
             runs_per_benchmark: 5,
+            sqlite_source: None,
         }
     }
 
@@ -297,6 +309,11 @@ impl BenchmarkRunner {
         self
     }
 
+    pub fn with_sqlite_source(mut self, source: Option<PathBuf>) -> Self {
+        self.sqlite_source = source;
+        self
+    }
+
     pub fn run(&self) -> Result<Vec<BenchmarkResult>, BenchmarkError> {
         let mut all_results = Vec::new();
 
@@ -307,6 +324,8 @@ impl BenchmarkRunner {
                 BenchmarkSuite::Micro => self.run_micro_benchmarks()?,
                 BenchmarkSuite::Coreutils => self.run_coreutils_benchmarks()?,
                 BenchmarkSuite::Synthetic => self.run_synthetic_benchmarks()?,
+                BenchmarkSuite::Sqlite => self.run_sqlite_benchmarks()?,
+                BenchmarkSuite::Rebuild => self.run_rebuild_benchmarks()?,
             };
             all_results.extend(suite_results);
         }
@@ -384,6 +403,99 @@ impl BenchmarkRunner {
         Ok(results)
     }
 
+    pub fn run_sqlite_benchmarks(&self) -> Result<Vec<BenchmarkResult>, BenchmarkError> {
+        let mut results = Vec::new();
+
+        if let Some(sqlite_source) = self.sqlite_source.as_ref().filter(|path| path.exists()) {
+            let candidates = if sqlite_source.is_file() {
+                vec![sqlite_source.clone()]
+            } else {
+                let mut discovered = BuildConfig::discover_source_files(sqlite_source);
+                discovered.sort();
+                discovered
+            };
+
+            for src_path in candidates.into_iter().take(3) {
+                let name = format!(
+                    "sqlite_{}",
+                    src_path
+                        .file_stem()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or("source")
+                );
+                for compiler in &self.compilers {
+                    for opt in &self.optimization_levels {
+                        let result = self.run_path_benchmark(&name, &src_path, compiler, opt)?;
+                        results.push(result);
+                    }
+                }
+            }
+
+            if !results.is_empty() {
+                return Ok(results);
+            }
+        }
+
+        let workloads = vec![
+            ("sqlite_flags", MICRO_SQLITE_FLAGS),
+            ("sqlite_varint", MICRO_SQLITE_VARINT),
+            ("sqlite_struct_state", MICRO_SQLITE_STRUCT_STATE),
+            ("sqlite_arrow_cursor", MICRO_SQLITE_ARROW_CURSOR),
+        ];
+
+        for (name, source) in workloads {
+            for compiler in &self.compilers {
+                for opt in &self.optimization_levels {
+                    let result = self.run_single_benchmark(name, source, compiler, opt)?;
+                    results.push(result);
+                }
+            }
+        }
+
+        Ok(results)
+    }
+
+    pub fn run_rebuild_benchmarks(&self) -> Result<Vec<BenchmarkResult>, BenchmarkError> {
+        let mut results = Vec::new();
+
+        if let Some(sqlite_source) = self.sqlite_source.as_ref().filter(|path| path.exists()) {
+            let primary = if sqlite_source.is_file() {
+                sqlite_source.clone()
+            } else {
+                BuildConfig::discover_source_files(sqlite_source)
+                    .into_iter()
+                    .next()
+                    .unwrap_or_else(|| sqlite_source.clone())
+            };
+
+            if primary.is_file() {
+                for compiler in &self.compilers {
+                    for opt in &self.optimization_levels {
+                        let result = self.run_path_benchmark("sqlite_rebuild", &primary, compiler, opt)?;
+                        results.push(result);
+                    }
+                }
+                return Ok(results);
+            }
+        }
+
+        let workloads = vec![
+            ("rebuild_sqlite_flags", MICRO_SQLITE_FLAGS.to_string()),
+            ("rebuild_synthetic_10k", generate_synthetic_c(10_000)),
+        ];
+
+        for (name, source) in workloads {
+            for compiler in &self.compilers {
+                for opt in &self.optimization_levels {
+                    let result = self.run_single_benchmark(name, &source, compiler, opt)?;
+                    results.push(result);
+                }
+            }
+        }
+
+        Ok(results)
+    }
+
     fn run_single_benchmark(
         &self,
         name: &str,
@@ -397,45 +509,78 @@ impl BenchmarkRunner {
         let src_path = bench_dir.join("test.c");
         fs::write(&src_path, source)?;
 
+        self.run_path_benchmark(name, &src_path, compiler, optimization)
+    }
+
+    fn run_path_benchmark(
+        &self,
+        name: &str,
+        src_path: &Path,
+        compiler: &CompilerConfig,
+        optimization: &str,
+    ) -> Result<BenchmarkResult, BenchmarkError> {
+        let bench_dir = self.results_dir.join(name);
+        fs::create_dir_all(&bench_dir)?;
+
         let opt_flag = format!("-{}", optimization);
         let out_path = bench_dir.join(format!("test_{}_{}", compiler.name, optimization));
 
-        let mut measurements = Vec::new();
-        let mut compile_success = false;
+        if compiler.internal {
+            clear_compile_cache().map_err(|e| BenchmarkError::RuntimeError(e.to_string()))?;
+        }
 
-        for _ in 0..self.runs_per_benchmark {
-            let elapsed = self.measure_compile_time(compiler, &src_path, &out_path, &opt_flag);
-            if let Ok(ms) = elapsed {
-                measurements.push(ms);
-                compile_success = true;
-            } else {
-                break;
+        let cold_measurement = match self.measure_compile_time(compiler, src_path, &out_path, &opt_flag) {
+            Ok(measurement) => measurement,
+            Err(_) => {
+                return Ok(BenchmarkResult {
+                    name: name.to_string(),
+                    compiler: compiler.name.clone(),
+                    version: compiler.get_version(),
+                    optimization: optimization.to_string(),
+                    metrics: BenchmarkMetrics {
+                        correctness: "error".to_string(),
+                        ..BenchmarkMetrics::new()
+                    },
+                })
+            }
+        };
+
+        let mut all_measurements = vec![cold_measurement];
+        let mut warm_measurements = Vec::new();
+
+        for _ in 1..self.runs_per_benchmark {
+            match self.measure_compile_time(compiler, src_path, &out_path, &opt_flag) {
+                Ok(measurement) => {
+                    warm_measurements.push(measurement);
+                    all_measurements.push(measurement);
+                }
+                Err(_) => {
+                    return Ok(BenchmarkResult {
+                        name: name.to_string(),
+                        compiler: compiler.name.clone(),
+                        version: compiler.get_version(),
+                        optimization: optimization.to_string(),
+                        metrics: BenchmarkMetrics {
+                            correctness: "error".to_string(),
+                            ..BenchmarkMetrics::new()
+                        },
+                    })
+                }
             }
         }
 
-        if !compile_success || measurements.is_empty() {
-            return Ok(BenchmarkResult {
-                name: name.to_string(),
-                compiler: compiler.name.clone(),
-                version: compiler.get_version(),
-                optimization: optimization.to_string(),
-                metrics: BenchmarkMetrics {
-                    correctness: "error".to_string(),
-                    ..BenchmarkMetrics::new()
-                },
-            });
-        }
-
-        let avg_compile_time =
-            measurements.iter().map(|m| m.total_ms).sum::<u64>() / measurements.len() as u64;
-
         let output_size = self.measure_output_size(&out_path).unwrap_or(0);
-
-        let measurement = average_measurements(&measurements);
+        let measurement = average_measurements(&all_measurements);
+        let warm_measurement = average_measurements(&warm_measurements);
         let correctness = self.measure_correctness(&out_path, compiler, name);
 
         let metrics = BenchmarkMetrics {
-            compile_time_ms: avg_compile_time,
+            compile_time_ms: cold_measurement.total_ms,
+            warm_compile_time_ms: if warm_measurements.is_empty() {
+                cold_measurement.total_ms
+            } else {
+                warm_measurement.total_ms
+            },
             output_size_bytes: output_size,
             peak_memory_kb: measurement.peak_memory_kb,
             preprocess_time_ms: measurement.phase_timings.preprocess_ms,
@@ -600,16 +745,17 @@ pub fn generate_markdown_report(results: &[BenchmarkResult]) -> String {
         .into_iter()
         .collect();
 
-    md.push_str("| Benchmark | Compiler | Optimization | Compile Time (ms) | Output Size (B) | Correctness |\n");
-    md.push_str("|-----------|----------|--------------|-------------------|-----------------|-------------|\n");
+    md.push_str("| Benchmark | Compiler | Optimization | Cold Compile (ms) | Warm Recompile (ms) | Output Size (B) | Correctness |\n");
+    md.push_str("|-----------|----------|--------------|-------------------|---------------------|-----------------|-------------|\n");
 
     for result in results {
         md.push_str(&format!(
-            "| {} | {} | {} | {} | {} | {} |\n",
+            "| {} | {} | {} | {} | {} | {} | {} |\n",
             result.name,
             result.compiler,
             result.optimization,
             result.metrics.compile_time_ms,
+            result.metrics.warm_compile_time_ms,
             result.metrics.output_size_bytes,
             result.metrics.correctness,
         ));
@@ -636,11 +782,17 @@ pub fn generate_markdown_report(results: &[BenchmarkResult]) -> String {
                             r.compiler, base.compiler
                         ));
                     } else if base.metrics.compile_time_ms > 0 {
-                        let ratio =
+                        let cold_ratio =
                             r.metrics.compile_time_ms as f64 / base.metrics.compile_time_ms as f64;
+                        let warm_ratio = if base.metrics.warm_compile_time_ms > 0 {
+                            r.metrics.warm_compile_time_ms as f64
+                                / base.metrics.warm_compile_time_ms as f64
+                        } else {
+                            cold_ratio
+                        };
                         md.push_str(&format!(
-                            "- {} vs {}: {:.2}x compile time\n",
-                            r.compiler, base.compiler, ratio
+                            "- {} vs {}: {:.2}x cold compile, {:.2}x warm recompile\n",
+                            r.compiler, base.compiler, cold_ratio, warm_ratio
                         ));
                     }
                 }
@@ -673,6 +825,11 @@ pub fn generate_markdown_report(results: &[BenchmarkResult]) -> String {
     md.push_str(&format!("- Failed: {}\n", failed));
     md.push_str(&format!("- Errors: {}\n", errors));
     md.push_str(&format!("- Skipped correctness checks: {}\n", skipped));
+    let rebuild_measured = results
+        .iter()
+        .filter(|r| r.metrics.warm_compile_time_ms > 0)
+        .count();
+    md.push_str(&format!("- Rebuild measurements captured: {}\n", rebuild_measured));
 
     let opticc_results: Vec<&BenchmarkResult> =
         results.iter().filter(|r| r.compiler == "opticc").collect();
@@ -737,6 +894,11 @@ pub fn calculate_averages(results: &[BenchmarkResult]) -> Vec<BenchmarkResult> {
             version: first.version.clone(),
             metrics: BenchmarkMetrics {
                 compile_time_ms: avg_compile,
+                warm_compile_time_ms: group
+                    .iter()
+                    .map(|r| r.metrics.warm_compile_time_ms)
+                    .sum::<u64>()
+                    / group.len() as u64,
                 output_size_bytes: avg_output,
                 peak_memory_kb: avg_memory,
                 preprocess_time_ms: group
@@ -773,15 +935,16 @@ pub fn calculate_averages(results: &[BenchmarkResult]) -> Vec<BenchmarkResult> {
 
 pub fn generate_comparison_table(results: &[BenchmarkResult]) -> String {
     let mut table = String::new();
-    table.push_str("Benchmark | Compiler | Compile Time (ms) | Output Size (B) | Correctness\n");
-    table.push_str("--- | --- | --- | --- | ---\n");
+    table.push_str("Benchmark | Compiler | Cold Compile (ms) | Warm Recompile (ms) | Output Size (B) | Correctness\n");
+    table.push_str("--- | --- | --- | --- | --- | ---\n");
 
     for r in results {
         table.push_str(&format!(
-            "{} | {} | {} | {} | {}\n",
+            "{} | {} | {} | {} | {} | {}\n",
             r.name,
             r.compiler,
             r.metrics.compile_time_ms,
+            r.metrics.warm_compile_time_ms,
             r.metrics.output_size_bytes,
             r.metrics.correctness,
         ));
@@ -1163,6 +1326,7 @@ mod tests {
     fn test_benchmark_metrics_default() {
         let metrics = BenchmarkMetrics::default();
         assert_eq!(metrics.compile_time_ms, 0);
+        assert_eq!(metrics.warm_compile_time_ms, 0);
         assert_eq!(metrics.output_size_bytes, 0);
         assert_eq!(metrics.peak_memory_kb, 0);
         assert_eq!(metrics.correctness, "error");
@@ -1173,13 +1337,18 @@ mod tests {
         let micro = BenchmarkSuite::Micro;
         let coreutils = BenchmarkSuite::Coreutils;
         let synthetic = BenchmarkSuite::Synthetic;
+        let sqlite = BenchmarkSuite::Sqlite;
+        let rebuild = BenchmarkSuite::Rebuild;
 
         assert_eq!(format!("{}", micro), "micro");
         assert_eq!(format!("{}", coreutils), "coreutils");
         assert_eq!(format!("{}", synthetic), "synthetic");
+        assert_eq!(format!("{}", sqlite), "sqlite");
+        assert_eq!(format!("{}", rebuild), "rebuild");
 
         assert_ne!(micro, coreutils);
         assert_ne!(coreutils, synthetic);
+        assert_ne!(sqlite, rebuild);
     }
 
     #[test]
