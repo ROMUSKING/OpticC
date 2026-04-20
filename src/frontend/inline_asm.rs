@@ -1,4 +1,4 @@
-use crate::arena::{Arena, NodeOffset};
+use crate::arena::NodeOffset;
 use crate::frontend::parser::{ParseError, Parser, TokenKind};
 
 pub const AST_ASM_STMT: u16 = 207;

@@ -515,6 +515,10 @@ impl Parser {
                 | "__typeof__"
                 | "__signed__"
                 | "__signed"
+                | "__builtin_va_list"
+                | "__int128"
+                | "__int128_t"
+                | "__uint128_t"
         ) {
             return true;
         }
@@ -842,6 +846,7 @@ impl Parser {
             "enum" => return self.parse_enum_specifier(),
             "_Bool" => 14,
             "_Complex" => 15,
+            "__builtin_va_list" | "__int128" | "__int128_t" | "__uint128_t" => 2,
             "typeof" | "__typeof__" => {
                 return self.parse_typeof_expr();
             }
@@ -1085,7 +1090,7 @@ impl Parser {
                 if self.current_token().kind != TokenKind::Identifier {
                     break;
                 }
-                let name = self.current_token().text.clone();
+                let _name = self.current_token().text.clone();
                 self.advance();
 
                 let value = if self.skip_punctuator("=") {
@@ -1355,7 +1360,7 @@ impl Parser {
 
     fn parse_compound_statement(
         &mut self,
-        parent: Option<NodeOffset>,
+        _parent: Option<NodeOffset>,
     ) -> Result<NodeOffset, ParseError> {
         let mut first_item = NodeOffset::NULL;
         let mut last_item = NodeOffset::NULL;
@@ -1858,7 +1863,7 @@ impl Parser {
             None
         };
 
-        if let Some((op_code, compound)) = op {
+        if let Some((op_code, _compound)) = op {
             self.advance();
             let right = self.parse_assignment_expression()?;
             return Ok(self.alloc_node(73, op_code, NodeOffset::NULL, left, right));
@@ -2012,7 +2017,7 @@ impl Parser {
             if self.is_type_specifier() || self.is_type_qualifier() {
                 let type_spec = self.parse_declaration_specifiers()?;
                 // Handle abstract declarator (pointer/array part of cast type)
-                let mut cast_type = type_spec;
+                let cast_type = type_spec;
                 if self.current_token().text == "*" {
                     let ptr_decl = self.parse_declarator()?;
                     if ptr_decl != NodeOffset::NULL {
@@ -2078,14 +2083,8 @@ impl Parser {
                     self.advance();
                     let member_offset =
                         self.arena.store_string(&member).unwrap_or(NodeOffset::NULL);
-                    let member_node = self.alloc_node(
-                        60,
-                        member_offset.0,
-                        NodeOffset::NULL,
-                        NodeOffset::NULL,
-                        NodeOffset::NULL,
-                    );
-                    expr = self.alloc_node(69, 0, NodeOffset::NULL, expr, member_node);
+                    // Store field name offset in data (bit 31=0 for dot)
+                    expr = self.alloc_node(69, member_offset.0, NodeOffset::NULL, expr, NodeOffset::NULL);
                 }
             } else if self.skip_punctuator("->") {
                 if self.current_token().kind == TokenKind::Identifier {
@@ -2093,14 +2092,9 @@ impl Parser {
                     self.advance();
                     let member_offset =
                         self.arena.store_string(&member).unwrap_or(NodeOffset::NULL);
-                    let member_node = self.alloc_node(
-                        60,
-                        member_offset.0,
-                        NodeOffset::NULL,
-                        NodeOffset::NULL,
-                        NodeOffset::NULL,
-                    );
-                    expr = self.alloc_node(69, 1, NodeOffset::NULL, expr, member_node);
+                    // Store field name offset in data (bit 31=1 for arrow)
+                    let data = member_offset.0 | 0x8000_0000u32;
+                    expr = self.alloc_node(69, data, NodeOffset::NULL, expr, NodeOffset::NULL);
                 }
             } else if self.skip_punctuator("++") {
                 expr = self.alloc_node(65, 6, NodeOffset::NULL, expr, NodeOffset::NULL);
@@ -2192,7 +2186,14 @@ impl Parser {
                 ))
             }
             TokenKind::IntConstant => {
-                let value = token.text.parse::<u32>().unwrap_or(0);
+                let text = token.text.trim_end_matches(|c| matches!(c, 'u'|'U'|'l'|'L'));
+                let value: u32 = if let Some(hex) = text.strip_prefix("0x").or_else(|| text.strip_prefix("0X")) {
+                    u32::from_str_radix(hex, 16).unwrap_or(0)
+                } else if text.starts_with('0') && text.len() > 1 {
+                    u32::from_str_radix(&text[1..], 8).unwrap_or(0)
+                } else {
+                    text.parse::<u32>().unwrap_or(0)
+                };
                 self.advance();
                 Ok(self.alloc_node(
                     61,

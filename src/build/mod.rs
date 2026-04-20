@@ -902,6 +902,9 @@ fn compile_source_to_object_with_stats_impl(
         .map_err(|e| BuildError::CompileError(source.display().to_string(), e.to_string()))?;
     timings.ir_write_ms = ir_start.elapsed().as_millis() as u64;
 
+    // Debug: always save a copy of the IR for inspection
+    let _ = fs::copy(ll_path, "/tmp/optic_last_ir.ll");
+
     let llc = find_tool(&["llc-18", "llc", "llc-17", "llc-16"])?;
     let llc_start = Instant::now();
     let llc_output = if return_thunk_extern {
@@ -917,7 +920,15 @@ fn compile_source_to_object_with_stats_impl(
 
         if asm_output.status.success() {
             let asm = fs::read_to_string(&asm_path).map_err(BuildError::IoError)?;
+            // Debug: save pre-rewrite assembly
+            if let Ok(debug_asm) = std::env::var("OPTIC_DEBUG_ASM") {
+                let _ = fs::write(&debug_asm, &asm);
+            }
             let rewritten = rewrite_return_thunks_for_kernel(&asm);
+            // Debug: save post-rewrite assembly
+            if let Ok(debug_asm_post) = std::env::var("OPTIC_DEBUG_ASM_POST") {
+                let _ = fs::write(&debug_asm_post, &rewritten);
+            }
             fs::write(&asm_path, rewritten).map_err(BuildError::IoError)?;
             let cc = find_tool(&["clang", "gcc"])?;
             let assembled = Command::new(&cc)
@@ -1032,6 +1043,12 @@ fn compile_to_ir_artifacts(
                 .map_err(|e| format!("Preprocessor error: {}", e))?
         };
         let preprocess_ms = preprocess_start.elapsed().as_millis() as u64;
+
+        // Debug: save preprocessed tokens for inspection
+        {
+            let token_dump: String = tokens.iter().map(|t| format!("{} ", t.text)).collect();
+            let _ = fs::write("/tmp/optic_last_tokens.txt", &token_dump);
+        }
 
         let estimated_nodes = (tokens.len() / 2).max(1024) as u32;
 

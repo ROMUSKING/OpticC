@@ -255,7 +255,7 @@ impl Arena {
             return None;
         }
 
-        let slot_size = std::mem::size_of::<CAstNode>() as u32;
+        let _slot_size = std::mem::size_of::<CAstNode>() as u32;
         let string_slot = offset.0 - self.string_start;
         let byte_offset = (self.string_start as usize) * std::mem::size_of::<CAstNode>()
             + (string_slot as usize) * std::mem::size_of::<CAstNode>();
@@ -315,7 +315,7 @@ impl Arena {
             return None;
         }
 
-        let slot_size = std::mem::size_of::<CAstNode>() as u32;
+        let _slot_size = std::mem::size_of::<CAstNode>() as u32;
         let string_slot = offset.0 - self.string_start;
         let byte_offset = (self.string_start as usize) * std::mem::size_of::<CAstNode>()
             + (string_slot as usize) * std::mem::size_of::<CAstNode>();

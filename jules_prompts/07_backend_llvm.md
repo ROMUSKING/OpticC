@@ -36,15 +36,15 @@ The LLVM backend now supports typed lowering for several core C types. Current w
 - [x] **Block scope**: `scope_stack: Vec<HashMap<String, Option<VariableBinding>>>` field. `push_scope()`/`pop_scope()` bracket `lower_compound`. `insert_scoped_variable()` saves previous binding before overwriting, restores on pop.
 - [x] **Platform macros**: Preprocessor `platform_fallback_macros()` provides __linux__, __x86_64__, __LP64__, __BYTE_ORDER__, __CHAR_BIT__, __SIZE_TYPE__, etc. when no system compiler detected.
 
-### KEY AST LAYOUT (after parser fix, 2026-04-17)
+### KEY AST LAYOUT (after parser fix, 2026-04-17; updated 2026-04-21)
 The parser now chains child nodes entirely via first_child chains, not via next_sibling of parent nodes:
 - `kind=21` (var_decl): `first_child = type_spec → kind=73(init_declarator)`. The init_declarator has `first_child=kind=60(name)`, `next_sibling=init_expr`.
 - `kind=23` (func_def): `first_child = return_type_spec → kind=9(func_decl) → kind=40(body)`. The kind=9 has `first_child=kind=60(name) → kind=24(param1) → kind=24(param2)`.
 - `kind=24` (param_decl): `first_child = type_spec → kind=60(name)`. Name is last node in first_child chain.
-- `kind=69` (member_access): `first_child=base_expr`, `next_sibling=field_ident`. NOTE: next_sibling here is the field name, not a sibling statement.
+- `kind=69` (member_access): `data = (is_arrow << 31) | string_offset_of_field_name`. `first_child = base_expr`. NOTE: field name is in `data`, NOT in `next_sibling` (which is reserved for statement chaining).
 - `kind=9.next_sibling` is safe for link_siblings (params not stored there anymore).
 
-### REMAINING BUGS (blockers for real-world C — tested 2026-04-19)
+### REMAINING BUGS (blockers for real-world C — tested 2026-04-20)
 - [x] **sizeof(type) returns 0**: Fixed. sizeof tokenized as Keyword not Punctuator.
 - [x] **Ternary operator always returned RHS**: Fixed. coerce_to_bool + build_select.
 - [x] **Comma operator returned first value**: Fixed. Return right operand.
@@ -133,3 +133,77 @@ These backend features are required for Linux kernel compilation:
 - **inkwell 0.9**: Pass manager API changed; `optimize()` is a no-op stub.
 - **Symbol table scope**: Nested block scope implemented via `scope_stack`. Functions still clear variables on entry, but compound statements push/pop properly.
 - **Debug eprintln!s**: Parser and backend have many `eprintln!` calls. Do NOT use `sed -i 's/eprintln!.*//'` — it will break multi-line macros. Use a Python script with exact string replacement instead.
+
+## SQLITE COMPILATION PROGRESS (2026-04-20)
+
+### Fixes Made for SQLite Scale
+1. **Pointer arithmetic in apply_assignment_op** (~line 1333): GEP-based ptr+=int, ptr-=int. ptr-ptr via ptrdiff.
+2. **Post-function ret void fix** (~line 2072): Walks all BBs, replaces `ret void` in non-void functions with typed defaults.
+3. **Return type reconciliation** (~line 1931): Queries actual LLVM function signature to override ret_llvm when pre-registered type differs.
+4. **Switch dedup** (~line 2585): HashMap-based dedup of case values before `build_switch`. Removed next_sibling recursion from `collect_switch_cases` that caused double-counting.
+5. **`__builtin_unknown` no-op** (~line 4691): Unknown builtins return `i32 0` instead of emitting invalid external calls.
+6. **Function dedup** (~line 1742, 4257): `module.get_function()` before `add_function()` prevents LLVM from creating `.NNNN` suffixed duplicates. Eliminated 1304 spurious declarations.
+7. **Empty func_name filter** (~line 4135): `.filter(|s| !s.is_empty())` prevents `@0` functions from empty-string names.
+8. **Indirect calls** (~line 4290): `build_indirect_call` fallback when no named function found (function pointer callees).
+
+### Remaining SQLite Blockers (33 undefined references)
+- **Function pointer params** (22 refs: xDel, xDestroy, xSectorSize, xInit, xCleanup, xCallback, vtabCallConstructor, u8): Parameters declared as function pointers (e.g., `void(*xDel)(void*)`) are stored in `self.variables` as `ptr` type, BUT when used as call arguments the backend finds them in `self.variables` and loads them correctly. The real issue: these are being passed through from a DIFFERENT scope or the param isn't being registered at all because `extract_param_type_name` only detects `kind=7` (pointer) but not `kind=9` (function pointer declarator) nesting.
+- **va_list functions** (8 refs): Functions defined with `va_list` parameter fail to compile because the parser doesn't resolve `va_list` / `__builtin_va_list` as a recognized type, causing param collection to fail and the function body to be skipped.
+- **Runtime segfault**: openDatabase→databaseName crashes. Likely due to semantic correctness issues in complex control flow, struct member access chains, or incorrect function pointer calls.
+
+### Post-Processing Scripts (temporary, for IR fixup)
+- `/tmp/sqlite_test/fix_ir.py`: Fixes call arg type mismatches (ptr where i32 expected → i32 0)
+- `/tmp/sqlite_test/cleanup_ir.py`: Removes dead code after terminators, fixes branches to undefined labels (→unreachable), fixes `br label %entry` (→unreachable)
+
+## SQLITE COMPILATION PROGRESS — SESSION 3 (2026-04-21)
+
+### Major Fixes Applied
+
+#### Global Struct Support (ALL VERIFIED)
+1. **`lower_global_decl` bare-identifier global vars**: `static struct Config g;` is parsed as kind=20 with children `[kind=4 struct_spec, kind=60 "g"]` — no kind=21 wrapper. Added bare-identifier (kind=60) handling in `lower_global_decl` that creates the global variable directly.
+
+2. **`global_struct_tags` persistent tracking**: Added `global_struct_tags: HashMap<String, String>` to CodeGen struct. At function entry, these are merged into `var_struct_tag` so global struct members can be accessed via GEP. Without this, GEP indices defaulted to 0 for all global struct members.
+
+3. **`scan_global_var_shape` skips type specifier nodes**: The function was recursing into kind=4 (struct) nodes and picking up the struct TAG name (e.g., "Config") as the variable name instead of "g". Fixed by adding `!matches!(node.kind, 4 | 5 | 1..=3 | 6 | 83)` to the recursion guard.
+
+4. **`struct_tag_fields` fallback in GEP index lookup**: `lower_member_access_ptr` only tried `struct_gep_info` (bitfield structs) and `struct_fields` (per-variable map) for field index. Added `struct_tag_fields` as a third fallback. Result: `g.b` with `b` at index 1 now emits `getelementptr inbounds ({ i32, i32 }, ptr @g, i32 0, i32 1)` correctly.
+
+5. **Nested dot access (`a.b.c`)**: Added recursive path for DOT access on complex base expressions. When the base of a dot access is itself a member access (kind=69), we call `lower_member_access_ptr` recursively on the base to get its lvalue pointer, then GEP further into the nested struct using `struct_tag_types` lookup. Verified: `cfg.m.flag` now emits `@cfg, i32 0, i32 1, i32 1`.
+
+6. **Nested struct field types**: `build_struct_llvm_type` and `register_struct_types_in_node` were calling `node_kind_to_llvm_type(4)` → `i32` for nested struct fields. Fixed to save the struct specifier node offset and call `specifier_to_llvm_type` for kind=4/5 fields. Result: `struct Config { int n; struct Mem m; }` now emits `{ i32, { i32, i32 } }` instead of `{ i32, i32 }`.
+
+7. **`lower_binop` StructValue guard**: Added `is_struct_value()` check before `into_int_value()` calls in the non-float non-pointer branch. Prevents panic when a struct value leaks into binary operations.
+
+#### Struct Member Access Encoding (from prior session)
+8. **Kind=69 data encoding**: Member access nodes (kind=69) now store field name as string offset in `data & 0x7FFF_FFFF`, with arrow-vs-dot in bit 31. Parser creates no separate field-name sibling node. This prevents call-arg linking from clobbering the field name.
+
+9. **`lower_call_expr` func_name filter**: Only extract `func_name` for `kind==60` callee nodes (direct function calls). Kind=69 callee nodes (member access calls) no longer incorrectly emit calls to the field name as a global function.
+
+#### Other Fixes
+10. **Hex/octal/suffix literal parsing**: `parse_primary_expression` handles `0x`/`0X` hex, leading-zero octal, and `UL` suffixes properly.
+11. **Fence instruction name**: Changed `"atomic_fence"` to `""` — named instructions for void-type (fence) are invalid in LLVM IR.
+12. **struct_gep_info for non-bitfield structs**: Previously `struct_gep_info` was only populated for bitfield structs. Added `struct_tag_fields` as a fallback in GEP index resolution.
+
+### SQLite Runtime Status (2026-04-21)
+- **IR valid**: `llvm-as-18 sqlite3.ll` succeeds ✅
+- **Object file**: `llc-18 -filetype=obj` succeeds ✅  
+- **Links**: Binary links with 5 stubs (u8.93, xCallback, xInit, xSectorSize, vtabCallConstructor) — NOT `xMutexAlloc` etc. (now resolved as indirect calls!) ✅
+- **No longer hangs**: Previous session's hang in `sqlite3_initialize()` is fixed ✅
+- **sqlite3_initialize() returns NOMEM (rc=7)**: Root cause identified — typedef'd type names in struct members (u8, u16, u32, sqlite3_mem_methods, sqlite3_mutex_methods) are stored as kind=2 (i32) in the AST, causing wrong LLVM struct layouts. GEP indices are correct but byte offsets are wrong (u8 fields take 4 bytes instead of 1).
+
+### NEXT CRITICAL FIX: Typedef Type Resolution in Struct Members
+
+**Root cause of NOMEM**: `parse_type_specifier` maps all typedef names (u8, u32, etc.) to kind=2 (i32) via `_ => 2`. This loses the typedef chain. The LLVM struct for `sqlite3Config` uses i32 for all u8/u16/u32 fields instead of i8/i16/i32.
+
+**Required fix**:
+1. In `parse_type_specifier`, when the text is a known typedef name, emit a "typedef type" AST node that stores the typedef name string. E.g., use a new kind=86 node with `data = string_offset_of_name`.
+2. In `specifier_to_llvm_type` and `node_kind_to_llvm_type`, resolve kind=86 by looking up the typedef's underlying type. The TypeSystem already has typedef tracking — use `types.resolve_typedef(name)` to get the underlying type.
+3. Alternatively: store a `typedef_types: HashMap<String, u16>` mapping typedef name → base kind (2 for int, 1 for char, etc.) so the backend can resolve without a full type system.
+
+**Simpler interim approach**: Pre-populate a `typedef_primitive_types` map during parsing:
+- When parsing `typedef unsigned char u8;`, store "u8" → kind=1 (char, i8) in parser state
+- When `parse_type_specifier` sees "u8", emit kind=1 instead of kind=2  
+- This fixes u8/u16/u32/u64 type widths without a full typedef resolver
+
+**Code location**: `src/frontend/parser.rs` → `parse_type_specifier` (~line 829), `parse_external_declaration` (~line 587 — typedef registration).
+

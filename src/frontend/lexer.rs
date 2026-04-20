@@ -1,4 +1,4 @@
-use crate::arena::{Arena, CAstNode, NodeFlags, NodeOffset};
+use crate::arena::Arena;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TokenKind {
@@ -35,7 +35,7 @@ impl Token {
 pub struct Lexer<'a> {
     source: &'a [u8],
     position: u32,
-    arena: Option<&'a Arena>,
+    _arena: Option<&'a Arena>,
 }
 
 impl<'a> Lexer<'a> {
@@ -43,7 +43,7 @@ impl<'a> Lexer<'a> {
         Self {
             source,
             position: 0,
-            arena: None,
+            _arena: None,
         }
     }
 
@@ -51,7 +51,7 @@ impl<'a> Lexer<'a> {
         Self {
             source,
             position: 0,
-            arena: Some(arena),
+            _arena: Some(arena),
         }
     }
 
@@ -155,6 +155,7 @@ impl<'a> Lexer<'a> {
                 self.advance();
             } else if (c == b'e' || c == b'E') && !has_exponent {
                 has_exponent = true;
+                let _ = has_exponent; // silence warning since we don't read it again
                 self.advance();
                 if self.current_byte() == Some(b'+') || self.current_byte() == Some(b'-') {
                     self.advance();

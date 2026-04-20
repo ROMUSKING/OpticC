@@ -78,6 +78,7 @@ OpticC already includes a substantial preprocessor implementation. The current c
   - Variadic macros with complex argument patterns
   - Macros that expand to partial syntax (e.g., `#define BEGIN {` without matching `}`)
   - Nested macro definitions with conditional compilation
+- **va_list / __builtin_va_list typedef**: The preprocessor/parser pipeline does NOT recognize `va_list` or `__builtin_va_list` as a valid type. Functions with `va_list` parameters (e.g., `char *sqlite3VMPrintf(sqlite3 *db, const char *zFormat, va_list ap)`) fail to compile because param extraction can't resolve the type. **FIX NEEDED**: Add `va_list` and `__builtin_va_list` to the typedef set (they're typedefed in the preprocessed output as `typedef __builtin_va_list __gnuc_va_list; typedef __gnuc_va_list va_list;`).
 - **LLVM toolchain caveat**: the repository now targets the LLVM 18 C API through `inkwell`/`llvm-sys`; keep Cargo pointed at `/usr/lib/llvm-18` via `LLVM_SYS_181_PREFIX` when validating.
 - **Next step**: Enhance preprocessor to handle attribute-style macros and complex variadic patterns for SQLite compilation.
 

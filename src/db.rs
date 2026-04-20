@@ -1,4 +1,4 @@
-use redb::{Database, ReadableDatabase, ReadableTable, ReadableTableMetadata, TableDefinition};
+use redb::{Database, ReadableDatabase, ReadableTableMetadata, TableDefinition};
 use std::path::Path;
 
 const FILE_HASHES_TABLE: TableDefinition<&[u8; 32], &str> = TableDefinition::new("file_hashes");

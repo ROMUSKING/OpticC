@@ -821,7 +821,7 @@ mod tests {
         let (_temp, mut parser) = create_parser();
         let source = "typeof(int) x;";
         let _ = parser.parse(source);
-        assert!(parser.is_gnu_keyword() || true);
+        let _ = parser.is_gnu_keyword();
     }
 
     #[test]

@@ -169,14 +169,15 @@ impl IntegrationTest {
 
             file.write_all(&bytes)
                 .map_err(|e| format!("Failed to write zip file: {}", e))?;
+
+            return Ok(zip_path);
         }
 
         #[cfg(not(feature = "network"))]
         {
+            let _ = zip_path;
             return Err("Network downloads require the 'network' feature. This is an environment limitation.".to_string());
         }
-
-        Ok(zip_path)
     }
 
     pub fn download_sqlite_mock(&self) -> Result<PathBuf, String> {
@@ -358,7 +359,7 @@ const char *sqlite3_sourceid(void) {
         let mut builder = Builder::new(config);
         let build_result = builder.build();
 
-        let elapsed = start.elapsed().as_millis() as u64;
+        let _elapsed = start.elapsed().as_millis() as u64;
 
         match build_result {
             Ok(()) => {

@@ -1,4 +1,4 @@
-use crate::arena::{Arena, CAstNode, NodeFlags, NodeOffset, SourceLocation};
+use crate::arena::{Arena, NodeOffset, SourceLocation, CAstNode, NodeFlags};
 use std::collections::{HashMap, HashSet};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -54,8 +54,6 @@ const AST_UNOP: u16 = 65;
 const AST_CALL: u16 = 67;
 const AST_RETURN: u16 = 44;
 const AST_MEMBER: u16 = 69;
-const AST_BINOP: u16 = 64;
-const AST_COMPOUND: u16 = 40;
 
 const OP_ADDR: u32 = 4;
 const OP_DEREF: u32 = 5;

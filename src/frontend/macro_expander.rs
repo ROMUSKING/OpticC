@@ -152,14 +152,14 @@ impl<'a> MacroExpander<'a> {
     fn handle_stringification(
         &self,
         tokens: &[Token],
-        mut i: usize,
+        i: usize,
         source: &str,
     ) -> Option<(Token, usize)> {
         if i + 1 >= tokens.len() {
             return None;
         }
 
-        let hash_token = tokens[i];
+        let _hash_token = tokens[i];
         let next_token = &tokens[i + 1];
 
         if next_token.kind == TokenKind::HashHash {
@@ -167,7 +167,7 @@ impl<'a> MacroExpander<'a> {
         }
 
         if next_token.kind == TokenKind::Identifier {
-            let arg_name = self.extract_token_text(&tokens[i + 1], source);
+            let _arg_name = self.extract_token_text(&tokens[i + 1], source);
             let stringified = self.stringify_argument(&tokens[i + 1], source);
             Some((stringified, i + 2))
         } else {
@@ -208,7 +208,7 @@ impl<'a> MacroExpander<'a> {
     ) -> Option<Vec<Token>> {
         let definition = self.definitions.get(name)?.clone();
 
-        let params = match &definition {
+        let _params = match &definition {
             MacroDefinition::FunctionLike { params, .. } => params.clone(),
             MacroDefinition::ObjectLike { .. } => return None,
         };
@@ -230,7 +230,6 @@ impl<'a> MacroExpander<'a> {
                 ")" if paren_depth == 0 => {
                     if !current_arg.is_empty() {
                         arg_tokens.push(current_arg);
-                        current_arg = Vec::new();
                     }
                     break;
                 }

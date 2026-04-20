@@ -48,7 +48,7 @@ ASM: 207=asm_stmt, 208=asm_operand_out, 209=asm_operand_in, 210=asm_clobber, 211
 - **kind=9 (func_decl)**: `first_child = kind=60(name) → kind=24(param1) → kind=24(param2)`. Params chained as ident.next_sibling=params.
 - **kind=24 (param_decl)**: `first_child = type_spec → kind=60(param_name)`. Name is last in first_child chain.
 - **kind=25 (struct_member)**: `first_child = type_spec → kind=60(field_name)`. Name is last in first_child chain.
-- **kind=69 (member_access)**: `first_child=base_expr`, `next_sibling=field_ident`. NOTE: next_sibling IS the field, not a sibling.
+- **kind=69 (member_access)**: `data = (is_arrow << 31) | string_offset_of_field_name`. `first_child = base_expr`. Field name is in `data`, NOT in `next_sibling` (which is reserved for statement chaining). Arrow bit: `data & 0x8000_0000 != 0`.
 
 ### OPERATOR CODES (CAstNode.data for kind=64 binop)
 1=add, 2=sub, 3=mul, 4=div, 5=mod, 6=shl, 7=shr, 8=lt, 9=gt, 10=le, 11=ge, 12=eq, 13=ne, 14=and, 15=or, 16=xor, 17=land, 18=lor, 19=assign, 20=add_assign, 21=sub_assign, etc.
@@ -57,8 +57,14 @@ ASM: 207=asm_stmt, 208=asm_operand_out, 209=asm_operand_in, 210=asm_clobber, 211
 - **Multi-variable declarations**: `int a = 0, b = 1;` — the parser creates multiple init-declarators correctly, but the backend `lower_var_decl` only processes the first one. The first_child chain has `type_spec → kind=73(a=0) → kind=73(b=1)` but backend breaks after first.
 - **Compound initializers**: `struct Point p = {10, 20}` — initializer is the first element (kind=61(10)) with next_sibling chain; backend stores first value only and can't map struct fields positionally.
 - **Debug eprintln!s**: Still many `eprintln!` calls in the parser. Do NOT remove with `sed -i` (will break multi-line macros). Remove only with exact Python string replacement.
+- **Typedef types in struct members**: `typedef unsigned char u8; struct S { u8 x; int y; };` — when parsing `u8 x;` in the struct, `parse_type_specifier` maps `u8` to kind=2 (i32) via the `_ => 2` default. This loses the typedef chain and causes wrong struct layouts (u8 fields take 4 bytes not 1). **Root cause of SQLite NOMEM bug.** Fix: store typedef name in AST node or resolve to underlying type at parse time.
 
-### RECENTLY FIXED
+### RECENTLY FIXED (Session 2026-04-21)
+- **Member access field name encoding**: kind=69 nodes now store field name as string offset in `data & 0x7FFF_FFFF`, with is_arrow in bit 31. Previously used `next_sibling` for the field name, which was clobbered by call argument linking.
+- **Hex/octal/suffix integers**: `parse_primary_expression` now handles `0x`/`0X` hex, leading-zero octal, and `UL`/`ULL` suffixes. Previously, `token.text.parse::<u32>()` returned 0 for hex literals.
+- **`__builtin_va_list` in type specifiers**: Added to the known type keywords in `is_type_specifier`. Prevents typedef resolution failure for `va_list` parameters.
+
+### RECENTLY FIXED (Session 2026-04-20)
 - **Inline asm in function bodies**: `asm volatile("nop");` now dispatches to `parse_asm_stmt()` from `parse_statement()` (was previously unhandled, falling through to expression statement).
 - **Three-character punctuators**: Lexer now handles `...`, `>>=`, `<<=` correctly via lookahead-2 before falling back to 2-char punctuators.
 - **Variadic parameter `...`**: Now tokenized as single `...` token instead of three `.` tokens.
@@ -70,3 +76,9 @@ ASM: 207=asm_stmt, 208=asm_operand_out, 209=asm_operand_in, 210=asm_clobber, 211
 - **Error recovery**: Basic recovery via `self.advance()` on parse errors.
 - **String interning**: Identifier names interned via `Arena::store_string()`. `CAstNode.data` = string pool offset.
 - **Precedence climbing**: Binary expressions use recursive descent (||=1, &&=2, |=3, ^=4, &=5, ==/!=6, </>/<=/>=7, <</>>8, +/-9, */%=10).
+
+## SQLITE COMPILATION BLOCKERS (updated 2026-04-21)
+- **Typedef types in struct members** (CRITICAL): `typedef unsigned char u8;` followed by `struct S { u8 x; };` — the parser maps `u8` to kind=2 (i32) losing the typedef resolution. All typedef'd primitive types (u8, u16, u32, u64, sqlite3_int64, etc.) appear as i32 in struct LLVM types. This causes wrong layouts and wrong GEP byte offsets. Fix: track `typedef_primitive_kinds: HashMap<String, u16>` during parse, resolve at type specifier emission.
+- **Function pointer declarator params**: When a function has a parameter like `void(*xDel)(void*)`, the parser creates a kind=9 (function declarator) nested inside a kind=7 (pointer declarator). The backend's `extract_param_type_name` only detects kind=7 (pointer) but not nested kind=9 function pointers. Either the parser should normalize these to just `kind=7` (ptr type), or the backend needs to handle nested declarators.
+- **va_list as typedef**: The preprocessed source has `typedef __builtin_va_list va_list;`. The parser's `typedef_names` set should include `va_list` and `__builtin_va_list` so parameters with these types are recognized during parsing.
+- **Function pointer call syntax**: `obj.field(args)` and `ptr->field(args)` where `field` is a function pointer. The parser currently creates a kind=67 (call) node with `first_child.data` pointing to the field name string. This makes the backend treat it as a direct call to `@field`. Instead, the first_child should be a kind=69 (member_access) node so the backend can lower it as an indirect call through the loaded field.

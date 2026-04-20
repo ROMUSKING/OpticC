@@ -98,6 +98,36 @@ M+ = structs (TypeId points to struct definition)
 - **Type qualifiers** such as const, volatile, and restrict are represented via bitflags.
 - **Coupling note**: keep the type system as independent from LLVM details as practical so it remains easy to test and reason about.
 
+## CRITICAL BLOCKER (2026-04-21): Typedef Types in Struct Member Lowering
+
+**Root cause of SQLite `sqlite3_initialize()` returning NOMEM**: the backend's `parse_type_specifier` maps all typedef names (u8, u16, u32, u64, sqlite3_int64, sqlite3_mem_methods, etc.) to kind=2 (i32) via `_ => 2`. This causes all typedef'd types to appear as i32 in the LLVM struct type, producing wrong struct layouts.
+
+**Example**: `struct Sqlite3Config { int bMemstat; u8 bCoreMutex; ... sqlite3_mem_methods m; }` should be `{ i32, i8, ..., {ptr,ptr,ptr,ptr,ptr,ptr,ptr,ptr} }` but gets `{ i32, i32, ..., i32 }`.
+
+**Consequence**: `sqlite3GlobalConfig.m.xMalloc` GEP index is correct (count of fields) but byte offset is wrong (4 bytes per u8 instead of 1 byte), so the function pointer slot is at the wrong address. SQLite reads null and returns NOMEM.
+
+**Fix plan** (implement in Jules-Type-System or Jules-Parser):
+
+### Option A: Parser-level typedef primitive resolution (recommended)
+In `src/frontend/parser.rs`:
+1. Add `typedef_primitive_kinds: HashMap<String, u16>` to the Parser struct.
+2. When parsing `typedef unsigned char u8;`, store `"u8" → 1` (kind=1=char/i8). For `typedef unsigned int u32;`, store `"u32" → 13` (kind=13=unsigned_int/i32). etc.
+3. In `parse_type_specifier`, when text is in `typedef_primitive_kinds`, emit the stored kind.
+
+Typedef-to-kind mapping for common SQLite typedefs:
+- `unsigned char` → kind=1 (i8) 
+- `unsigned short` → kind=10 (i16)
+- `unsigned int` / `int` → kind=2/13 (i32)
+- `unsigned long long` / `long long` → kind=11 (i64)
+- `gcc_int64_t` / `sqlite3_int64` → kind=11 (i64)
+
+### Option B: Pass typedef struct mappings to backend
+Add `typedef_struct_tags: HashMap<String, String>` to parser state. When `typedef struct Foo Foo_t;` is parsed, record `"Foo_t" → "Foo"`. When `parse_type_specifier` sees "Foo_t", emit kind=4 with `data = string_offset_of_"Foo"`. The backend then treats it as a struct specifier with the correct tag.
+
+### Option C: Full typedef integration with TypeSystem
+Wire the TypeSystem's `resolve_typedef` to the backend's struct member type resolution. When `register_struct_types_in_node` processes a kind=2 child that was originally a typedef, look it up in the TypeSystem to get the real LLVM type. This requires the TypeSystem to be populated during compilation (it's already wired via `with_types()`).
+
+
 ## ACCEPTANCE CRITERIA
 1. Type resolver correctly identifies all primitive types in a C source file
 2. Struct/union member offsets are computed correctly (including padding/alignment)

@@ -734,7 +734,7 @@ impl Preprocessor {
         )
     }
 
-    fn tokenize_pp_source(source: &str, file: &str, base_line: u32) -> Vec<PpToken> {
+    fn tokenize_pp_source(source: &str, _file: &str, base_line: u32) -> Vec<PpToken> {
         let mut tokens = Vec::new();
         let mut chars = source.chars().peekable();
         let mut line = base_line;
@@ -1064,7 +1064,7 @@ impl Preprocessor {
         let mut in_if_stack: Vec<bool> = Vec::new();
         let mut branch_taken: Vec<bool> = Vec::new();
 
-        let mut flush_pending =
+        let flush_pending =
             |pending: &mut Vec<PpToken>, result: &mut Vec<Token>, file: &str, pp: &Preprocessor| {
                 if pending.is_empty() {
                     return;
@@ -1228,7 +1228,7 @@ impl Preprocessor {
                     }
                     "error" => {
                         if in_if_stack.iter().all(|&active| active) {
-                            let (msg, end_idx) = self.parse_diagnostic_text(&pp_tokens, after_name);
+                            let (msg, _end_idx) = self.parse_diagnostic_text(&pp_tokens, after_name);
                             self.errors.push(msg.clone());
                             return Err(PreprocessorError::ConditionalError(format!(
                                 "#error: {}",
@@ -1561,7 +1561,7 @@ impl Preprocessor {
     fn expand_tokens_in_macro(
         &self,
         tokens: &[Token],
-        params: &[String],
+        _params: &[String],
         _file: &str,
     ) -> Vec<Token> {
         let mut result = Vec::new();
@@ -2579,7 +2579,7 @@ impl Preprocessor {
                     }
                     "error" => {
                         if in_if_stack.iter().all(|&active| active) {
-                            let (msg, end_idx) = self.parse_diagnostic_text(pp_tokens, after_name);
+                            let (msg, _end_idx) = self.parse_diagnostic_text(pp_tokens, after_name);
                             self.errors.push(msg.clone());
                             return Err(PreprocessorError::ConditionalError(format!(
                                 "#error: {}",
