@@ -186,7 +186,7 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                     let len = size.unwrap_or(0);
                     elem_type.array_type(len as u32).as_basic_type_enum()
                 }
-                Some(CType::Struct { members, .. }) => {
+                Some(CType::Struct { members, align, .. }) => {
                     let field_types: Vec<BasicTypeEnum> = members
                         .iter()
                         .map(|m| self.to_llvm_type(m.type_id.0))
@@ -195,7 +195,7 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                         self.context.i8_type().as_basic_type_enum()
                     } else {
                         self.context
-                            .struct_type(&field_types, false)
+                            .struct_type(&field_types, *align == 1)
                             .as_basic_type_enum()
                     }
                 }
@@ -614,6 +614,10 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                             let mut member_off = child.first_child;
                             while member_off != NodeOffset::NULL {
                                 if let Some(m) = arena.get(member_off) {
+                                    if m.kind == 200 {
+                                        member_off = m.next_sibling;
+                                        continue;
+                                    }
                                     // Determine field type and check for bitfield
                                     let mut has_pointer = false;
                                     let mut base_kind = 2u16; // default to int
@@ -682,7 +686,7 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                                 }
                             }
                             if !field_types.is_empty() {
-                                let st = self.context.struct_type(&field_types, false);
+                                let st = self.context.struct_type(&field_types, self.node_has_attr(arena, child, &["packed", "__packed__"]));
                                 self.struct_tag_types.insert(tag_name.clone(), st);
                                 self.struct_tag_fields.insert(tag_name.clone(), field_names);
                                 if gep_info.values().any(|(_, bf)| bf.is_some()) {
@@ -724,6 +728,227 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
             11 => 64,            // long
             _ => 32,
         }
+    }
+
+    fn align_up(value: u64, align: u64) -> u64 {
+        if align <= 1 {
+            value
+        } else {
+            ((value + align - 1) / align) * align
+        }
+    }
+
+    fn ast_type_size_align(&self, arena: &Arena, node: &CAstNode) -> Option<(u64, u64)> {
+        match node.kind {
+            1 => Some((0, 1)),
+            2 | 12 | 13 | 83 => Some((4, 4)),
+            3 | 14 => Some((1, 1)),
+            10 => Some((2, 2)),
+            11 | 84 => Some((8, 8)),
+            4 | 5 => self.ast_record_size_align(arena, node),
+            _ => {
+                if node.first_child != NodeOffset::NULL {
+                    self.ast_type_size_align(arena, arena.get(node.first_child)?)
+                } else {
+                    None
+                }
+            }
+        }
+    }
+
+    fn ast_record_size_align(&self, arena: &Arena, spec_node: &CAstNode) -> Option<(u64, u64)> {
+        if !matches!(spec_node.kind, 4 | 5) {
+            return None;
+        }
+
+        if spec_node.first_child == NodeOffset::NULL && spec_node.data != 0 {
+            if let Some(tag) = arena.get_string(NodeOffset(spec_node.data)) {
+                if let Some(struct_type) = self.struct_tag_types.get(tag).copied() {
+                    let fields = struct_type.get_field_types();
+                    if fields.is_empty() {
+                        return Some((0, 1));
+                    }
+                    let packed = struct_type.is_packed();
+                    let mut offset = 0u64;
+                    let mut max_align = 1u64;
+                    let mut max_size = 0u64;
+                    for field in fields {
+                        let (field_size, field_align) = match field {
+                            BasicTypeEnum::ArrayType(at) => {
+                                let elem = at.get_element_type();
+                                let (elem_size, elem_align) = match elem {
+                                    BasicTypeEnum::IntType(it) => {
+                                        let sz = (it.get_bit_width().max(8) as u64) / 8;
+                                        (sz, sz)
+                                    }
+                                    BasicTypeEnum::FloatType(ft) => {
+                                        let sz = ft.size_of().get_zero_extended_constant().unwrap_or(4);
+                                        (sz, sz)
+                                    }
+                                    BasicTypeEnum::PointerType(_) => (8, 8),
+                                    BasicTypeEnum::StructType(st) => self.ast_record_size_align_from_llvm(st),
+                                    _ => (4, 4),
+                                };
+                                (elem_size * at.len() as u64, elem_align)
+                            }
+                            BasicTypeEnum::IntType(it) => {
+                                let sz = (it.get_bit_width().max(8) as u64) / 8;
+                                (sz, sz)
+                            }
+                            BasicTypeEnum::FloatType(ft) => {
+                                let sz = ft.size_of().get_zero_extended_constant().unwrap_or(4);
+                                (sz, sz)
+                            }
+                            BasicTypeEnum::PointerType(_) => (8, 8),
+                            BasicTypeEnum::StructType(st) => self.ast_record_size_align_from_llvm(st),
+                            _ => (4, 4),
+                        };
+                        let align = if packed { 1 } else { field_align.max(1) };
+                        max_align = max_align.max(align);
+                        if spec_node.kind == 5 {
+                            max_size = max_size.max(field_size);
+                        } else {
+                            offset = Self::align_up(offset, align);
+                            offset += field_size;
+                        }
+                    }
+                    let size = if spec_node.kind == 5 {
+                        if packed { max_size } else { Self::align_up(max_size, max_align) }
+                    } else if packed {
+                        offset
+                    } else {
+                        Self::align_up(offset, max_align)
+                    };
+                    return Some((size, if packed { 1 } else { max_align }));
+                }
+            }
+        }
+
+        let packed = self.node_has_attr(arena, spec_node, &["packed", "__packed__"]);
+        let mut offset = 0u64;
+        let mut max_align = 1u64;
+        let mut max_size = 0u64;
+        let mut member_off = spec_node.first_child;
+
+        while member_off != NodeOffset::NULL {
+            let Some(member) = arena.get(member_off) else { break; };
+            member_off = member.next_sibling;
+
+            if member.kind == 200 {
+                continue;
+            }
+
+            let mut field_size = 4u64;
+            let mut field_align = 4u64;
+            let mut is_pointer = false;
+            let mut array_len: Option<u64> = None;
+            let mut bitfield_width: Option<u64> = None;
+
+            let mut check_off = member.first_child;
+            while check_off != NodeOffset::NULL {
+                let Some(child) = arena.get(check_off) else { break; };
+                match child.kind {
+                    1 | 2 | 3 | 10..=14 | 83 | 84 => {
+                        if let Some((sz, al)) = self.ast_type_size_align(arena, child) {
+                            field_size = sz;
+                            field_align = al;
+                        }
+                    }
+                    4 | 5 => {
+                        if let Some((sz, al)) = self.ast_record_size_align(arena, child) {
+                            field_size = sz;
+                            field_align = al;
+                        }
+                    }
+                    7 => is_pointer = true,
+                    8 => array_len = Some(child.data as u64),
+                    27 => bitfield_width = Some(child.data as u64),
+                    _ => {}
+                }
+                check_off = child.next_sibling;
+            }
+
+            if is_pointer {
+                field_size = 8;
+                field_align = 8;
+            }
+            if let Some(len) = array_len {
+                field_size *= len;
+            }
+            if let Some(width) = bitfield_width {
+                let storage_bytes = field_size.max(1);
+                field_size = ((width + 7) / 8).min(storage_bytes);
+            }
+
+            let align = if packed { 1 } else { field_align.max(1) };
+            max_align = max_align.max(align);
+            if spec_node.kind == 5 {
+                max_size = max_size.max(field_size);
+            } else {
+                offset = Self::align_up(offset, align);
+                offset += field_size;
+            }
+        }
+
+        let size = if spec_node.kind == 5 {
+            if packed { max_size } else { Self::align_up(max_size, max_align) }
+        } else if packed {
+            offset
+        } else {
+            Self::align_up(offset, max_align)
+        };
+
+        Some((size, if packed { 1 } else { max_align }))
+    }
+
+    fn ast_record_size_align_from_llvm(&self, st: StructType<'ctx>) -> (u64, u64) {
+        let packed = st.is_packed();
+        let mut offset = 0u64;
+        let mut max_align = 1u64;
+        for field in st.get_field_types() {
+            let (field_size, field_align) = match field {
+                BasicTypeEnum::IntType(it) => {
+                    let sz = (it.get_bit_width().max(8) as u64) / 8;
+                    (sz, sz)
+                }
+                BasicTypeEnum::FloatType(ft) => {
+                    let sz = ft.size_of().get_zero_extended_constant().unwrap_or(4);
+                    (sz, sz)
+                }
+                BasicTypeEnum::PointerType(_) => (8, 8),
+                BasicTypeEnum::ArrayType(at) => {
+                    let elem = at.get_element_type();
+                    let (elem_size, elem_align) = match elem {
+                        BasicTypeEnum::IntType(it) => {
+                            let sz = (it.get_bit_width().max(8) as u64) / 8;
+                            (sz, sz)
+                        }
+                        BasicTypeEnum::FloatType(ft) => {
+                            let sz = ft.size_of().get_zero_extended_constant().unwrap_or(4);
+                            (sz, sz)
+                        }
+                        BasicTypeEnum::PointerType(_) => (8, 8),
+                        BasicTypeEnum::StructType(inner) => self.ast_record_size_align_from_llvm(inner),
+                        _ => (4, 4),
+                    };
+                    (elem_size * at.len() as u64, elem_align)
+                }
+                BasicTypeEnum::StructType(inner) => self.ast_record_size_align_from_llvm(inner),
+                _ => (4, 4),
+            };
+            let align = if packed { 1 } else { field_align.max(1) };
+            max_align = max_align.max(align);
+            offset = Self::align_up(offset, align);
+            offset += field_size;
+        }
+        let size = if packed { offset } else { Self::align_up(offset, max_align) };
+        (size, if packed { 1 } else { max_align })
+    }
+
+    fn node_has_attr(&self, arena: &Arena, node: &CAstNode, names: &[&str]) -> bool {
+        self.extract_attributes(arena, node)
+            .iter()
+            .any(|(name, _, _)| names.iter().any(|candidate| name == candidate))
     }
 
     /// Resolve a type specifier node to its LLVM type, including struct/union types.
@@ -1530,6 +1755,10 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
         let mut member_off = node.first_child;
         while member_off != NodeOffset::NULL {
             if let Some(member) = arena.get(member_off) {
+                if member.kind == 200 {
+                    member_off = member.next_sibling;
+                    continue;
+                }
                 // Walk children to detect type and bitfield
                 let mut base_kind = 2u16;
                 let mut has_pointer = false;
@@ -1585,7 +1814,7 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
             self.context.i8_type().as_basic_type_enum()
         } else {
             self.context
-                .struct_type(&field_types, false)
+                .struct_type(&field_types, self.node_has_attr(arena, node, &["packed", "__packed__"]))
                 .as_basic_type_enum()
         }
     }
@@ -1595,6 +1824,10 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
         let mut member_off = node.first_child;
         while member_off != NodeOffset::NULL {
             if let Some(member) = arena.get(member_off) {
+                if member.kind == 200 {
+                    member_off = member.next_sibling;
+                    continue;
+                }
                 let mut child_off = member.first_child;
                 let mut found = false;
                 while child_off != NodeOffset::NULL {
@@ -4723,21 +4956,42 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
 
         // Type specifier nodes have specific kinds from parse_type_specifier
         match node.kind {
-            1 => 0,   // void → size 0 (GCC returns 1 as extension, but 0 is standard)
+            1 => {
+                if node.first_child != NodeOffset::NULL {
+                    self.sizeof_type_from_ast(arena, node.first_child)
+                } else {
+                    0
+                }
+            }
             2 => 4,   // int
             3 => 1,   // char
             10 => 2,  // short
             11 => {   // long — check if "long long" by looking at sibling
                 let sibling = arena.get(node.next_sibling);
-                if sibling.map(|s| s.kind) == Some(11) { 8 } else { 8 } // long = 8, long long = 8
+                if sibling.map(|s| s.kind) == Some(11) { 8 } else { 8 }
             }
             12 => 4,  // signed (defaults to signed int)
             13 => 4,  // unsigned (defaults to unsigned int)
             14 => 1,  // _Bool
+            4 | 5 => self
+                .ast_record_size_align(arena, &node)
+                .map(|(size, _)| size)
+                .unwrap_or(0),
             83 => 4,  // float
             84 => 8,  // double
             _ => {
-                // For struct/pointer/unknown, assume pointer size
+                if node.first_child != NodeOffset::NULL {
+                    let nested = self.sizeof_type_from_ast(arena, node.first_child);
+                    if nested != 0 {
+                        return nested;
+                    }
+                }
+                if node.next_sibling != NodeOffset::NULL {
+                    let nested = self.sizeof_type_from_ast(arena, node.next_sibling);
+                    if nested != 0 {
+                        return nested;
+                    }
+                }
                 8
             }
         }
@@ -6530,6 +6784,24 @@ mod tests {
         assert!(ir.contains("noinline"), "Expected noinline attribute in IR:\n{}", ir);
         assert!(ir.contains("alwaysinline"), "Expected alwaysinline attribute in IR:\n{}", ir);
         assert!(ir.contains("hot"), "Expected hot attribute in IR:\n{}", ir);
+    }
+
+    #[test]
+    fn test_attribute_packed_struct_sizeof() {
+        let ir = compile_c_to_ir(
+            "struct __attribute__((packed)) S { int a; char b; }; \
+             int packed_size(void) { return sizeof(struct S); }"
+        );
+        assert!(ir.contains("ret i32 5"), "Expected packed struct size 5 in IR:\n{}", ir);
+    }
+
+    #[test]
+    fn test_attribute_packed_struct_ir_layout() {
+        let ir = compile_c_to_ir(
+            "struct __attribute__((packed)) S { int a; char b; }; \
+             int read_b(struct S *p) { return p->b; }"
+        );
+        assert!(ir.contains("<{ i32, i8 }>") || ir.contains("<{i32, i8}>"), "Expected packed LLVM struct layout in IR:\n{}", ir);
     }
 
     #[test]

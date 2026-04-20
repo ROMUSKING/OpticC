@@ -35,7 +35,7 @@ OpticC is targeting compilation of a **minimal Linux 6.6 LTS kernel** using `tin
 - **Tests**: Unit tests per builtin, kernel-style spinlock integration test
 
 ### M8: Missing Attributes & Builtins 📋
-- [ ] `__attribute__((packed))` → suppress struct padding + LLVM packed struct type
+- [x] `__attribute__((packed))` → suppress struct padding + LLVM packed struct type
 - [x] `__attribute__((noinline))` → LLVM `noinline` function attribute
 - [x] `__attribute__((always_inline))` → LLVM `alwaysinline` function attribute
 - [ ] `__attribute__((constructor/destructor))` → `@llvm.global_ctors`/`@llvm.global_dtors`
@@ -154,8 +154,8 @@ qemu-system-x86_64 -kernel bzImage -initrd /tmp/initramfs.cpio.gz \
 |---------|--------|-----------|-------|
 | Atomic builtins (__sync_*) | 📋 | M7 | Kernel spinlocks, barriers |
 | Atomic builtins (__atomic_*) | 📋 | M7 | C11-style atomics |
-| Packed structs | 📋 | M8 | Kernel data structures |
-| noinline/always_inline | 📋 | M8 | Kernel optimization hints |
+| Packed structs | ✅ | M8 | Tagged packed structs now parse and lower with verified 5-byte layout coverage |
+| noinline/always_inline | ✅ | M8 | Kernel optimization hints |
 | constructor/destructor | 📋 | M8 | Module init/exit |
 | Flexible array members | 📋 | M9 | Kernel buffer structs |
 | Anonymous structs/unions | 📋 | M9 | Kernel nested types |
@@ -194,8 +194,8 @@ $(CC) -Wp,-MD,path/.file.o.d -nostdinc -isystem $(shell $(CC) -print-file-name=i
 ## KNOWN KERNEL BLOCKERS
 - Direct GCC-style driver slice is now verified for simple Makefile use and kernel-style smoke invocations, but full Kbuild compatibility still needs deeper semantics and broader validation.
 - This container currently lacks a host kernel build tree under /lib/modules/$(uname -r)/build, so real out-of-tree module validation is externally blocked here.
-- Remaining atomic ordering constants and broader kernel-scale validation are still open.
-- Freestanding flags, force-includes, and feature probes are now accepted, but backend/type-system hardening is still needed for full kernel correctness.
+- Remaining constructor/destructor lowering, atomic ordering constants, and broader kernel-scale validation are still open.
+- Freestanding flags, force-includes, feature probes, and packed struct layout are now verified, but further backend/type-system hardening is still needed for full kernel correctness.
 
 ## LESSONS LEARNED
 - Root cause for atomics was not parser support alone, but the backend treating GCC atomic names as ordinary extern calls. Intercepting these names in call lowering fixed the issue cleanly.

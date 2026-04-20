@@ -872,6 +872,18 @@ impl Parser {
     }
 
     fn parse_struct_specifier(&mut self) -> Result<NodeOffset, ParseError> {
+        let mut first_member = NodeOffset::NULL;
+        let mut last_member = NodeOffset::NULL;
+
+        while (self.current_token().kind == TokenKind::Keyword
+            || self.current_token().kind == TokenKind::Identifier)
+            && self.current_token().text == "__attribute__"
+        {
+            self.advance();
+            let attr = self.parse_attribute_list()?;
+            self.link_siblings(&mut first_member, &mut last_member, attr);
+        }
+
         let tag_data = if self.current_token().kind == TokenKind::Identifier {
             let name = self.current_token().text.clone();
             self.advance();
@@ -880,18 +892,24 @@ impl Parser {
             0
         };
 
+        while (self.current_token().kind == TokenKind::Keyword
+            || self.current_token().kind == TokenKind::Identifier)
+            && self.current_token().text == "__attribute__"
+        {
+            self.advance();
+            let attr = self.parse_attribute_list()?;
+            self.link_siblings(&mut first_member, &mut last_member, attr);
+        }
+
         if !self.skip_punctuator("{") {
             return Ok(self.alloc_node(
                 4,
                 tag_data,
                 NodeOffset::NULL,
-                NodeOffset::NULL,
+                first_member,
                 NodeOffset::NULL,
             ));
         }
-
-        let mut first_member = NodeOffset::NULL;
-        let mut last_member = NodeOffset::NULL;
 
         while !self.skip_punctuator("}") {
             if self.is_at_end() {
@@ -911,6 +929,18 @@ impl Parser {
     }
 
     fn parse_union_specifier(&mut self) -> Result<NodeOffset, ParseError> {
+        let mut first_member = NodeOffset::NULL;
+        let mut last_member = NodeOffset::NULL;
+
+        while (self.current_token().kind == TokenKind::Keyword
+            || self.current_token().kind == TokenKind::Identifier)
+            && self.current_token().text == "__attribute__"
+        {
+            self.advance();
+            let attr = self.parse_attribute_list()?;
+            self.link_siblings(&mut first_member, &mut last_member, attr);
+        }
+
         let tag_data = if self.current_token().kind == TokenKind::Identifier {
             let name = self.current_token().text.clone();
             self.advance();
@@ -919,18 +949,24 @@ impl Parser {
             0
         };
 
+        while (self.current_token().kind == TokenKind::Keyword
+            || self.current_token().kind == TokenKind::Identifier)
+            && self.current_token().text == "__attribute__"
+        {
+            self.advance();
+            let attr = self.parse_attribute_list()?;
+            self.link_siblings(&mut first_member, &mut last_member, attr);
+        }
+
         if !self.skip_punctuator("{") {
             return Ok(self.alloc_node(
                 5,
                 tag_data,
                 NodeOffset::NULL,
-                NodeOffset::NULL,
+                first_member,
                 NodeOffset::NULL,
             ));
         }
-
-        let mut first_member = NodeOffset::NULL;
-        let mut last_member = NodeOffset::NULL;
 
         while !self.skip_punctuator("}") {
             if self.is_at_end() {
