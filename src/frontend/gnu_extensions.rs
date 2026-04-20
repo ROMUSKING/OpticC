@@ -12,6 +12,8 @@ pub const AST_EXTENSION: u16 = 206;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AttrKind {
     Noreturn,
+    Noinline,
+    AlwaysInline,
     Unused,
     Used,
     Aligned(u64),
@@ -28,6 +30,8 @@ pub enum AttrKind {
     Nonnull,
     Pure,
     Const,
+    Hot,
+    Cold,
     Visibility(String),
     Other(String),
 }
@@ -71,6 +75,8 @@ impl AttrKind {
     pub fn from_name(name: &str) -> Self {
         match name {
             "noreturn" => AttrKind::Noreturn,
+            "noinline" => AttrKind::Noinline,
+            "always_inline" => AttrKind::AlwaysInline,
             "unused" => AttrKind::Unused,
             "used" => AttrKind::Used,
             "aligned" => AttrKind::Aligned(0),
@@ -87,6 +93,8 @@ impl AttrKind {
             "nonnull" => AttrKind::Nonnull,
             "pure" => AttrKind::Pure,
             "const" => AttrKind::Const,
+            "hot" => AttrKind::Hot,
+            "cold" => AttrKind::Cold,
             "visibility" => AttrKind::Visibility(String::new()),
             _ => AttrKind::Other(name.to_string()),
         }
@@ -857,6 +865,8 @@ mod tests {
             AttrKind::Noreturn
         ));
         assert!(matches!(AttrKind::from_name("unused"), AttrKind::Unused));
+        assert!(matches!(AttrKind::from_name("noinline"), AttrKind::Noinline));
+        assert!(matches!(AttrKind::from_name("always_inline"), AttrKind::AlwaysInline));
         assert!(matches!(AttrKind::from_name("packed"), AttrKind::Packed));
         assert!(matches!(AttrKind::from_name("weak"), AttrKind::Weak));
         assert!(matches!(
@@ -868,6 +878,8 @@ mod tests {
             AttrKind::Destructor
         ));
         assert!(matches!(AttrKind::from_name("nonnull"), AttrKind::Nonnull));
+        assert!(matches!(AttrKind::from_name("hot"), AttrKind::Hot));
+        assert!(matches!(AttrKind::from_name("cold"), AttrKind::Cold));
         assert!(matches!(AttrKind::from_name("pure"), AttrKind::Pure));
         assert!(matches!(AttrKind::from_name("const"), AttrKind::Const));
     }

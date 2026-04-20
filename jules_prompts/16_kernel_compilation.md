@@ -36,10 +36,10 @@ OpticC is targeting compilation of a **minimal Linux 6.6 LTS kernel** using `tin
 
 ### M8: Missing Attributes & Builtins 📋
 - [ ] `__attribute__((packed))` → suppress struct padding + LLVM packed struct type
-- [ ] `__attribute__((noinline))` → LLVM `noinline` function attribute
-- [ ] `__attribute__((always_inline))` → LLVM `alwaysinline` function attribute
+- [x] `__attribute__((noinline))` → LLVM `noinline` function attribute
+- [x] `__attribute__((always_inline))` → LLVM `alwaysinline` function attribute
 - [ ] `__attribute__((constructor/destructor))` → `@llvm.global_ctors`/`@llvm.global_dtors`
-- [ ] `__attribute__((hot))` → LLVM `hot` function attribute
+- [x] `__attribute__((hot))` → LLVM `hot` function attribute
 - [ ] `__builtin_types_compatible_p(t1, t2)` → compile-time type comparison
 - [ ] `__builtin_choose_expr(const, e1, e2)` → compile-time conditional
 - [ ] `__builtin_clzll/ctzll/popcountll/ffsll` → 64-bit variants
@@ -83,7 +83,7 @@ OpticC is targeting compilation of a **minimal Linux 6.6 LTS kernel** using `tin
 ### M12: GCC CLI Drop-In & Kbuild Integration 📋
 - [x] Minimal GCC-style direct driver accepts common compile, warning, feature, and machine flags
 - [x] `--version`, `-dumpversion`, `-dumpmachine`, `-v`, `-###`
-- [x] `-include file.h` accepted by driver
+- [x] `-include file.h` force-includes headers before source preprocessing
 - [x] `-isystem path` / `-iquote path` → include path variants
 - [x] `-Wp,-MD,depfile` → dependency file generation
 - [x] `-MD`, `-MF`, `-MP`, `-MT` → direct dependency flags
@@ -193,12 +193,14 @@ $(CC) -Wp,-MD,path/.file.o.d -nostdinc -isystem $(shell $(CC) -print-file-name=i
 
 ## KNOWN KERNEL BLOCKERS
 - Direct GCC-style driver slice is now verified for simple Makefile use and kernel-style smoke invocations, but full Kbuild compatibility still needs deeper semantics and broader validation.
+- This container currently lacks a host kernel build tree under /lib/modules/$(uname -r)/build, so real out-of-tree module validation is externally blocked here.
 - Remaining atomic ordering constants and broader kernel-scale validation are still open.
-- Freestanding flags and feature probes are now accepted, but backend/type-system hardening is still needed for full kernel correctness.
+- Freestanding flags, force-includes, and feature probes are now accepted, but backend/type-system hardening is still needed for full kernel correctness.
 
 ## LESSONS LEARNED
 - Root cause for atomics was not parser support alone, but the backend treating GCC atomic names as ordinary extern calls. Intercepting these names in call lowering fixed the issue cleanly.
 - Representative verification now proves atomicrmw, cmpxchg, and seq_cst fence emission in generated LLVM IR.
+- Function-attribute feature probes depend on the GNU attribute recognition table; adding backend emission alone is not enough if __has_attribute still reports false.
 
 ## DEPENDENCY GRAPH
 ```

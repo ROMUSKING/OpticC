@@ -3202,6 +3202,17 @@ const char *s = STR(hello world);"#;
     }
 
     #[test]
+    fn test_atomic_ordering_predefined_macros() {
+        let (mut pp, _temp_dir) = create_test_preprocessor();
+
+        let source = "#if __ATOMIC_RELAXED == 0 && __ATOMIC_ACQUIRE == 2 && __ATOMIC_SEQ_CST == 5\nint atomics_ok = 1;\n#endif";
+        let tokens = pp.process_source(source, "test.c").unwrap();
+
+        let non_ws: Vec<&Token> = tokens.iter().filter(|t| !t.is_whitespace()).collect();
+        assert!(non_ws.iter().any(|t| t.text == "atomics_ok"));
+    }
+
+    #[test]
     fn test_sizeof_predefined_macros_in_if_expressions() {
         let (mut pp, _temp_dir) = create_test_preprocessor();
 
@@ -3370,6 +3381,17 @@ const char *s = STR(hello world);"#;
         let non_ws: Vec<&Token> = tokens.iter().filter(|t| !t.is_whitespace()).collect();
         assert!(non_ws.iter().any(|t| t.text == "attr_works"));
         assert!(non_ws.iter().any(|t| t.text == "builtin_works"));
+    }
+
+    #[test]
+    fn test_if_expression_has_kernel_function_attributes() {
+        let (mut pp, _temp_dir) = create_test_preprocessor();
+
+        let source = "#if __has_attribute(noinline) && __has_attribute(always_inline) && __has_attribute(hot)\nint fn_attrs_work = 1;\n#endif";
+        let tokens = pp.process_source(source, "test.c").unwrap();
+
+        let non_ws: Vec<&Token> = tokens.iter().filter(|t| !t.is_whitespace()).collect();
+        assert!(non_ws.iter().any(|t| t.text == "fn_attrs_work"));
     }
 
     #[test]

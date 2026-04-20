@@ -5910,11 +5910,37 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                     }
                 }
                 "noreturn" | "__noreturn__" => {
-                    // Mark function as noreturn via LLVM attribute
                     function.add_attribute(
                         inkwell::attributes::AttributeLoc::Function,
                         self.context.create_enum_attribute(
                             inkwell::attributes::Attribute::get_named_enum_kind_id("noreturn"),
+                            0,
+                        ),
+                    );
+                }
+                "noinline" | "__noinline__" => {
+                    function.add_attribute(
+                        inkwell::attributes::AttributeLoc::Function,
+                        self.context.create_enum_attribute(
+                            inkwell::attributes::Attribute::get_named_enum_kind_id("noinline"),
+                            0,
+                        ),
+                    );
+                }
+                "always_inline" | "__always_inline__" => {
+                    function.add_attribute(
+                        inkwell::attributes::AttributeLoc::Function,
+                        self.context.create_enum_attribute(
+                            inkwell::attributes::Attribute::get_named_enum_kind_id("alwaysinline"),
+                            0,
+                        ),
+                    );
+                }
+                "hot" | "__hot__" => {
+                    function.add_attribute(
+                        inkwell::attributes::AttributeLoc::Function,
+                        self.context.create_enum_attribute(
+                            inkwell::attributes::Attribute::get_named_enum_kind_id("hot"),
                             0,
                         ),
                     );
@@ -6489,6 +6515,21 @@ mod tests {
         );
         assert!(ir.contains("rare_path"), "Expected function in IR:\n{}", ir);
         assert!(ir.contains("cold"), "Expected cold attribute in IR:\n{}", ir);
+    }
+
+    #[test]
+    fn test_attribute_noinline_and_alwaysinline_function() {
+        let ir = compile_c_to_ir(
+            "__attribute__((noinline)) void slow_path(void) { return; } \
+             __attribute__((always_inline)) void fast_path(void) { return; } \
+             __attribute__((hot)) void hot_path(void) { return; }"
+        );
+        assert!(ir.contains("slow_path"), "Expected slow_path in IR:\n{}", ir);
+        assert!(ir.contains("fast_path"), "Expected fast_path in IR:\n{}", ir);
+        assert!(ir.contains("hot_path"), "Expected hot_path in IR:\n{}", ir);
+        assert!(ir.contains("noinline"), "Expected noinline attribute in IR:\n{}", ir);
+        assert!(ir.contains("alwaysinline"), "Expected alwaysinline attribute in IR:\n{}", ir);
+        assert!(ir.contains("hot"), "Expected hot attribute in IR:\n{}", ir);
     }
 
     #[test]

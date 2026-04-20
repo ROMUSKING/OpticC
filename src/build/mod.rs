@@ -160,6 +160,7 @@ fn opticc_cache_dir() -> PathBuf {
 fn build_cache_key(
     source: &Path,
     include_paths: &[PathBuf],
+    force_includes: &[PathBuf],
     defines: &HashMap<String, String>,
     optimization: u32,
 ) -> Result<CacheKey, BuildError> {
@@ -170,6 +171,11 @@ fn build_cache_key(
         .iter()
         .map(|path| format!("-I{}", path.display()))
         .collect();
+    flags.extend(
+        force_includes
+            .iter()
+            .map(|path| format!("-include{}", path.display())),
+    );
 
     let mut define_entries: Vec<_> = defines.iter().collect();
     define_entries.sort_by(|a, b| a.0.cmp(b.0));
@@ -206,6 +212,7 @@ pub struct BuildConfig {
     pub source_files: Vec<PathBuf>,
     pub output: PathBuf,
     pub include_paths: Vec<PathBuf>,
+    pub force_includes: Vec<PathBuf>,
     pub defines: HashMap<String, String>,
     pub link_libs: Vec<String>,
     pub jobs: usize,
@@ -219,6 +226,7 @@ impl BuildConfig {
             source_files: Vec::new(),
             output: PathBuf::from("a.out"),
             include_paths: Vec::new(),
+            force_includes: Vec::new(),
             defines: HashMap::new(),
             link_libs: Vec::new(),
             jobs: 1,
@@ -254,6 +262,11 @@ impl BuildConfig {
 
     pub fn with_include_paths(mut self, paths: Vec<PathBuf>) -> Self {
         self.include_paths = paths;
+        self
+    }
+
+    pub fn with_force_includes(mut self, headers: Vec<PathBuf>) -> Self {
+        self.force_includes = headers;
         self
     }
 
@@ -367,6 +380,7 @@ impl Builder {
     fn compile_all(&mut self) -> Result<(), BuildError> {
         let temp_dir = self.temp_dir.clone();
         let include_paths = self.config.include_paths.clone();
+        let force_includes = self.config.force_includes.clone();
         let defines = self.config.defines.clone();
         let optimization = self.config.optimization;
         let source_files = self.config.source_files.clone();
@@ -390,6 +404,7 @@ impl Builder {
                         source,
                         &temp_dir,
                         &include_paths,
+                        &force_includes,
                         &defines,
                         optimization,
                     )
@@ -414,6 +429,7 @@ impl Builder {
             source,
             &self.temp_dir,
             &self.config.include_paths,
+            &self.config.force_includes,
             &self.config.defines,
             self.config.optimization,
         )
@@ -547,16 +563,25 @@ fn compile_file_to_object(
     source: &Path,
     temp_dir: &Path,
     include_paths: &[PathBuf],
+    force_includes: &[PathBuf],
     defines: &HashMap<String, String>,
     optimization: u32,
 ) -> Result<PathBuf, BuildError> {
     if !should_use_large_stack(source) {
-        return compile_file_to_object_impl(source, temp_dir, include_paths, defines, optimization);
+        return compile_file_to_object_impl(
+            source,
+            temp_dir,
+            include_paths,
+            force_includes,
+            defines,
+            optimization,
+        );
     }
 
     let source = source.to_path_buf();
     let temp_dir = temp_dir.to_path_buf();
     let include_paths = include_paths.to_vec();
+    let force_includes = force_includes.to_vec();
     let defines = defines.clone();
     let source_name = source.display().to_string();
 
@@ -570,7 +595,14 @@ fn compile_file_to_object(
         ))
         .stack_size(LARGE_COMPILER_STACK_SIZE)
         .spawn(move || {
-            compile_file_to_object_impl(&source, &temp_dir, &include_paths, &defines, optimization)
+            compile_file_to_object_impl(
+                &source,
+                &temp_dir,
+                &include_paths,
+                &force_includes,
+                &defines,
+                optimization,
+            )
         })
         .map_err(BuildError::IoError)?
         .join()
@@ -586,6 +618,7 @@ fn compile_file_to_object_impl(
     source: &Path,
     temp_dir: &Path,
     include_paths: &[PathBuf],
+    force_includes: &[PathBuf],
     defines: &HashMap<String, String>,
     optimization: u32,
 ) -> Result<PathBuf, BuildError> {
@@ -602,6 +635,7 @@ fn compile_file_to_object_impl(
         &ll_path,
         &obj_path,
         include_paths,
+        force_includes,
         defines,
         optimization,
     )?;
@@ -674,6 +708,7 @@ fn compile_single_file_impl(
         input_path,
         opt_level,
         include_paths,
+        &[],
         defines,
         &format!("/tmp/optic_db_{}_{}.redb", std::process::id(), compile_id),
         &format!(
@@ -727,6 +762,7 @@ pub fn compile_source_to_object_with_stats(
             &ll_path,
             output_path,
             include_paths,
+            &[],
             defines,
             opt_level,
         );
@@ -754,6 +790,7 @@ pub fn compile_source_to_object_with_stats(
                 &ll_path_clone,
                 &output_path,
                 &include_paths,
+                &[],
                 &defines,
                 opt_level,
             )
@@ -778,10 +815,11 @@ fn compile_source_to_object_with_stats_impl(
     ll_path: &Path,
     obj_path: &Path,
     include_paths: &[PathBuf],
+    force_includes: &[PathBuf],
     defines: &HashMap<String, String>,
     optimization: u32,
 ) -> Result<CompilePhaseTimings, BuildError> {
-    let cache_key = build_cache_key(source, include_paths, defines, optimization)?;
+    let cache_key = build_cache_key(source, include_paths, force_includes, defines, optimization)?;
     if restore_cached_object(&cache_key, obj_path)? {
         return Ok(CompilePhaseTimings::default());
     }
@@ -791,6 +829,7 @@ fn compile_source_to_object_with_stats_impl(
         source,
         optimization,
         include_paths,
+        force_includes,
         defines,
         &format!(
             "/tmp/optic_db_build_{}_{}.redb",
@@ -844,6 +883,7 @@ fn compile_to_ir_artifacts(
     input_path: &Path,
     opt_level: u32,
     include_paths: &[PathBuf],
+    force_includes: &[PathBuf],
     defines: &HashMap<String, String>,
     db_path: &str,
     arena_path: &str,
@@ -861,9 +901,20 @@ fn compile_to_ir_artifacts(
         }
 
         let preprocess_start = Instant::now();
-        let tokens = pp
-            .process(input_path.to_str().unwrap())
-            .map_err(|e| format!("Preprocessor error: {}", e))?;
+        let tokens = if force_includes.is_empty() {
+            pp.process(input_path.to_str().unwrap())
+                .map_err(|e| format!("Preprocessor error: {}", e))?
+        } else {
+            let source_text = fs::read_to_string(input_path)
+                .map_err(|e| format!("Failed to read source file '{}': {}", input_path.display(), e))?;
+            let mut prefixed_source = String::new();
+            for header in force_includes {
+                prefixed_source.push_str(&format!("#include \"{}\"\n", header.display()));
+            }
+            prefixed_source.push_str(&source_text);
+            pp.process_source(&prefixed_source, input_path.to_str().unwrap())
+                .map_err(|e| format!("Preprocessor error: {}", e))?
+        };
         let preprocess_ms = preprocess_start.elapsed().as_millis() as u64;
 
         let estimated_nodes = (tokens.len() / 2).max(1024) as u32;
@@ -962,6 +1013,7 @@ mod tests {
             .with_jobs(4)
             .with_optimization(2)
             .with_include_paths(vec![PathBuf::from("/usr/include")])
+            .with_force_includes(vec![PathBuf::from("force.h")])
             .with_defines(defines.clone())
             .with_link_libs(vec!["m".to_string()]);
 
@@ -971,6 +1023,7 @@ mod tests {
         assert_eq!(config.jobs, 4);
         assert_eq!(config.optimization, 2);
         assert_eq!(config.include_paths.len(), 1);
+        assert_eq!(config.force_includes, vec![PathBuf::from("force.h")]);
         assert_eq!(config.defines.get("DEBUG"), Some(&"1".to_string()));
         assert_eq!(config.link_libs, vec!["m".to_string()]);
     }
@@ -1208,6 +1261,48 @@ mod tests {
     }
 
     #[test]
+    fn test_force_include_header_is_applied_before_source() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let source_path = temp_dir.path().join("main.c");
+        let header_path = temp_dir.path().join("force.h");
+        let missing_db = temp_dir.path().join("missing.redb");
+        let missing_arena = temp_dir.path().join("missing.bin");
+        let ok_db = temp_dir.path().join("ok.redb");
+        let ok_arena = temp_dir.path().join("ok.bin");
+
+        fs::write(&header_path, "#define FORCE_MAGIC 42\n").unwrap();
+        fs::write(
+            &source_path,
+            "#ifndef FORCE_MAGIC\n#error missing_force_include\n#endif\nint value(void) { return FORCE_MAGIC; }\n",
+        )
+        .unwrap();
+
+        let without_force = compile_to_ir_artifacts(
+            &source_path,
+            0,
+            &[temp_dir.path().to_path_buf()],
+            &[],
+            &HashMap::new(),
+            missing_db.to_str().unwrap(),
+            missing_arena.to_str().unwrap(),
+        );
+        assert!(without_force.is_err());
+        let without_force_err = without_force.err().unwrap();
+        assert!(without_force_err.contains("missing_force_include"));
+
+        let with_force = compile_to_ir_artifacts(
+            &source_path,
+            0,
+            &[temp_dir.path().to_path_buf()],
+            &[PathBuf::from("force.h")],
+            &HashMap::new(),
+            ok_db.to_str().unwrap(),
+            ok_arena.to_str().unwrap(),
+        );
+        assert!(with_force.is_ok(), "force-include compilation should succeed");
+    }
+
+    #[test]
     fn test_output_type_auto_detection() {
         let output = PathBuf::from("build/libfoo.so");
         assert_eq!(OutputType::from_extension(&output), OutputType::SharedLib);
@@ -1371,6 +1466,7 @@ mod tests {
             &helper_path,
             0,
             &[],
+            &[],
             &HashMap::new(),
             &db_path1,
             &arena_path1,
@@ -1392,6 +1488,7 @@ mod tests {
         let main_result = compile_to_ir_artifacts(
             &main_path,
             0,
+            &[],
             &[],
             &HashMap::new(),
             &db_path2,
@@ -1494,6 +1591,7 @@ mod tests {
             &helper_path,
             &obj_dir,
             &[],
+            &[],
             &HashMap::new(),
             0,
         );
@@ -1513,6 +1611,7 @@ mod tests {
         let main_obj = compile_file_to_object_impl(
             &main_path,
             &obj_dir,
+            &[],
             &[],
             &HashMap::new(),
             0,

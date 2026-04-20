@@ -26,7 +26,7 @@ The Linux kernel build system (Kbuild) invokes `CC` with a large set of GCC flag
 | `-I <path>` | ✅ Implemented | Add include search path |
 | `-D <name>=<val>` | ✅ Implemented | Define preprocessor macro |
 | `-U <name>` | ✅ Implemented | Undefines a named preprocessor macro in direct-driver mode |
-| `-include <file>` | ✅ Implemented | Accepted by driver; deeper force-include semantics pending |
+| `-include <file>` | ✅ Implemented | Force-includes the header before source preprocessing; verified in kernel-style flows |
 | `-isystem <path>` | ✅ Implemented | Accepted and forwarded as an include search path |
 | `-iquote <path>` | ✅ Implemented | Accepted and forwarded as an include search path |
 | `-nostdinc` | ✅ Implemented | Accepted by driver for freestanding flows |

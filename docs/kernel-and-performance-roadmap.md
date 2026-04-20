@@ -2,12 +2,13 @@
 
 ## Current Verified Baseline
 
-- 378 repository tests pass.
+- 382 repository tests pass.
 - SQLite-oriented benchmark suites are available through the CLI.
 - Warm recompilation is now measured separately from cold compilation.
 - OpticC uses a persistent object cache to accelerate unchanged rebuilds.
 - SQLite integration accepts local source inputs in addition to remote archives.
 - Kernel-style direct-driver smoke builds now produce valid ELF object files and depfiles.
+- Force-included headers are now honored in kernel-style direct-driver flows.
 - Preprocessor feature probes for __has_attribute, __has_builtin, and __has_include are now verified.
 
 ## Phase A — SQLite Truth Gate
@@ -102,5 +103,6 @@ Compete where OpticC can be structurally stronger:
 ### Newly Verified Progress
 - Representative M7 atomic lowering is now live and verified through generated LLVM IR.
 - Verified instructions now include atomic read-modify-write, compare-and-swap, and sequentially consistent fences.
+- M8 now includes verified support for noinline, always_inline, and hot function attributes in kernel-style flows.
 - M10 preprocessor feature probes now answer kernel-style checks for __has_attribute, __has_builtin, and __has_include.
 - End-to-end kernel-style probe compilation now succeeds with direct-driver flags, depfile generation, and feature-gated source.

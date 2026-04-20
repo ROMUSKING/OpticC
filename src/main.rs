@@ -73,6 +73,7 @@ struct DirectDriverInvocation {
     source_files: Vec<PathBuf>,
     output: PathBuf,
     include_paths: Vec<PathBuf>,
+    force_includes: Vec<PathBuf>,
     defines: HashMap<String, String>,
     link_libs: Vec<String>,
     optimization: u32,
@@ -95,6 +96,7 @@ impl Default for DirectDriverInvocation {
             source_files: Vec::new(),
             output: PathBuf::from("a.out"),
             include_paths: Vec::new(),
+            force_includes: Vec::new(),
             defines: HashMap::new(),
             link_libs: Vec::new(),
             optimization: 0,
@@ -268,7 +270,12 @@ fn parse_direct_driver_args(args: &[String]) -> Result<DirectDriverInvocation, S
                 continue;
             }
             "-include" => {
-                i += 2;
+                i += 1;
+                let value = args
+                    .get(i)
+                    .ok_or_else(|| "missing value for -include".to_string())?;
+                invocation.force_includes.push(PathBuf::from(value));
+                i += 1;
                 continue;
             }
             "-x" => {
@@ -478,6 +485,7 @@ fn execute_direct_driver(invocation: DirectDriverInvocation) -> Result<(), Box<d
         .with_jobs(invocation.jobs)
         .with_optimization(invocation.optimization)
         .with_include_paths(invocation.include_paths.clone())
+        .with_force_includes(invocation.force_includes.clone())
         .with_defines(invocation.defines.clone())
         .with_link_libs(invocation.link_libs.clone());
 
@@ -808,6 +816,8 @@ mod tests {
             "/usr/include".to_string(),
             "-iquote".to_string(),
             "include/generated".to_string(),
+            "-include".to_string(),
+            "generated/autoconf.h".to_string(),
             "-UDEBUG".to_string(),
             "-x".to_string(),
             "c".to_string(),
@@ -821,6 +831,7 @@ mod tests {
         assert_eq!(invocation.source_files, vec![PathBuf::from("module.c")]);
         assert!(invocation.include_paths.contains(&PathBuf::from("/usr/include")));
         assert!(invocation.include_paths.contains(&PathBuf::from("include/generated")));
+        assert!(invocation.force_includes.contains(&PathBuf::from("generated/autoconf.h")));
         assert!(!invocation.defines.contains_key("DEBUG"));
         assert_eq!(invocation.output, PathBuf::from("module.o"));
     }
