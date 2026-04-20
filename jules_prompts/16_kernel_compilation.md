@@ -38,10 +38,10 @@ OpticC is targeting compilation of a **minimal Linux 6.6 LTS kernel** using `tin
 - [x] `__attribute__((packed))` → suppress struct padding + LLVM packed struct type
 - [x] `__attribute__((noinline))` → LLVM `noinline` function attribute
 - [x] `__attribute__((always_inline))` → LLVM `alwaysinline` function attribute
-- [ ] `__attribute__((constructor/destructor))` → `@llvm.global_ctors`/`@llvm.global_dtors`
+- [x] `__attribute__((constructor/destructor))` → `@llvm.global_ctors`/`@llvm.global_dtors`
 - [x] `__attribute__((hot))` → LLVM `hot` function attribute
-- [ ] `__builtin_types_compatible_p(t1, t2)` → compile-time type comparison
-- [ ] `__builtin_choose_expr(const, e1, e2)` → compile-time conditional
+- [x] `__builtin_types_compatible_p(t1, t2)` → compile-time type comparison
+- [x] `__builtin_choose_expr(const, e1, e2)` → compile-time conditional
 - [ ] `__builtin_clzll/ctzll/popcountll/ffsll` → 64-bit variants
 - [ ] `__builtin_ia32_pause` → x86 `pause` instruction
 - [ ] `__builtin_classify_type` → GCC type classification enum
@@ -49,7 +49,7 @@ OpticC is targeting compilation of a **minimal Linux 6.6 LTS kernel** using `tin
 - **Files**: `src/frontend/gnu_extensions.rs`, `src/types/mod.rs`, `src/backend/llvm.rs`
 
 ### M9: Type System Extensions 📋
-- [ ] Flexible array members: `struct s { int n; char data[]; }`
+- [x] Flexible array members: `struct s { int n; char data[]; }`
 - [ ] Anonymous structs/unions in struct members
 - [ ] `_Static_assert(expr, "msg")` → compile-time assertion
 - [ ] `_Thread_local` / `__thread` → LLVM `thread_local` globals
@@ -193,9 +193,11 @@ $(CC) -Wp,-MD,path/.file.o.d -nostdinc -isystem $(shell $(CC) -print-file-name=i
 
 ## KNOWN KERNEL BLOCKERS
 - Direct GCC-style driver slice is now verified for simple Makefile use and kernel-style smoke invocations, but full Kbuild compatibility still needs deeper semantics and broader validation.
-- This container currently lacks a host kernel build tree under /lib/modules/$(uname -r)/build, so real out-of-tree module validation is externally blocked here.
-- Remaining constructor/destructor lowering, atomic ordering constants, and broader kernel-scale validation are still open.
-- Freestanding flags, force-includes, feature probes, and packed struct layout are now verified, but further backend/type-system hardening is still needed for full kernel correctness.
+- The kernel build tree is now installed under /lib/modules/$(uname -r)/build, so real out-of-tree module validation now runs in-container.
+- Objtool RETHUNK rejection is now cleared for the hello-module path.
+- Current live blocker: hello-module builds now reach modpost, which still reports missing MODULE_LICENSE metadata on the emitted object.
+- Remaining atomic ordering constants, anonymous aggregate promotion, and broader kernel-scale validation are still open.
+- Freestanding flags, force-includes, feature probes, packed struct layout, constructor/destructor lowering, flexible array layout, compile-time builtin support, and thunk-safe return lowering are now verified, but further metadata-preservation hardening is still needed for full kernel correctness.
 
 ## LESSONS LEARNED
 - Root cause for atomics was not parser support alone, but the backend treating GCC atomic names as ordinary extern calls. Intercepting these names in call lowering fixed the issue cleanly.

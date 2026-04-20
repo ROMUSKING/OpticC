@@ -625,7 +625,7 @@ impl Parser {
             // Handle __asm__("...") after declarator (GCC redirect)
             self.skip_asm_label();
 
-            if let Some(attr_result) = self.parse_attribute_after_declarator() {
+            while let Some(attr_result) = self.parse_attribute_after_declarator() {
                 let attr = attr_result?;
                 // Link post-declarator attributes into the declaration child chain
                 self.link_siblings(&mut first_child, &mut last_child, attr);
@@ -674,7 +674,7 @@ impl Parser {
 
             self.skip_asm_label();
 
-            if let Some(attr_result) = self.parse_attribute_after_declarator() {
+            while let Some(attr_result) = self.parse_attribute_after_declarator() {
                 let attr = attr_result?;
                 self.link_siblings(&mut first_child, &mut last_child, attr);
             }
@@ -1415,7 +1415,7 @@ impl Parser {
                 // Handle __asm__("...") after declarator
                 self.skip_asm_label();
 
-                if let Some(attr_result) = self.parse_attribute_after_declarator() {
+                while let Some(attr_result) = self.parse_attribute_after_declarator() {
                     let attr = attr_result?;
                     self.link_siblings(&mut first_init, &mut last_init, attr);
                 }
@@ -2272,23 +2272,27 @@ impl Parser {
                 while self.current < self.tokens.len() && self.tokens[self.current].kind == TokenKind::StringLiteral {
                     let next_text = self.tokens[self.current].text.clone();
                     self.advance();
-                    if next_text.len() >= 2 && next_text.starts_with('"') && next_text.ends_with('"') {
-                        let raw = &next_text[1..next_text.len()-1];
-                        let mut chars = raw.chars();
-                        while let Some(c) = chars.next() {
-                            if c == '\\' {
-                                match chars.next() {
-                                    Some('n') => full_string.push('\n'),
-                                    Some('t') => full_string.push('\t'),
-                                    Some('r') => full_string.push('\r'),
-                                    Some('0') => full_string.push('\0'),
-                                    Some('\\') => full_string.push('\\'),
-                                    Some(other) => { full_string.push('\\'); full_string.push(other); }
-                                    None => full_string.push('\\'),
-                                }
-                            } else {
-                                full_string.push(c);
+                    let raw = if next_text.len() >= 2 && next_text.starts_with('"') && next_text.ends_with('"') {
+                        next_text[1..next_text.len()-1].to_string()
+                    } else {
+                        next_text
+                    };
+                    let mut chars = raw.chars();
+                    while let Some(c) = chars.next() {
+                        if c == '\\' {
+                            match chars.next() {
+                                Some('n') => full_string.push('\n'),
+                                Some('t') => full_string.push('\t'),
+                                Some('r') => full_string.push('\r'),
+                                Some('0') => full_string.push('\0'),
+                                Some('\\') => full_string.push('\\'),
+                                Some('"') => full_string.push('"'),
+                                Some('\'') => full_string.push('\''),
+                                Some(other) => { full_string.push('\\'); full_string.push(other); }
+                                None => full_string.push('\\'),
                             }
+                        } else {
+                            full_string.push(c);
                         }
                     }
                 }
@@ -2330,13 +2334,11 @@ impl Parser {
     }
 
     fn parse_attribute_after_declarator(&mut self) -> Option<Result<NodeOffset, ParseError>> {
-        if self.current_token().kind == TokenKind::Keyword
+        if (self.current_token().kind == TokenKind::Keyword
+            || self.current_token().kind == TokenKind::Identifier)
             && self.current_token().text == "__attribute__"
         {
-            Some(self.parse_attribute_list())
-        } else if self.current_token().kind == TokenKind::Identifier
-            && self.current_token().text == "__attribute__"
-        {
+            self.advance();
             Some(self.parse_attribute_list())
         } else {
             None

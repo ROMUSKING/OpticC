@@ -988,6 +988,39 @@ mod tests {
     }
 
     #[test]
+    fn test_struct_with_flexible_array_member() {
+        let mut ts = TypeSystem::new();
+        let flex = ts.add_type(CType::Array {
+            element: TypeId::CHAR,
+            size: None,
+        });
+        let struct_id = ts.add_type(CType::Struct {
+            name: Some("Flex".to_string()),
+            members: vec![
+                StructMember {
+                    name: "len".to_string(),
+                    type_id: TypeId::INT,
+                    offset: 0,
+                    bit_offset: None,
+                    bit_width: None,
+                },
+                StructMember {
+                    name: "data".to_string(),
+                    type_id: flex,
+                    offset: 0,
+                    bit_offset: None,
+                    bit_width: None,
+                },
+            ],
+            size: 0,
+            align: 0,
+        });
+        ts.compute_struct_layout(struct_id);
+        assert_eq!(ts.size_of(struct_id), 4);
+        assert_eq!(ts.align_of(struct_id), 4);
+    }
+
+    #[test]
     fn test_struct_with_nested_types() {
         let mut ts = TypeSystem::new();
         let inner = ts.add_type(CType::Struct {

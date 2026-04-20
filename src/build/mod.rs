@@ -19,6 +19,7 @@ use crate::types::TypeSystem;
 
 const LARGE_COMPILER_STACK_SIZE: usize = 64 * 1024 * 1024;
 const LARGE_STACK_INPUT_THRESHOLD_BYTES: u64 = 512 * 1024;
+const CACHE_SCHEMA_VERSION: &str = "v2-kernel-object-fixes";
 
 static COMPILE_INVOCATION_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -163,6 +164,7 @@ fn build_cache_key(
     force_includes: &[PathBuf],
     defines: &HashMap<String, String>,
     optimization: u32,
+    return_thunk_extern: bool,
 ) -> Result<CacheKey, BuildError> {
     let source_text = fs::read_to_string(source)
         .map_err(|e| BuildError::CompileError(source.display().to_string(), e.to_string()))?;
@@ -183,8 +185,28 @@ fn build_cache_key(
         flags.push(format!("-D{}={}", name, value));
     }
     flags.push(format!("-O{}", optimization));
+    flags.push(format!("--cache-schema={}", CACHE_SCHEMA_VERSION));
+    if return_thunk_extern {
+        flags.push("-mfunction-return=thunk-extern".to_string());
+    }
 
     Ok(CacheKey::new(&source_text, &flags))
+}
+
+fn rewrite_return_thunks_for_kernel(asm: &str) -> String {
+    let mut rewritten = String::with_capacity(asm.len() + 64);
+    for line in asm.lines() {
+        let trimmed = line.trim();
+        if matches!(trimmed, "ret" | "retq" | "retl") {
+            let indent_len = line.len() - line.trim_start().len();
+            rewritten.push_str(&line[..indent_len]);
+            rewritten.push_str("jmp\t__x86_return_thunk\n");
+        } else {
+            rewritten.push_str(line);
+            rewritten.push('\n');
+        }
+    }
+    rewritten
 }
 
 fn restore_cached_object(cache_key: &CacheKey, obj_path: &Path) -> Result<bool, BuildError> {
@@ -218,6 +240,7 @@ pub struct BuildConfig {
     pub jobs: usize,
     pub optimization: u32,
     pub output_type: OutputType,
+    pub return_thunk_extern: bool,
 }
 
 impl BuildConfig {
@@ -232,6 +255,7 @@ impl BuildConfig {
             jobs: 1,
             optimization: 0,
             output_type: OutputType::Executable,
+            return_thunk_extern: false,
         }
     }
 
@@ -280,6 +304,11 @@ impl BuildConfig {
         self
     }
 
+    pub fn with_return_thunk_extern(mut self, enabled: bool) -> Self {
+        self.return_thunk_extern = enabled;
+        self
+    }
+
     pub fn discover_source_files(dir: &Path) -> Vec<PathBuf> {
         let mut files = Vec::new();
         if let Ok(entries) = fs::read_dir(dir) {
@@ -318,6 +347,9 @@ impl BuildConfig {
         }
         for (name, value) in &self.defines {
             flags.push(format!("-D{}={}", name, value));
+        }
+        if self.return_thunk_extern {
+            flags.push("-mfunction-return=thunk-extern".to_string());
         }
         flags
     }
@@ -383,6 +415,7 @@ impl Builder {
         let force_includes = self.config.force_includes.clone();
         let defines = self.config.defines.clone();
         let optimization = self.config.optimization;
+        let return_thunk_extern = self.config.return_thunk_extern;
         let source_files = self.config.source_files.clone();
 
         fs::create_dir_all(&temp_dir)?;
@@ -407,6 +440,7 @@ impl Builder {
                         &force_includes,
                         &defines,
                         optimization,
+                        return_thunk_extern,
                     )
                 })
                 .collect()
@@ -432,6 +466,7 @@ impl Builder {
             &self.config.force_includes,
             &self.config.defines,
             self.config.optimization,
+            self.config.return_thunk_extern,
         )
     }
 
@@ -566,6 +601,7 @@ fn compile_file_to_object(
     force_includes: &[PathBuf],
     defines: &HashMap<String, String>,
     optimization: u32,
+    return_thunk_extern: bool,
 ) -> Result<PathBuf, BuildError> {
     if !should_use_large_stack(source) {
         return compile_file_to_object_impl(
@@ -575,6 +611,7 @@ fn compile_file_to_object(
             force_includes,
             defines,
             optimization,
+            return_thunk_extern,
         );
     }
 
@@ -602,6 +639,7 @@ fn compile_file_to_object(
                 &force_includes,
                 &defines,
                 optimization,
+                return_thunk_extern,
             )
         })
         .map_err(BuildError::IoError)?
@@ -621,6 +659,7 @@ fn compile_file_to_object_impl(
     force_includes: &[PathBuf],
     defines: &HashMap<String, String>,
     optimization: u32,
+    return_thunk_extern: bool,
 ) -> Result<PathBuf, BuildError> {
     let stem = source
         .file_stem()
@@ -638,6 +677,7 @@ fn compile_file_to_object_impl(
         force_includes,
         defines,
         optimization,
+        return_thunk_extern,
     )?;
 
     Ok(obj_path)
@@ -765,6 +805,7 @@ pub fn compile_source_to_object_with_stats(
             &[],
             defines,
             opt_level,
+            false,
         );
     }
 
@@ -793,6 +834,7 @@ pub fn compile_source_to_object_with_stats(
                 &[],
                 &defines,
                 opt_level,
+                false,
             )
         })
         .map_err(BuildError::IoError)?
@@ -818,8 +860,16 @@ fn compile_source_to_object_with_stats_impl(
     force_includes: &[PathBuf],
     defines: &HashMap<String, String>,
     optimization: u32,
+    return_thunk_extern: bool,
 ) -> Result<CompilePhaseTimings, BuildError> {
-    let cache_key = build_cache_key(source, include_paths, force_includes, defines, optimization)?;
+    let cache_key = build_cache_key(
+        source,
+        include_paths,
+        force_includes,
+        defines,
+        optimization,
+        return_thunk_extern,
+    )?;
     if restore_cached_object(&cache_key, obj_path)? {
         return Ok(CompilePhaseTimings::default());
     }
@@ -854,14 +904,46 @@ fn compile_source_to_object_with_stats_impl(
 
     let llc = find_tool(&["llc-18", "llc", "llc-17", "llc-16"])?;
     let llc_start = Instant::now();
-    let llc_output = Command::new(&llc)
-        .arg("-relocation-model=pic")
-        .arg("-filetype=obj")
-        .arg("-o")
-        .arg(obj_path)
-        .arg(ll_path)
-        .output()
-        .map_err(BuildError::IoError)?;
+    let llc_output = if return_thunk_extern {
+        let asm_path = obj_path.with_extension("s");
+        let asm_output = Command::new(&llc)
+            .arg("-relocation-model=pic")
+            .arg("-filetype=asm")
+            .arg("-o")
+            .arg(&asm_path)
+            .arg(ll_path)
+            .output()
+            .map_err(BuildError::IoError)?;
+
+        if asm_output.status.success() {
+            let asm = fs::read_to_string(&asm_path).map_err(BuildError::IoError)?;
+            let rewritten = rewrite_return_thunks_for_kernel(&asm);
+            fs::write(&asm_path, rewritten).map_err(BuildError::IoError)?;
+            let cc = find_tool(&["clang", "gcc"])?;
+            let assembled = Command::new(&cc)
+                .arg("-c")
+                .arg("-x")
+                .arg("assembler")
+                .arg("-o")
+                .arg(obj_path)
+                .arg(&asm_path)
+                .output()
+                .map_err(BuildError::IoError)?;
+            let _ = fs::remove_file(&asm_path);
+            assembled
+        } else {
+            asm_output
+        }
+    } else {
+        Command::new(&llc)
+            .arg("-relocation-model=pic")
+            .arg("-filetype=obj")
+            .arg("-o")
+            .arg(obj_path)
+            .arg(ll_path)
+            .output()
+            .map_err(BuildError::IoError)?
+    };
     timings.llc_ms = llc_start.elapsed().as_millis() as u64;
 
     let _ = fs::remove_file(ll_path);
@@ -877,6 +959,39 @@ fn compile_source_to_object_with_stats_impl(
     store_cached_object(&cache_key, obj_path)?;
 
     Ok(timings)
+}
+
+fn resolve_force_include_path(
+    input_path: &Path,
+    header: &Path,
+    include_paths: &[PathBuf],
+) -> PathBuf {
+    if header.is_absolute() {
+        return header.to_path_buf();
+    }
+
+    if let Ok(cwd) = std::env::current_dir() {
+        let candidate = cwd.join(header);
+        if candidate.exists() {
+            return candidate;
+        }
+    }
+
+    if let Some(parent) = input_path.parent() {
+        let candidate = parent.join(header);
+        if candidate.exists() {
+            return candidate;
+        }
+    }
+
+    for base in include_paths {
+        let candidate = base.join(header);
+        if candidate.exists() {
+            return candidate;
+        }
+    }
+
+    header.to_path_buf()
 }
 
 fn compile_to_ir_artifacts(
@@ -909,7 +1024,8 @@ fn compile_to_ir_artifacts(
                 .map_err(|e| format!("Failed to read source file '{}': {}", input_path.display(), e))?;
             let mut prefixed_source = String::new();
             for header in force_includes {
-                prefixed_source.push_str(&format!("#include \"{}\"\n", header.display()));
+                let resolved = resolve_force_include_path(input_path, header, include_paths);
+                prefixed_source.push_str(&format!("#include \"{}\"\n", resolved.display()));
             }
             prefixed_source.push_str(&source_text);
             pp.process_source(&prefixed_source, input_path.to_str().unwrap())
@@ -1142,6 +1258,21 @@ mod tests {
         let mut set = HashSet::new();
         set.insert(key.clone());
         assert!(set.contains(&key));
+    }
+
+    #[test]
+    fn test_rewrite_return_thunks_for_kernel_rethunk() {
+        let input = "hello:\n\txorl\t%eax, %eax\n\tretq\nworld:\n\tret\n";
+        let rewritten = rewrite_return_thunks_for_kernel(input);
+        assert!(!rewritten.contains("\tretq\n"), "bare retq should be removed: {rewritten}");
+        assert!(!rewritten.contains("\tret\n"), "bare ret should be removed: {rewritten}");
+        assert!(rewritten.contains("\tjmp\t__x86_return_thunk\n"), "rethunk jump missing: {rewritten}");
+    }
+
+    #[test]
+    fn test_build_config_return_thunk_builder() {
+        let config = BuildConfig::new().with_return_thunk_extern(true);
+        assert!(config.return_thunk_extern);
     }
 
     #[test]
@@ -1594,6 +1725,7 @@ mod tests {
             &[],
             &HashMap::new(),
             0,
+            false,
         );
         assert!(
             helper_obj.is_ok(),
@@ -1615,6 +1747,7 @@ mod tests {
             &[],
             &HashMap::new(),
             0,
+            false,
         );
         assert!(
             main_obj.is_ok(),

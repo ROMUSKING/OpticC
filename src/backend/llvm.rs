@@ -7,7 +7,7 @@ use inkwell::types::{BasicMetadataTypeEnum, BasicType, BasicTypeEnum, StructType
 use inkwell::values::{BasicValue, BasicValueEnum, FunctionValue, PointerValue};
 use inkwell::basic_block::BasicBlock;
 use inkwell::AddressSpace;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// Maximum number of switch entries to emit for a single `case LOW ... HIGH:` range.
 /// Prevents blowup for huge ranges like `case 0 ... 0xFFFFFFFF:`.
@@ -50,6 +50,14 @@ pub struct LlvmBackend<'ctx, 'types> {
     /// Set by `lower_member_access_ptr` when the access resolved a bitfield.
     /// Consumed by callers that need shift/mask codegen for read or write.
     last_bitfield_access: Option<(u32, u32)>,
+    /// Functions registered for module constructor execution.
+    global_ctors: Vec<(FunctionValue<'ctx>, u32)>,
+    /// Functions registered for module destructor execution.
+    global_dtors: Vec<(FunctionValue<'ctx>, u32)>,
+    /// Globals/functions that must be preserved in the final object.
+    llvm_used: Vec<PointerValue<'ctx>>,
+    /// Function definitions that should be materialized for this translation unit.
+    reachable_functions: HashSet<String>,
 }
 
 #[derive(Clone, Copy)]
@@ -90,6 +98,10 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
             struct_gep_info: HashMap::new(),
             var_struct_tag: HashMap::new(),
             last_bitfield_access: None,
+            global_ctors: Vec::new(),
+            global_dtors: Vec::new(),
+            llvm_used: Vec::new(),
+            reachable_functions: HashSet::new(),
         }
     }
 
@@ -122,11 +134,376 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
             struct_gep_info: HashMap::new(),
             var_struct_tag: HashMap::new(),
             last_bitfield_access: None,
+            global_ctors: Vec::new(),
+            global_dtors: Vec::new(),
+            llvm_used: Vec::new(),
+            reachable_functions: HashSet::new(),
         }
     }
 
     pub fn set_vectorization_hints(&mut self, hints: VectorizationHints) {
         self.vectorization_hints = hints;
+    }
+
+    fn function_signature_info(
+        &self,
+        arena: &Arena,
+        node: &CAstNode,
+    ) -> (String, bool, bool, NodeOffset) {
+        let mut name = "func".to_string();
+        let mut is_static = false;
+        let mut is_inline = false;
+        let mut body_offset = NodeOffset::NULL;
+
+        let mut child_offset = node.first_child;
+        while child_offset != NodeOffset::NULL {
+            if let Some(child) = arena.get(child_offset) {
+                match child.kind {
+                    103 => is_static = true,
+                    93 => is_inline = true,
+                    7..=9 => {
+                        if let Some(func_decl_offset) =
+                            self.find_function_declarator_offset(arena, child_offset)
+                        {
+                            if let Some(func_decl) = arena.get(func_decl_offset) {
+                                if let Some(ident) = arena.get(func_decl.first_child) {
+                                    if ident.kind == 60 {
+                                        if let Some(found) = arena.get_string(NodeOffset(ident.data)) {
+                                            name = found.to_string();
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    40 => body_offset = child_offset,
+                    _ => {}
+                }
+                child_offset = child.next_sibling;
+            } else {
+                break;
+            }
+        }
+
+        (name, is_static, is_inline, body_offset)
+    }
+
+    fn collect_direct_callees(
+        &self,
+        arena: &Arena,
+        offset: NodeOffset,
+        out: &mut HashSet<String>,
+    ) {
+        let mut current = offset;
+        while current != NodeOffset::NULL {
+            let Some(node) = arena.get(current) else {
+                break;
+            };
+
+            if node.kind == 67 {
+                if let Some(callee) = arena.get(node.first_child) {
+                    if let Some(name) = self
+                        .find_ident_name_in(arena, callee)
+                        .or_else(|| self.find_ident_name(arena, callee))
+                    {
+                        if !name.starts_with("__builtin_") {
+                            out.insert(name);
+                        }
+                    }
+                }
+            }
+
+            if node.first_child != NodeOffset::NULL {
+                self.collect_direct_callees(arena, node.first_child, out);
+            }
+            current = node.next_sibling;
+        }
+    }
+
+    fn compute_reachable_functions(&self, arena: &Arena, offset: NodeOffset) -> HashSet<String> {
+        let mut defs: HashMap<String, (bool, HashSet<String>)> = HashMap::new();
+        let mut child_offset = offset;
+        while child_offset != NodeOffset::NULL {
+            let Some(node) = arena.get(child_offset) else {
+                break;
+            };
+            if node.kind == 23 {
+                let (name, is_static, _is_inline, body_offset) =
+                    self.function_signature_info(arena, node);
+                let attrs = self.extract_attributes(arena, node);
+                let preserve_root = !is_static
+                    || attrs.iter().any(|(attr, _, _)| {
+                        matches!(
+                            attr.as_str(),
+                            "section"
+                                | "__section__"
+                                | "constructor"
+                                | "__constructor__"
+                                | "destructor"
+                                | "__destructor__"
+                                | "used"
+                                | "__used__"
+                        )
+                    });
+                let mut callees = HashSet::new();
+                if body_offset != NodeOffset::NULL {
+                    self.collect_direct_callees(arena, body_offset, &mut callees);
+                }
+                defs.insert(name, (preserve_root, callees));
+            }
+            child_offset = node.next_sibling;
+        }
+
+        let mut reachable = HashSet::new();
+        let mut worklist = Vec::new();
+        for (name, (is_root, _)) in &defs {
+            if *is_root {
+                reachable.insert(name.clone());
+                worklist.push(name.clone());
+            }
+        }
+
+        while let Some(name) = worklist.pop() {
+            if let Some((_is_root, callees)) = defs.get(&name) {
+                for callee in callees {
+                    if defs.contains_key(callee) && reachable.insert(callee.clone()) {
+                        worklist.push(callee.clone());
+                    }
+                }
+            }
+        }
+
+        reachable
+    }
+
+    fn scan_global_var_shape(
+        &self,
+        arena: &Arena,
+        offset: NodeOffset,
+        name_opt: &mut Option<String>,
+        is_pointer: &mut bool,
+        is_array: &mut bool,
+        is_static: &mut bool,
+        init_offset: &mut NodeOffset,
+    ) {
+        let mut current = offset;
+        while current != NodeOffset::NULL {
+            let Some(node) = arena.get(current) else {
+                break;
+            };
+
+            match node.kind {
+                60 => {
+                    if name_opt.is_none() {
+                        *name_opt = arena
+                            .get_string(NodeOffset(node.data))
+                            .filter(|s| !s.is_empty())
+                            .map(|s| s.to_string());
+                    }
+                    if node.next_sibling != NodeOffset::NULL && *init_offset == NodeOffset::NULL {
+                        *init_offset = node.next_sibling;
+                    }
+                }
+                7 => {
+                    *is_pointer = true;
+                    if node.next_sibling != NodeOffset::NULL && *init_offset == NodeOffset::NULL {
+                        *init_offset = node.next_sibling;
+                    }
+                }
+                8 => {
+                    *is_array = true;
+                    if node.next_sibling != NodeOffset::NULL && *init_offset == NodeOffset::NULL {
+                        *init_offset = node.next_sibling;
+                    }
+                }
+                103 => *is_static = true,
+                _ => {}
+            }
+
+            if node.first_child != NodeOffset::NULL {
+                self.scan_global_var_shape(
+                    arena,
+                    node.first_child,
+                    name_opt,
+                    is_pointer,
+                    is_array,
+                    is_static,
+                    init_offset,
+                );
+            }
+            current = node.next_sibling;
+        }
+    }
+
+    fn collect_attributes_from_chain(
+        &self,
+        arena: &Arena,
+        offset: NodeOffset,
+        attrs: &mut Vec<(String, Option<String>, Option<u32>)>,
+    ) {
+        let mut child_offset = offset;
+        while child_offset != NodeOffset::NULL {
+            if let Some(child) = arena.get(child_offset) {
+                if child.kind == 200 {
+                    let mut attr_child_offset = child.first_child;
+                    while attr_child_offset != NodeOffset::NULL {
+                        if let Some(attr_child) = arena.get(attr_child_offset) {
+                            let name_offset = if attr_child.parent != NodeOffset::NULL {
+                                attr_child.parent
+                            } else {
+                                NodeOffset(attr_child.first_child.0)
+                            };
+                            if let Some(name) = arena.get_string(name_offset) {
+                                if !name.is_empty() {
+                                    let mut str_arg = None;
+                                    let mut int_arg = if attr_child.data != 0 {
+                                        Some(attr_child.data)
+                                    } else {
+                                        None
+                                    };
+                                    let mut arg_offset = if attr_child.parent != NodeOffset::NULL {
+                                        attr_child.first_child
+                                    } else {
+                                        attr_child.next_sibling
+                                    };
+                                    while arg_offset != NodeOffset::NULL {
+                                        if let Some(arg_node) = arena.get(arg_offset) {
+                                            if arg_node.kind == 63 {
+                                                str_arg = arena
+                                                    .get_string(NodeOffset(arg_node.data))
+                                                    .map(|s| s.to_string());
+                                            } else if arg_node.kind == 61 {
+                                                int_arg = Some(arg_node.data);
+                                            }
+                                            arg_offset = arg_node.next_sibling;
+                                        } else {
+                                            break;
+                                        }
+                                    }
+                                    attrs.push((name.to_string(), str_arg, int_arg));
+                                }
+                            }
+                            attr_child_offset = attr_child.next_sibling;
+                        } else {
+                            break;
+                        }
+                    }
+                } else if child.first_child != NodeOffset::NULL {
+                    self.collect_attributes_from_chain(arena, child.first_child, attrs);
+                }
+                child_offset = child.next_sibling;
+            } else {
+                break;
+            }
+        }
+    }
+
+    fn record_lifecycle_function(
+        entries: &mut Vec<(FunctionValue<'ctx>, u32)>,
+        function: FunctionValue<'ctx>,
+        priority: u32,
+    ) {
+        let name = function.get_name().to_bytes().to_vec();
+        if entries
+            .iter()
+            .any(|(existing, existing_priority)| {
+                existing.get_name().to_bytes() == name.as_slice() && *existing_priority == priority
+            })
+        {
+            return;
+        }
+        entries.push((function, priority));
+    }
+
+    fn register_lifecycle_attributes(
+        &mut self,
+        function: FunctionValue<'ctx>,
+        attrs: &[(String, Option<String>, Option<u32>)],
+    ) {
+        for (name, _str_arg, int_arg) in attrs {
+            let priority = int_arg.unwrap_or(65535);
+            match name.as_str() {
+                "constructor" | "__constructor__" => {
+                    Self::record_lifecycle_function(&mut self.global_ctors, function, priority);
+                }
+                "destructor" | "__destructor__" => {
+                    Self::record_lifecycle_function(&mut self.global_dtors, function, priority);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn emit_global_lifecycle_table(
+        &self,
+        table_name: &str,
+        entries: &[(FunctionValue<'ctx>, u32)],
+    ) {
+        if entries.is_empty() {
+            return;
+        }
+
+        let i32_type = self.context.i32_type();
+        let ptr_type = self.context.ptr_type(AddressSpace::default());
+        let entry_type = self
+            .context
+            .struct_type(&[i32_type.into(), ptr_type.into(), ptr_type.into()], false);
+
+        let mut ordered = entries.to_vec();
+        ordered.sort_by_key(|(_, priority)| *priority);
+
+        let values: Vec<_> = ordered
+            .iter()
+            .map(|(function, priority)| {
+                entry_type.const_named_struct(&[
+                    i32_type.const_int(*priority as u64, false).into(),
+                    function.as_global_value().as_pointer_value().into(),
+                    ptr_type.const_null().into(),
+                ])
+            })
+            .collect();
+
+        let array_type = entry_type.array_type(values.len() as u32);
+        let array_init = entry_type.const_array(&values);
+        let global = self.module.add_global(array_type, None, table_name);
+        global.set_linkage(inkwell::module::Linkage::Appending);
+        global.set_initializer(&array_init);
+        global.set_alignment(8);
+    }
+
+    fn emit_global_lifecycle_tables(&self) {
+        self.emit_global_lifecycle_table("llvm.global_ctors", &self.global_ctors);
+        self.emit_global_lifecycle_table("llvm.global_dtors", &self.global_dtors);
+    }
+
+    fn record_used_symbol(&mut self, value: PointerValue<'ctx>) {
+        if !self.llvm_used.contains(&value) {
+            self.llvm_used.push(value);
+        }
+    }
+
+    fn register_used_attributes(
+        &mut self,
+        value: PointerValue<'ctx>,
+        attrs: &[(String, Option<String>, Option<u32>)],
+    ) {
+        if attrs.iter().any(|(name, _, _)| matches!(name.as_str(), "used" | "__used__")) {
+            self.record_used_symbol(value);
+        }
+    }
+
+    fn emit_llvm_used(&self) {
+        if self.llvm_used.is_empty() {
+            return;
+        }
+        let ptr_type = self.context.ptr_type(AddressSpace::default());
+        let array_type = ptr_type.array_type(self.llvm_used.len() as u32);
+        let init = ptr_type.const_array(&self.llvm_used);
+        let global = self.module.add_global(array_type, None, "llvm.used");
+        global.set_linkage(inkwell::module::Linkage::Appending);
+        global.set_section(Some("llvm.metadata"));
+        global.set_initializer(&init);
+        global.set_alignment(8);
     }
 
     /// Enter a new block scope. Any variables declared inside this scope will
@@ -233,7 +610,10 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
     }
 
     pub fn compile(&mut self, arena: &Arena, root: NodeOffset) -> Result<(), BackendError> {
+        self.reachable_functions = self.compute_reachable_functions(arena, root);
         self.lower_translation_unit(arena, root)?;
+        self.emit_global_lifecycle_tables();
+        self.emit_llvm_used();
         Ok(())
     }
 
@@ -307,23 +687,9 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                 } else if node.kind == 22 {
                     let _ = self.lower_func_decl(arena, node);
                 } else if node.kind == 20 {
-                    // A kind=20 declaration may contain a function declarator
-                    // (e.g. `extern void foo(int);`). Walk its children to find
-                    // any function declarator and pre-register it.
-                    let mut decl_child = node.first_child;
-                    while decl_child != NodeOffset::NULL {
-                        if let Some(c) = arena.get(decl_child) {
-                            if matches!(c.kind, 7..=9) {
-                                if self.find_function_declarator_offset(arena, decl_child).is_some() {
-                                    let _ = self.lower_func_decl(arena, node);
-                                    break;
-                                }
-                            }
-                            decl_child = c.next_sibling;
-                        } else {
-                            break;
-                        }
-                    }
+                    // Let lower_func_decl inspect the declaration directly; it now
+                    // cleanly no-ops for non-function declarations.
+                    let _ = self.lower_func_decl(arena, node);
                 }
                 prescan_offset = node.next_sibling;
             } else {
@@ -354,6 +720,8 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
 
     /// Lower a top-level declaration, handling global variables properly.
     fn lower_global_decl(&mut self, arena: &Arena, node: &CAstNode) -> Result<(), BackendError> {
+        let _ = self.lower_func_decl(arena, node);
+
         let mut child_offset = node.first_child;
         // Find the type specifier and then the declarator(s)
         let mut spec_kind: u16 = 2; // default int
@@ -393,14 +761,18 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                     }
                     22 => { let _ = self.lower_func_decl(arena, child); }
                     23 => { let _ = self.lower_func_def(arena, child); }
-                    7..=9 => {
-                        // A declarator containing a function declarator represents
+                    7..=9 | 21 | 22 => {
+                        // A declaration containing a function declarator represents
                         // a forward / extern function declaration wrapped in a
                         // kind=20 declaration node (e.g. `extern void foo(int);`).
-                        // Delegate to lower_func_decl with the parent declaration
-                        // so it can walk the full specifier + declarator chain.
+                        // Delegate to lower_func_decl using the innermost wrapper
+                        // that still carries the declaration specifier chain.
                         if self.find_function_declarator_offset(arena, child_offset).is_some() {
-                            let _ = self.lower_func_decl(arena, node);
+                            let _ = if matches!(child.kind, 21 | 22) {
+                                self.lower_func_decl(arena, child)
+                            } else {
+                                self.lower_func_decl(arena, node)
+                            };
                         }
                     }
                     _ => {}
@@ -423,65 +795,17 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
         let mut name_opt: Option<String> = None;
         let mut is_pointer = false;
         let mut is_array = false;
+        let mut is_static = false;
         let mut init_offset = NodeOffset::NULL;
-        
-        let mut child_offset = node.first_child;
-        while child_offset != NodeOffset::NULL {
-            if let Some(child) = arena.get(child_offset) {
-                match child.kind {
-                    // init-declarator (name = init)
-                    73 => {
-                        let decl_node = arena.get(child.first_child);
-                        if let Some(dn) = decl_node {
-                            match dn.kind {
-                                60 => {
-                                    name_opt = arena.get_string(NodeOffset(dn.data))
-                                        .filter(|s| !s.is_empty())
-                                        .map(|s| s.to_string());
-                                    init_offset = dn.next_sibling;
-                                }
-                                7 => {
-                                    is_pointer = true;
-                                    name_opt = self.find_ident_name_in(arena, dn);
-                                    init_offset = dn.next_sibling;
-                                }
-                                8 => {
-                                    is_array = true;
-                                    name_opt = self.find_ident_name_in(arena, dn);
-                                    init_offset = dn.next_sibling;
-                                }
-                                _ => {
-                                    name_opt = self.find_ident_name_in(arena, dn);
-                                    init_offset = dn.next_sibling;
-                                }
-                            }
-                        }
-                    }
-                    // plain identifier
-                    60 => {
-                        name_opt = arena.get_string(NodeOffset(child.data))
-                            .filter(|s| !s.is_empty())
-                            .map(|s| s.to_string());
-                    }
-                    // pointer declarator
-                    7 => {
-                        is_pointer = true;
-                        name_opt = self.find_ident_name_in(arena, child);
-                    }
-                    // array declarator
-                    8 => {
-                        is_array = true;
-                        name_opt = self.find_ident_name_in(arena, child);
-                    }
-                    // type specifiers - skip
-                    1..=6 | 83 | 101..=105 => {}
-                    _ => {}
-                }
-                child_offset = child.next_sibling;
-            } else {
-                break;
-            }
-        }
+        self.scan_global_var_shape(
+            arena,
+            node.first_child,
+            &mut name_opt,
+            &mut is_pointer,
+            &mut is_array,
+            &mut is_static,
+            &mut init_offset,
+        );
 
         if let Some(var_name) = name_opt {
             let global_type = if is_pointer {
@@ -496,10 +820,23 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
             // Check if there's a string initializer (for char arrays)
             if init_offset != NodeOffset::NULL {
                 if let Some(init_node) = arena.get(init_offset) {
-                    if init_node.kind == 63 || init_node.kind == 81 {
-                        // String literal initializer - create global string
-                        let string_offset = NodeOffset(init_node.data);
-                        let string_text = arena.get_string(string_offset).unwrap_or("");
+                    if matches!(init_node.kind, 63 | 81 | 82) {
+                        // String literal initializer - concatenate adjacent string nodes
+                        // so kernel-style constructs like "license" "=" "GPL" lower correctly.
+                        let mut string_text = String::new();
+                        let mut string_off = init_offset;
+                        while string_off != NodeOffset::NULL {
+                            let Some(string_node) = arena.get(string_off) else {
+                                break;
+                            };
+                            if !matches!(string_node.kind, 63 | 81 | 82) {
+                                break;
+                            }
+                            if let Some(fragment) = arena.get_string(NodeOffset(string_node.data)) {
+                                string_text.push_str(fragment);
+                            }
+                            string_off = string_node.next_sibling;
+                        }
                         let bytes = string_text.as_bytes();
                         let string_val = self.context.const_string(bytes, true);
                         let global = self.module.add_global(
@@ -509,7 +846,11 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                         );
                         global.set_initializer(&string_val);
                         global.set_constant(true);
+                        if is_static {
+                            global.set_linkage(inkwell::module::Linkage::Internal);
+                        }
                         self.apply_global_attributes(global, &attrs);
+                        self.register_used_attributes(global.as_pointer_value(), &attrs);
                         // Store in variables for later reference
                         let binding = VariableBinding {
                                 ptr: global.as_pointer_value(),
@@ -541,7 +882,11 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                                 ptr: global.as_pointer_value(),
                                 pointee_type: global_type,
                         };
+                        if is_static {
+                            global.set_linkage(inkwell::module::Linkage::Internal);
+                        }
                         self.apply_global_attributes(global, &attrs);
+                        self.register_used_attributes(global.as_pointer_value(), &attrs);
                         self.global_variables.insert(var_name.clone(), binding);
                         self.variables.insert(var_name, binding);
                         return Ok(());
@@ -562,7 +907,11 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                 _ => self.context.i32_type().const_zero().into(),
             };
             global.set_initializer(&zero);
+            if is_static {
+                global.set_linkage(inkwell::module::Linkage::Internal);
+            }
             self.apply_global_attributes(global, &attrs);
+            self.register_used_attributes(global.as_pointer_value(), &attrs);
             let binding = VariableBinding {
                     ptr: global.as_pointer_value(),
                     pointee_type: global_type,
@@ -620,6 +969,7 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                                     }
                                     // Determine field type and check for bitfield
                                     let mut has_pointer = false;
+                                    let mut array_len: Option<u32> = None;
                                     let mut base_kind = 2u16; // default to int
                                     let mut bitfield_width: Option<u32> = None;
                                     let mut check_off = m.first_child;
@@ -628,6 +978,7 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                                             match cn.kind {
                                                 1..=6 | 10..=13 | 83 | 84 => base_kind = cn.kind,
                                                 7 => has_pointer = true,
+                                                8 => array_len = Some(cn.data),
                                                 27 => {
                                                     // Bitfield node: data = width
                                                     if cn.data > 0 {
@@ -673,6 +1024,8 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                                         bitfield_group = None;
                                         if has_pointer {
                                             field_types.push(self.context.ptr_type(AddressSpace::default()).as_basic_type_enum());
+                                        } else if let Some(len) = array_len {
+                                            field_types.push(self.node_kind_to_llvm_type(base_kind).array_type(len).as_basic_type_enum());
                                         } else {
                                             field_types.push(self.node_kind_to_llvm_type(base_kind));
                                         }
@@ -1762,6 +2115,7 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                 // Walk children to detect type and bitfield
                 let mut base_kind = 2u16;
                 let mut has_pointer = false;
+                let mut array_len: Option<u32> = None;
                 let mut bitfield_width: Option<u32> = None;
                 let mut check_off = member.first_child;
                 while check_off != NodeOffset::NULL {
@@ -1769,6 +2123,7 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                         match cn.kind {
                             1..=6 | 10..=13 | 83 | 84 => base_kind = cn.kind,
                             7 => has_pointer = true,
+                            8 => array_len = Some(cn.data),
                             27 => {
                                 if cn.data > 0 {
                                     bitfield_width = Some(cn.data);
@@ -1800,6 +2155,8 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                     bitfield_group = None;
                     if has_pointer {
                         field_types.push(self.context.ptr_type(AddressSpace::default()).as_basic_type_enum());
+                    } else if let Some(len) = array_len {
+                        field_types.push(self.node_kind_to_llvm_type(base_kind).array_type(len).as_basic_type_enum());
                     } else {
                         field_types.push(self.node_kind_to_llvm_type(base_kind));
                     }
@@ -1906,6 +2263,7 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
         let mut return_llvm_type: Option<BasicTypeEnum<'ctx>> = None;
         let mut is_void_ret = false;
         let mut is_variadic = false;
+        let mut found_declarator = false;
 
         let mut child_offset = node.first_child;
         while child_offset != NodeOffset::NULL {
@@ -1921,6 +2279,7 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                         if let Some(func_decl_offset) =
                             self.find_function_declarator_offset(arena, child_offset)
                         {
+                            found_declarator = true;
                             if let Some(func_decl) = arena.get(func_decl_offset) {
                                 // Check variadic flag
                                 if func_decl.data == 1 {
@@ -1966,6 +2325,19 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
             }
         }
 
+        if !found_declarator {
+            return Ok(());
+        }
+
+        let (_sig_name, is_static_fn, is_inline_fn, _) = self.function_signature_info(arena, node);
+        if is_static_fn
+            && is_inline_fn
+            && !self.reachable_functions.is_empty()
+            && !self.reachable_functions.contains(&func_name)
+        {
+            return Ok(());
+        }
+
         let ret_llvm = return_llvm_type.unwrap_or_else(|| self.context.i32_type().as_basic_type_enum());
         let fn_type = if is_void_ret {
             self.context.void_type().fn_type(&param_types, is_variadic)
@@ -1974,9 +2346,13 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
         };
         let function = self.module.get_function(&func_name)
             .unwrap_or_else(|| self.module.add_function(&func_name, fn_type, None));
+        if is_static_fn {
+            function.set_linkage(inkwell::module::Linkage::Internal);
+        }
         // Apply any __attribute__ decorations to the pre-registered function
         let attrs = self.extract_attributes(arena, node);
         self.apply_function_attributes(function, &attrs);
+        self.register_used_attributes(function.as_global_value().as_pointer_value(), &attrs);
         self.functions.insert(func_name, function);
         Ok(())
     }
@@ -1988,6 +2364,7 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
         let mut return_llvm_type: Option<BasicTypeEnum<'ctx>> = None;
         let mut is_void_ret = false;
         let mut is_variadic = false;
+        let mut found_declarator = false;
 
         let mut child_offset = node.first_child;
         while child_offset != NodeOffset::NULL {
@@ -1999,10 +2376,11 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                             return_llvm_type = Some(self.specifier_to_llvm_type(arena, child));
                         }
                     }
-                    7..=9 => {
+                    7..=9 | 21 | 22 => {
                         if let Some(func_decl_offset) =
                             self.find_function_declarator_offset(arena, child_offset)
                         {
+                            found_declarator = true;
                             if let Some(func_decl) = arena.get(func_decl_offset) {
                                 if func_decl.data == 1 {
                                     is_variadic = true;
@@ -2010,7 +2388,7 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                                 if !is_void_ret {
                                     return_llvm_type = Some(self.declarator_llvm_type(
                                         arena,
-                                        Some(child),
+                                        Some(func_decl),
                                         return_llvm_type.unwrap_or_else(|| {
                                             self.context.i32_type().as_basic_type_enum()
                                         }),
@@ -2047,6 +2425,19 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
             }
         }
 
+        if !found_declarator {
+            return Ok(());
+        }
+
+        let (_sig_name, is_static_fn, is_inline_fn, _) = self.function_signature_info(arena, node);
+        if is_static_fn
+            && is_inline_fn
+            && !self.reachable_functions.is_empty()
+            && !self.reachable_functions.contains(&func_name)
+        {
+            return Ok(());
+        }
+
         let ret_llvm = return_llvm_type.unwrap_or_else(|| self.context.i32_type().as_basic_type_enum());
         let fn_type = if is_void_ret {
             self.context.void_type().fn_type(&param_types, is_variadic)
@@ -2056,8 +2447,12 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
         // Only add if not already registered (pre_register may have added it)
         if self.module.get_function(&func_name).is_none() {
             let function = self.module.add_function(&func_name, fn_type, None);
+            if is_static_fn {
+                function.set_linkage(inkwell::module::Linkage::Internal);
+            }
             let attrs = self.extract_attributes(arena, node);
             self.apply_function_attributes(function, &attrs);
+            self.register_used_attributes(function.as_global_value().as_pointer_value(), &attrs);
             self.functions.insert(func_name, function);
         }
         Ok(())
@@ -2154,6 +2549,11 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
             }
         }
 
+        if !self.reachable_functions.is_empty() && !self.reachable_functions.contains(&func_name) {
+            return Ok(());
+        }
+
+        let is_static_fn = self.function_signature_info(arena, node).1;
         let ret_llvm =
             return_llvm_type.unwrap_or_else(|| self.context.i32_type().as_basic_type_enum());
         let fn_type = if is_void_ret {
@@ -2164,6 +2564,9 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
         // Use the pre-registered function if available, otherwise create new
         let function = self.module.get_function(&func_name)
             .unwrap_or_else(|| self.module.add_function(&func_name, fn_type, None));
+        if is_static_fn {
+            function.set_linkage(inkwell::module::Linkage::Internal);
+        }
 
         // Reconcile return type with actual LLVM function signature.
         // A pre-registered function may have a different return type than what
@@ -2178,6 +2581,8 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
         // Apply __attribute__ decorations to the function
         let attrs = self.extract_attributes(arena, node);
         self.apply_function_attributes(function, &attrs);
+        self.register_used_attributes(function.as_global_value().as_pointer_value(), &attrs);
+        self.register_lifecycle_attributes(function, &attrs);
         self.functions.insert(func_name.clone(), function);
 
         let entry = self.context.append_basic_block(function, "entry");
@@ -4626,6 +5031,7 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
             .and_then(|c| arena.get_string(NodeOffset(c.data)))
             .filter(|s| !s.is_empty());
 
+        let mut arg_offsets: Vec<NodeOffset> = Vec::new();
         let mut args: Vec<inkwell::values::BasicMetadataValueEnum> = Vec::new();
         if let Some(fc) = first_child {
             let mut arg_offset = fc.next_sibling;
@@ -4637,6 +5043,7 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                     } else {
                         arg_offset
                     };
+                    arg_offsets.push(expr_offset);
                     if let Some(arg_val) = self.lower_expr(arena, expr_offset)? {
                         args.push(arg_val.into());
                     }
@@ -4735,6 +5142,72 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
 
             if name.starts_with("__sync_") || name.starts_with("__atomic_") {
                 return self.lower_atomic_builtin(name, &args);
+            }
+
+            match name {
+                "__builtin_expect" | "__builtin_expect_with_probability" | "__builtin_assume_aligned" => {
+                    if let Some(arg) = args.first() {
+                        return Ok(Some(match arg {
+                            inkwell::values::BasicMetadataValueEnum::IntValue(v) => (*v).into(),
+                            inkwell::values::BasicMetadataValueEnum::PointerValue(v) => (*v).into(),
+                            inkwell::values::BasicMetadataValueEnum::FloatValue(v) => (*v).into(),
+                            _ => self.context.i32_type().const_int(0, false).into(),
+                        }));
+                    }
+                    return Ok(Some(self.context.i32_type().const_int(0, false).into()));
+                }
+                "__builtin_constant_p" => {
+                    let is_const = arg_offsets
+                        .first()
+                        .and_then(|off| arena.get(*off))
+                        .map(|child| matches!(child.kind, 61 | 62 | 63 | 80 | 82))
+                        .unwrap_or(false);
+                    return Ok(Some(
+                        self.context
+                            .i32_type()
+                            .const_int(if is_const { 1 } else { 0 }, false)
+                            .into(),
+                    ));
+                }
+                "__builtin_types_compatible_p" => {
+                    let lhs = arg_offsets
+                        .first()
+                        .and_then(|off| self.lower_builtin_type_signature(arena, *off));
+                    let rhs = arg_offsets
+                        .get(1)
+                        .and_then(|off| self.lower_builtin_type_signature(arena, *off));
+                    let compatible = matches!((&lhs, &rhs), (Some(l), Some(r)) if l == r);
+                    return Ok(Some(
+                        self.context
+                            .i32_type()
+                            .const_int(if compatible { 1 } else { 0 }, false)
+                            .into(),
+                    ));
+                }
+                "__builtin_choose_expr" => {
+                    if args.len() >= 3 {
+                        let cond_is_true = arg_offsets
+                            .first()
+                            .and_then(|off| self.lower_builtin_int_constant(arena, *off))
+                            .map(|v| v != 0)
+                            .or_else(|| args.first().and_then(|arg| match arg {
+                                inkwell::values::BasicMetadataValueEnum::IntValue(v) => {
+                                    v.get_zero_extended_constant().map(|n| n != 0)
+                                }
+                                _ => None,
+                            }))
+                            .unwrap_or(true);
+                        let selected = if cond_is_true { 1 } else { 2 };
+                        return Ok(Some(match &args[selected] {
+                            inkwell::values::BasicMetadataValueEnum::IntValue(v) => (*v).into(),
+                            inkwell::values::BasicMetadataValueEnum::PointerValue(v) => (*v).into(),
+                            inkwell::values::BasicMetadataValueEnum::FloatValue(v) => (*v).into(),
+                            _ => self.context.i32_type().const_int(0, false).into(),
+                        }));
+                    }
+                    return Ok(Some(self.context.i32_type().const_int(0, false).into()));
+                }
+                _ => {}
             }
 
             if let Some(func) = self.functions.get(name) {
@@ -5218,18 +5691,75 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
         }
     }
 
+    fn lower_builtin_type_signature(&self, arena: &Arena, offset: NodeOffset) -> Option<String> {
+        let node = arena.get(offset)?;
+        match node.kind {
+            60 => arena.get_string(NodeOffset(node.data)).map(|s| s.to_string()),
+            1 => Some("void".to_string()),
+            2 | 12 | 13 => Some("int".to_string()),
+            3 => Some("char".to_string()),
+            10 => Some("short".to_string()),
+            11 => Some("long".to_string()),
+            14 => Some("_Bool".to_string()),
+            83 => Some("float".to_string()),
+            84 => Some("double".to_string()),
+            4 => {
+                let tag = if node.data != 0 {
+                    arena.get_string(NodeOffset(node.data)).unwrap_or("")
+                } else {
+                    ""
+                };
+                Some(format!("struct:{}", tag))
+            }
+            5 => {
+                let tag = if node.data != 0 {
+                    arena.get_string(NodeOffset(node.data)).unwrap_or("")
+                } else {
+                    ""
+                };
+                Some(format!("union:{}", tag))
+            }
+            7 => self
+                .lower_builtin_type_signature(arena, node.first_child)
+                .map(|inner| format!("*{}", inner)),
+            8 => self
+                .lower_builtin_type_signature(arena, node.first_child)
+                .map(|inner| format!("[{};{}]", inner, node.data)),
+            74 | 201 => self.lower_builtin_type_signature(arena, node.first_child),
+            _ => {
+                if node.first_child != NodeOffset::NULL {
+                    self.lower_builtin_type_signature(arena, node.first_child)
+                } else {
+                    None
+                }
+            }
+        }
+    }
+
+    fn lower_builtin_int_constant(&self, arena: &Arena, offset: NodeOffset) -> Option<u64> {
+        let node = arena.get(offset)?;
+        match node.kind {
+            61 => Some(node.data as u64),
+            74 => self.lower_builtin_int_constant(arena, node.first_child),
+            _ => None,
+        }
+    }
+
     fn lower_builtin_call(
         &mut self,
         arena: &Arena,
         node: &CAstNode,
     ) -> Result<Option<BasicValueEnum<'ctx>>, BackendError> {
-        let builtin_name = if node.data != 0 {
-            arena
-                .get_string(NodeOffset(node.data))
-                .map(|s| s.to_string())
-        } else {
-            None
-        };
+        let builtin_name = arena
+            .get_string(NodeOffset(node.data))
+            .or_else(|| {
+                if node.first_child != NodeOffset::NULL {
+                    arena.get_string(NodeOffset(node.first_child.0))
+                } else {
+                    None
+                }
+            })
+            .map(|s| s.to_string());
 
         let builtin_name = builtin_name.unwrap_or_else(|| "__builtin_unknown".to_string());
 
@@ -5238,10 +5768,16 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
             return Ok(Some(self.context.i32_type().const_int(0, false).into()));
         }
 
+        let mut arg_offsets: Vec<NodeOffset> = Vec::new();
         let mut args: Vec<inkwell::values::BasicMetadataValueEnum> = Vec::new();
-        let mut child_offset = node.first_child;
+        let mut child_offset = if arena.get(node.first_child).is_some() {
+            node.first_child
+        } else {
+            node.next_sibling
+        };
         while child_offset != NodeOffset::NULL {
             if let Some(child) = arena.get(child_offset) {
+                arg_offsets.push(child_offset);
                 if let Some(arg_val) = self.lower_expr(arena, child_offset)? {
                     args.push(arg_val.into());
                 }
@@ -5339,7 +5875,19 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                 Ok(Some(self.context.i32_type().const_int(0, false).into()))
             }
             "__builtin_types_compatible_p" => {
-                Ok(Some(self.context.i32_type().const_int(1, false).into()))
+                let lhs = arg_offsets
+                    .first()
+                    .and_then(|off| self.lower_builtin_type_signature(arena, *off));
+                let rhs = arg_offsets
+                    .get(1)
+                    .and_then(|off| self.lower_builtin_type_signature(arena, *off));
+                let compatible = matches!((&lhs, &rhs), (Some(l), Some(r)) if l == r);
+                Ok(Some(
+                    self.context
+                        .i32_type()
+                        .const_int(if compatible { 1 } else { 0 }, false)
+                        .into(),
+                ))
             }
             "__builtin_unreachable" => {
                 self.builder
@@ -5616,7 +6164,19 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
             }
             "__builtin_choose_expr" => {
                 if args.len() >= 3 {
-                    match &args[1] {
+                    let cond_is_true = arg_offsets
+                        .first()
+                        .and_then(|off| self.lower_builtin_int_constant(arena, *off))
+                        .map(|v| v != 0)
+                        .or_else(|| args.first().and_then(|arg| match arg {
+                            inkwell::values::BasicMetadataValueEnum::IntValue(v) => {
+                                v.get_zero_extended_constant().map(|n| n != 0)
+                            }
+                            _ => None,
+                        }))
+                        .unwrap_or(true);
+                    let selected = if cond_is_true { 1 } else { 2 };
+                    match &args[selected] {
                         inkwell::values::BasicMetadataValueEnum::IntValue(v) => {
                             return Ok(Some((*v).into()))
                         }
@@ -6055,8 +6615,19 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
         let node = arena.get(offset)?;
         match node.kind {
             9 => Some(offset),
-            7 | 8 => self.find_function_declarator_offset(arena, node.first_child),
-            73 => self.find_function_declarator_offset(arena, node.first_child),
+            7 | 8 | 73 | 20 | 21 | 22 | 23 | 24 | 40 => {
+                let mut child_offset = node.first_child;
+                while child_offset != NodeOffset::NULL {
+                    if let Some(found) = self.find_function_declarator_offset(arena, child_offset) {
+                        return Some(found);
+                    }
+                    child_offset = arena
+                        .get(child_offset)
+                        .map(|n| n.next_sibling)
+                        .unwrap_or(NodeOffset::NULL);
+                }
+                None
+            }
             _ => None,
         }
     }
@@ -6079,56 +6650,7 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
     /// Returns a list of (attr_name, optional_string_arg, optional_int_arg) tuples.
     fn extract_attributes(&self, arena: &Arena, node: &CAstNode) -> Vec<(String, Option<String>, Option<u32>)> {
         let mut attrs = Vec::new();
-        let mut child_offset = node.first_child;
-        while child_offset != NodeOffset::NULL {
-            if let Some(child) = arena.get(child_offset) {
-                if child.kind == 200 {
-                    // kind=200 is AST_ATTRIBUTE; walk its children (individual attributes)
-                    let mut attr_child_offset = child.first_child;
-                    while attr_child_offset != NodeOffset::NULL {
-                        if let Some(attr_child) = arena.get(attr_child_offset) {
-                            // first_child = name string offset stored as an arena node
-                            // The attribute node stores: first_child=name_offset, next_sibling=first_arg
-                            if let Some(name) = arena.get_string(NodeOffset(attr_child.first_child.0)) {
-                                if !name.is_empty() {
-                                    let mut str_arg = None;
-                                    let mut int_arg = if attr_child.data != 0 {
-                                        Some(attr_child.data)
-                                    } else {
-                                        None
-                                    };
-                                    // Walk argument nodes
-                                    let mut arg_offset = attr_child.next_sibling;
-                                    while arg_offset != NodeOffset::NULL {
-                                        if let Some(arg_node) = arena.get(arg_offset) {
-                                            if arg_node.kind == 63 {
-                                                // String argument
-                                                str_arg = arena
-                                                    .get_string(NodeOffset(arg_node.data))
-                                                    .map(|s| s.to_string());
-                                            } else if arg_node.kind == 61 {
-                                                // Integer argument
-                                                int_arg = Some(arg_node.data);
-                                            }
-                                            arg_offset = arg_node.next_sibling;
-                                        } else {
-                                            break;
-                                        }
-                                    }
-                                    attrs.push((name.to_string(), str_arg, int_arg));
-                                }
-                            }
-                            attr_child_offset = attr_child.next_sibling;
-                        } else {
-                            break;
-                        }
-                    }
-                }
-                child_offset = child.next_sibling;
-            } else {
-                break;
-            }
-        }
+        self.collect_attributes_from_chain(arena, node.first_child, &mut attrs);
         attrs
     }
 
@@ -6549,6 +7071,36 @@ mod tests {
     }
 
     #[test]
+    fn test_attribute_section_global_string() {
+        let ir = compile_c_to_ir(
+            "static const char __UNIQUE_ID_license230[] __attribute__((used)) __attribute__((section(\".modinfo\"))) __attribute__((aligned(1))) = \"license\" \"=\" \"GPL\";"
+        );
+        assert!(ir.contains("@__UNIQUE_ID_license230"), "Expected global license symbol in IR:\n{}", ir);
+        assert!(ir.contains(".modinfo"), "Expected .modinfo section in IR:\n{}", ir);
+        assert!(ir.contains("license=GPL"), "Expected license payload in IR:\n{}", ir);
+    }
+
+    #[test]
+    fn test_builtin_types_compatible_p_distinguishes_types() {
+        let ir = compile_c_to_ir(
+            "int same_type(void) { return __builtin_types_compatible_p(int, int); } \
+             int diff_type(void) { return __builtin_types_compatible_p(int, char); }"
+        );
+        assert!(ir.contains("define i32 @same_type()"), "Expected same_type in IR:\n{}", ir);
+        assert!(ir.contains("ret i32 1"), "Expected types_compatible_p(int, int) == 1 in IR:\n{}", ir);
+        assert!(ir.contains("define i32 @diff_type()"), "Expected diff_type in IR:\n{}", ir);
+        assert!(ir.contains("ret i32 0"), "Expected types_compatible_p(int, char) == 0 in IR:\n{}", ir);
+    }
+
+    #[test]
+    fn test_builtin_choose_expr_selects_false_branch() {
+        let ir = compile_c_to_ir(
+            "int choose_false(void) { return __builtin_choose_expr(0, 11, 22); }"
+        );
+        assert!(ir.contains("ret i32 22"), "Expected false branch result in IR:\n{}", ir);
+    }
+
+    #[test]
     fn test_variadic_function() {
         let ir = compile_c_to_ir(
             "int my_printf(int fmt, ...) { \
@@ -6787,6 +7339,35 @@ mod tests {
     }
 
     #[test]
+    fn test_attribute_constructor_function() {
+        let ir = compile_c_to_ir(
+            "__attribute__((constructor)) void init_hook(void) { return; }"
+        );
+        assert!(ir.contains("@llvm.global_ctors"), "Expected llvm.global_ctors in IR:\n{}", ir);
+        assert!(ir.contains("@init_hook"), "Expected init_hook in ctor table IR:\n{}", ir);
+    }
+
+    #[test]
+    fn test_attribute_destructor_function() {
+        let ir = compile_c_to_ir(
+            "__attribute__((destructor)) void cleanup_hook(void) { return; }"
+        );
+        assert!(ir.contains("@llvm.global_dtors"), "Expected llvm.global_dtors in IR:\n{}", ir);
+        assert!(ir.contains("@cleanup_hook"), "Expected cleanup_hook in dtor table IR:\n{}", ir);
+    }
+
+    #[test]
+    fn test_unused_static_inline_function_not_emitted() {
+        let ir = compile_c_to_ir(
+            "static inline int helper(void) { extern void hidden(void); hidden(); return 0; } \
+             int ok(void) { return 1; }"
+        );
+        assert!(ir.contains("define i32 @ok()"), "Expected ok in IR:\n{}", ir);
+        assert!(!ir.contains("@helper"), "Unused static inline helper should not be emitted:\n{}", ir);
+        assert!(!ir.contains("@hidden"), "Unused helper dependency should not be emitted:\n{}", ir);
+    }
+
+    #[test]
     fn test_attribute_packed_struct_sizeof() {
         let ir = compile_c_to_ir(
             "struct __attribute__((packed)) S { int a; char b; }; \
@@ -6802,6 +7383,15 @@ mod tests {
              int read_b(struct S *p) { return p->b; }"
         );
         assert!(ir.contains("<{ i32, i8 }>") || ir.contains("<{i32, i8}>"), "Expected packed LLVM struct layout in IR:\n{}", ir);
+    }
+
+    #[test]
+    fn test_flexible_array_sizeof_header() {
+        let ir = compile_c_to_ir(
+            "struct Flex { int len; char data[]; }; \
+             int flex_header_size(void) { return sizeof(struct Flex); }"
+        );
+        assert!(ir.contains("ret i32 4"), "Expected flexible array header size 4 in IR:\n{}", ir);
     }
 
     #[test]

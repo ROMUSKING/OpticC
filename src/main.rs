@@ -84,6 +84,7 @@ struct DirectDriverInvocation {
     dep_phony: bool,
     freestanding: bool,
     nostdinc: bool,
+    return_thunk_extern: bool,
     print_target: Option<String>,
     print_version: bool,
     print_version_only: bool,
@@ -107,6 +108,7 @@ impl Default for DirectDriverInvocation {
             dep_phony: false,
             freestanding: false,
             nostdinc: false,
+            return_thunk_extern: false,
             print_target: None,
             print_version: false,
             print_version_only: false,
@@ -291,7 +293,10 @@ fn parse_direct_driver_args(args: &[String]) -> Result<DirectDriverInvocation, S
             continue;
         }
 
-        if let Some(value) = arg.strip_prefix("-Wp,-MD,") {
+        if let Some(value) = arg
+            .strip_prefix("-Wp,-MD,")
+            .or_else(|| arg.strip_prefix("-Wp,-MMD,"))
+        {
             invocation.depfile = Some(PathBuf::from(value));
             dep_requested = true;
             i += 1;
@@ -355,6 +360,12 @@ fn parse_direct_driver_args(args: &[String]) -> Result<DirectDriverInvocation, S
                 "s" | "z" => 2,
                 _ => invocation.optimization,
             };
+            i += 1;
+            continue;
+        }
+
+        if let Some(mode) = arg.strip_prefix("-mfunction-return=") {
+            invocation.return_thunk_extern = mode == "thunk-extern";
             i += 1;
             continue;
         }
@@ -487,7 +498,8 @@ fn execute_direct_driver(invocation: DirectDriverInvocation) -> Result<(), Box<d
         .with_include_paths(invocation.include_paths.clone())
         .with_force_includes(invocation.force_includes.clone())
         .with_defines(invocation.defines.clone())
-        .with_link_libs(invocation.link_libs.clone());
+        .with_link_libs(invocation.link_libs.clone())
+        .with_return_thunk_extern(invocation.return_thunk_extern);
 
     let mut builder = Builder::new(config);
     builder.build()?;
@@ -818,6 +830,8 @@ mod tests {
             "include/generated".to_string(),
             "-include".to_string(),
             "generated/autoconf.h".to_string(),
+            "-Wp,-MMD,module.d".to_string(),
+            "-mfunction-return=thunk-extern".to_string(),
             "-UDEBUG".to_string(),
             "-x".to_string(),
             "c".to_string(),
@@ -832,6 +846,8 @@ mod tests {
         assert!(invocation.include_paths.contains(&PathBuf::from("/usr/include")));
         assert!(invocation.include_paths.contains(&PathBuf::from("include/generated")));
         assert!(invocation.force_includes.contains(&PathBuf::from("generated/autoconf.h")));
+        assert_eq!(invocation.depfile, Some(PathBuf::from("module.d")));
+        assert!(invocation.return_thunk_extern);
         assert!(!invocation.defines.contains_key("DEBUG"));
         assert_eq!(invocation.output, PathBuf::from("module.o"));
     }

@@ -347,9 +347,9 @@ impl Parser {
         Ok(self.alloc_node(
             AST_ATTRIBUTE,
             data,
-            NodeOffset::NULL,
             name_offset,
             first_arg,
+            NodeOffset::NULL,
         ))
     }
 
@@ -417,9 +417,35 @@ impl Parser {
         let mut last_arg = NodeOffset::NULL;
 
         if self.current_token().kind != TokenKind::Punctuator || self.current_token().text != ")" {
+            let mut arg_index = 0usize;
             loop {
-                let arg = self.parse_assignment_expression()?;
+                let arg = if (matches!(builtin_kind, BuiltinKind::TypesCompatibleP) && arg_index < 2)
+                    || (matches!(builtin_kind, BuiltinKind::OffsetOf) && arg_index == 0)
+                {
+                    if self.is_type_specifier()
+                        || matches!(
+                            self.current_token().text.as_str(),
+                            "const"
+                                | "restrict"
+                                | "volatile"
+                                | "__const"
+                                | "__const__"
+                                | "__restrict"
+                                | "__restrict__"
+                                | "__volatile"
+                                | "__volatile__"
+                                | "_Atomic"
+                        )
+                    {
+                        self.parse_declaration_specifiers()?
+                    } else {
+                        self.parse_assignment_expression()?
+                    }
+                } else {
+                    self.parse_assignment_expression()?
+                };
                 self.link_siblings(&mut first_arg, &mut last_arg, arg);
+                arg_index += 1;
 
                 if self.current_token().kind == TokenKind::Punctuator
                     && self.current_token().text == ","
@@ -433,25 +459,12 @@ impl Parser {
 
         self.expect(")")?;
 
-        let kind_data = match builtin_kind {
-            BuiltinKind::Expect => 0,
-            BuiltinKind::ConstantP => 1,
-            BuiltinKind::TypesCompatibleP => 2,
-            BuiltinKind::ChooseExpr => 3,
-            BuiltinKind::OffsetOf => 4,
-            BuiltinKind::VaArg => 5,
-            BuiltinKind::Memcpy => 6,
-            BuiltinKind::Memset => 7,
-            BuiltinKind::Strlen => 8,
-            BuiltinKind::Other(_) => 99,
-        };
-
         Ok(self.alloc_node(
             AST_BUILTIN_CALL,
-            kind_data,
+            name_offset.0,
             NodeOffset::NULL,
-            name_offset,
             first_arg,
+            NodeOffset::NULL,
         ))
     }
 
