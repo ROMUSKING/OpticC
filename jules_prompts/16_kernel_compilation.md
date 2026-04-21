@@ -195,7 +195,8 @@ $(CC) -Wp,-MD,path/.file.o.d -nostdinc -isystem $(shell $(CC) -print-file-name=i
 - Direct GCC-style driver slice is now verified for simple Makefile use and kernel-style smoke invocations, but full Kbuild compatibility still needs deeper semantics and broader validation.
 - The kernel build tree is now installed under /lib/modules/$(uname -r)/build, so real out-of-tree module validation now runs in-container.
 - Objtool RETHUNK rejection is now cleared for the hello-module path.
-- Current live blocker: hello-module builds now reach modpost, which still reports missing MODULE_LICENSE metadata on the emitted object.
+- **2026-04-21 verification**: a real out-of-tree hello-module build progressed past the previous quoted-include failure in `asm/unwind_hints.h`; fixing nested relative include resolution unblocked `"orc_types.h"` lookup.
+- **Current live blocker**: the same hello-module build is now being killed with exit 137 during the compile/objtool stage, so the next kernel effort should focus on reducing compiler resource usage or narrowing the remaining heavy-header path instead of MODULE_LICENSE metadata.
 - Remaining anonymous aggregate promotion, `_Static_assert`, broader atomic validation, and kernel-scale validation are still open.
 - Freestanding flags, force-includes, feature probes, packed struct layout, constructor/destructor lowering, flexible array layout, compile-time builtin support, and thunk-safe return lowering are now verified, but further metadata-preservation hardening is still needed for full kernel correctness.
 

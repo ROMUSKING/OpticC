@@ -148,10 +148,11 @@ These backend features are required for Linux kernel compilation:
 7. **Empty func_name filter** (~line 4135): `.filter(|s| !s.is_empty())` prevents `@0` functions from empty-string names.
 8. **Indirect calls** (~line 4290): `build_indirect_call` fallback when no named function found (function pointer callees).
 
-### Remaining SQLite Blockers (33 undefined references)
-- **Function pointer params** (22 refs: xDel, xDestroy, xSectorSize, xInit, xCleanup, xCallback, vtabCallConstructor, u8): Parameters declared as function pointers (e.g., `void(*xDel)(void*)`) are stored in `self.variables` as `ptr` type, BUT when used as call arguments the backend finds them in `self.variables` and loads them correctly. The real issue: these are being passed through from a DIFFERENT scope or the param isn't being registered at all because `extract_param_type_name` only detects `kind=7` (pointer) but not `kind=9` (function pointer declarator) nesting.
-- **va_list functions**: Parser/backend signature lowering now accepts builtin/stdarg `va_list` params as pointer-like values. Remaining SQLite work is verifying the affected functions in the larger integration flow.
-- **Runtime segfault**: openDatabase→databaseName crashes. Likely due to semantic correctness issues in complex control flow, struct member access chains, or incorrect function pointer calls.
+### Remaining SQLite Blockers (status updated 2026-04-21)
+- **Typedef declarations emitted as globals**: fixed. `typedef unsigned char u8;` no longer produces spurious globals like `@u8`, which previously explained at least one SQLite stub symbol.
+- **Indirect function-pointer calls**: improved. Variable-backed and struct-member-backed function-pointer calls now preserve stored function signatures instead of falling back to `i32 (...)`, which was especially wrong for void callbacks such as `xFree`.
+- **va_list functions**: Parser/backend signature lowering now accepts builtin/stdarg `va_list` params as pointer-like values. Remaining SQLite work is verifying the affected functions in the larger integration flow once a real amalgamation source is available locally.
+- **Runtime segfault / semantic gaps**: still open on real SQLite-scale execution; likely remaining issues are in more complex control flow, aggregate initialization, or other large-program semantics.
 
 ### Post-Processing Scripts (temporary, for IR fixup)
 - `/tmp/sqlite_test/fix_ir.py`: Fixes call arg type mismatches (ptr where i32 expected → i32 0)
@@ -187,11 +188,8 @@ These backend features are required for Linux kernel compilation:
 12. **struct_gep_info for non-bitfield structs**: Previously `struct_gep_info` was only populated for bitfield structs. Added `struct_tag_fields` as a fallback in GEP index resolution.
 
 ### SQLite Runtime Status (2026-04-21)
-- **IR valid**: `llvm-as-18 sqlite3.ll` succeeds ✅
-- **Object file**: `llc-18 -filetype=obj` succeeds ✅  
-- **Links**: Binary links with 5 stubs (u8.93, xCallback, xInit, xSectorSize, vtabCallConstructor) — NOT `xMutexAlloc` etc. (now resolved as indirect calls!) ✅
-- **No longer hangs**: Previous session's hang in `sqlite3_initialize()` is fixed ✅
-- **sqlite3_initialize() returns NOMEM (rc=7)**: Root cause identified — typedef'd type names in struct members (u8, u16, u32, sqlite3_mem_methods, sqlite3_mutex_methods) are stored as kind=2 (i32) in the AST, causing wrong LLVM struct layouts. GEP indices are correct but byte offsets are wrong (u8 fields take 4 bytes instead of 1).
+- **Real amalgamation source is not currently present in the sandbox** (network download to sqlite.org failed), so end-to-end SQLite relink/runtime could not be re-verified in this session.
+- **Reduced regressions now cover the last verified SQLite-adjacent gaps**: typedef declarations no longer lower as globals; function-pointer callbacks through variables and struct members now keep their call signatures.
 
 ### NEXT CRITICAL FIX: Typedef Type Resolution in Struct Members
 

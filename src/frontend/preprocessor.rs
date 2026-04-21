@@ -157,6 +157,7 @@ pub struct Preprocessor {
     include_stack: Vec<String>,
     include_guards: HashMap<String, bool>,
     active_include_guards: Vec<IncludeGuard>,
+    allow_missing_includes: bool,
 }
 
 struct PreprocessorBootstrap {
@@ -179,6 +180,7 @@ impl Preprocessor {
             include_stack: Vec::new(),
             include_guards: HashMap::new(),
             active_include_guards: Vec::new(),
+            allow_missing_includes: false,
         };
         p.define_bootstrap_macros(bootstrap);
         p
@@ -296,6 +298,10 @@ impl Preprocessor {
                 replacement: tokens,
             },
         );
+    }
+
+    pub fn set_allow_missing_includes(&mut self, allow: bool) {
+        self.allow_missing_includes = allow;
     }
 
     pub fn process(&mut self, file: &str) -> Result<Vec<Token>, PreprocessorError> {
@@ -1099,13 +1105,12 @@ impl Preprocessor {
                             if std::env::var("OPTIC_TRACE_INCLUDES").is_ok() {
                                 eprintln!("[INCLUDE] {} from {}", include_path, file);
                             }
-                            let resolved = self.resolve_include_file(&include_path, file);
-                            match &resolved {
+                            match self.resolve_include_file(&include_path, file) {
                                 Ok(Some(tokens)) => {
                                     if std::env::var("OPTIC_TRACE_INCLUDES").is_ok() {
                                         eprintln!("[INCLUDE] {} -> {} tokens", include_path, tokens.len());
                                     }
-                                    result.extend(tokens.clone());
+                                    result.extend(tokens);
                                 }
                                 Ok(None) => {
                                     if std::env::var("OPTIC_TRACE_INCLUDES").is_ok() {
@@ -1116,8 +1121,14 @@ impl Preprocessor {
                                     if std::env::var("OPTIC_TRACE_INCLUDES").is_ok() {
                                         eprintln!("[INCLUDE] {} -> ERROR: {}", include_path, e);
                                     }
-                                    // Silently skip failed includes for kernel compatibility
-                                    // instead of aborting
+                                    if self.allow_missing_includes {
+                                        self.warnings.push(format!(
+                                            "include skipped: {} ({})",
+                                            include_path, e
+                                        ));
+                                    } else {
+                                        return Err(e);
+                                    }
                                 }
                             }
                         } else {
@@ -1413,11 +1424,12 @@ impl Preprocessor {
         for search_path in &search_paths {
             let full_path = search_path.join(path);
             if full_path.exists() {
-                if let Ok(canonical) = full_path.canonicalize() {
-                    let path_str = canonical.to_string_lossy().to_string();
-                    if self.include_stack.contains(&path_str) {
-                        return Ok(None);
-                    }
+                let resolved_path = full_path
+                    .canonicalize()
+                    .unwrap_or_else(|_| full_path.clone());
+                let resolved_path_str = resolved_path.to_string_lossy().to_string();
+                if self.include_stack.contains(&resolved_path_str) {
+                    return Ok(None);
                 }
 
                 let content = fs::read_to_string(&full_path).map_err(|e| {
@@ -1430,9 +1442,9 @@ impl Preprocessor {
                 }
                 self.db.insert_file_hash(&hash, &path).unwrap_or(());
 
-                self.current_file = path.to_string();
-                self.include_stack.push(path.to_string());
-                let tokens = self.resolve_includes(&content, path, 1)?;
+                self.current_file = resolved_path_str.clone();
+                self.include_stack.push(resolved_path_str.clone());
+                let tokens = self.resolve_includes(&content, &resolved_path_str, 1)?;
                 self.include_stack.pop();
                 return Ok(Some(tokens));
             }
@@ -3306,6 +3318,32 @@ const char *s = STR(hello world);"#;
 
         assert!(non_ws.iter().any(|t| t.text == "inner_var"));
         assert!(non_ws.iter().any(|t| t.text == "outer_var"));
+        assert!(non_ws.iter().any(|t| t.text == "main_var"));
+    }
+
+    #[test]
+    fn test_nested_relative_include_from_subdirectory() {
+        let (mut pp, temp_dir) = create_test_preprocessor();
+
+        let asm_dir = temp_dir.path().join("asm");
+        fs::create_dir_all(&asm_dir).unwrap();
+        fs::write(asm_dir.join("orc_types.h"), "int orc_type_value = 7;").unwrap();
+        fs::write(
+            asm_dir.join("unwind_hints.h"),
+            "#include \"orc_types.h\"\nint unwind_hint_value = orc_type_value;",
+        )
+        .unwrap();
+
+        let main_path = temp_dir.path().join("main.c");
+        fs::write(&main_path, "#include \"asm/unwind_hints.h\"\nint main_var = 1;").unwrap();
+
+        pp.add_include_path(temp_dir.path().to_str().unwrap());
+
+        let tokens = pp.process(main_path.to_str().unwrap()).unwrap();
+        let non_ws: Vec<&Token> = tokens.iter().filter(|t| !t.is_whitespace()).collect();
+
+        assert!(non_ws.iter().any(|t| t.text == "orc_type_value"));
+        assert!(non_ws.iter().any(|t| t.text == "unwind_hint_value"));
         assert!(non_ws.iter().any(|t| t.text == "main_var"));
     }
 

@@ -2,7 +2,7 @@
 
 ## Current Verified Baseline
 
-- 394 repository tests pass.
+- 399 repository tests pass, plus 3 CLI/direct-driver tests in `src/main.rs`.
 - SQLite 3.49.2 (89K preprocessed lines) compiles through full pipeline: OpticC → .ll → .bc → .o (no panics, no verification errors).
 - `llvm-as` and `llc -filetype=obj` succeed on OpticC-generated IR after minimal post-processing.
 - Linker undefined references reduced from 725 to 33 (95.4% symbol resolution).
@@ -22,19 +22,17 @@
 ### Goal
 Compile SQLite-scale inputs reliably, link cleanly, pass sanity tests, and benchmark against GCC/Clang.
 
-### Current Status (2026-04-20)
+### Current Status (2026-04-21)
 - ✅ Compilation: 89K lines → 119K lines LLVM IR (no panics)
 - ✅ Verification: `llvm-as` + `llc` produce valid .o file
-- ⚠️ Linking: 33 undefined references remain (function pointer params, va_list functions)
+- ⚠️ Remaining real-amalgamation verification is blocked by lack of a local SQLite source in the sandbox; targeted regressions now cover typedef/global and function-pointer-call bugs that were previously SQLite blockers.
 - ❌ Runtime: segfault in openDatabase (semantic correctness in codegen)
 
 ### Remaining Work (Priority Order)
-1. **P0: Function pointer parameters as call arguments** — `xDel`, `xDestroy`, etc. (22 refs). Root cause: when a function pointer param like `void(*xDel)(void*)` is used as `func(ptr, xDel)`, the backend resolves `xDel` via `self.functions` hash (auto-declared) instead of `self.variables` (parameter alloca). Fix: in `lower_ident`, prioritize `self.variables` lookup (already does), but the param isn't in variables because `lower_func_def` doesn't insert function pointer params. Fix param type detection to recognize function pointer declarators.
-2. **P0: va_list functions not compiled** — `sqlite3VMPrintf`, `sqlite3_str_vappendf` (8 refs). Root cause: parser/backend doesn't handle `va_list` as a typedef'd type for parameters. The function definition exists in source but gets skipped because the parameter type resolution fails.
-3. **P1: Indirect call through struct member** — `sqlite3Config.m.xFree(p)` generates `@0` (now fixed with indirect call fallback). Remaining: calls where field name is resolved as func_name (e.g., `xCallback`). Need parser-level fix to distinguish `obj.field(args)` from `func(args)`.
-4. **P1: Control flow correctness** — Dead code after terminators, branches to undefined labels (handled by post-processing but should be fixed in compiler). Key issues: switch case body placement, goto targets.
-5. **P2: Global variable initialization** — Complex initializers (struct literals, array initializers with designators).
-6. **P2: Type casting correctness** — Implicit conversions at call sites and assignments.
+1. **P0: Real amalgamation rerun** — reacquire a local SQLite amalgamation and re-measure link/runtime after the latest fixes for typedef declarations and indirect function-pointer signatures.
+2. **P1: Control flow correctness** — Dead code after terminators, branches to undefined labels (handled by post-processing but should be fixed in compiler). Key issues: switch case body placement, goto targets.
+3. **P2: Global variable initialization** — Complex initializers (struct literals, array initializers with designators).
+4. **P2: Type casting correctness** — Implicit conversions at call sites and assignments.
 
 ### Exit Criteria
 - `optic_c compile sqlite3_preprocessed.c` → .o links with zero undefined references
