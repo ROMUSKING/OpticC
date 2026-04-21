@@ -2288,6 +2288,8 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                     Ok(Some((binding.ptr, binding.pointee_type)))
                 }
             }
+            // kind 65 + data 5 is unary dereference (`*expr`) and can appear
+            // as an assignable lvalue (for example `*out = value`).
             65 if node.data == 5 => {
                 let ptr = match self.lower_expr(arena, node.first_child)? {
                     Some(value) if value.is_pointer_value() => value.into_pointer_value(),

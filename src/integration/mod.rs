@@ -518,7 +518,7 @@ const char *sqlite3_sourceid(void) {
         let smoke_source = self.output_dir.join("sqlite_smoke.c");
         let smoke_binary = self.output_dir.join("sqlite_smoke");
         let smoke_program = r#"typedef struct sqlite3 sqlite3;
-extern int sqlite3_open(const char *filename, sqlite3 **ppDb);
+extern int sqlite3_open(const char *filename, sqlite3 **pp_db);
 extern int sqlite3_exec(sqlite3 *db, const char *sql, void *callback, void *arg, char **errmsg);
 extern int sqlite3_close(sqlite3 *db);
 
