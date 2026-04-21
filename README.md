@@ -7,7 +7,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-2024-blue.svg)](https://www.rust-lang.org)
 [![LLVM](https://img.shields.io/badge/LLVM-18.1-blue.svg)](https://llvm.org)
-[![Tests](https://img.shields.io/badge/tests-373%20passing-brightgreen.svg)]()
+[![Tests](https://img.shields.io/badge/tests-405%20discovered-brightgreen.svg)]()
 
 </div>
 
@@ -22,6 +22,15 @@ OpticC is a C frontend compiler that translates C99 source code to LLVM IR. It i
 - **Graph-based static analysis** — DFS pointer provenance tracing, affine grade inference, and taint tracking for UAF detection
 - **FUSE-based VFS** — Virtual filesystem that projects reconstructed source with `[OPTIC ERROR]` shadow comments on vulnerable lines
 - **Multi-agent development** — Built by 8+ specialized AI agents communicating through YAML specs and task files
+
+## Current Verified Status (2026-04-21)
+
+- `cargo build` succeeds.
+- `cargo test` succeeds, and `cargo test -- --list | grep -c ': test'` reports **405** discovered tests.
+- The local SQLite fixture integration test still passes end to end.
+- A real GitHub-hosted SQLite amalgamation archive now passes download, extraction, preprocessing, OpticC compilation, and shared-library link through the integration harness.
+- The remaining real-SQLite blocker is the smoke test, which currently fails with unresolved `u8` and `vtabCallConstructor` from the produced library.
+- The next strategic track after SQLite smoke correctness remains Linux-kernel readiness: atomics, freestanding behavior, and progressive validation.
 
 ## Architecture
 
@@ -70,7 +79,7 @@ OpticC is a C frontend compiler that translates C99 source code to LLVM IR. It i
 | **Analysis** | ✅ | DFS pointer provenance, affine grades, taint tracking, UAF detection |
 | **VFS** | ✅ | FUSE filesystem with `[OPTIC ERROR]` shadow comment injection |
 
-### Phase 2: SQLite Compilation ✅
+### Phase 2: SQLite Truth Gate ⚠️
 | Module | Status | Description |
 |--------|--------|-------------|
 | **Preprocessor** | ✅ | `#include`, `#define`, `#ifdef`/`#if`/`#elif`, `#pragma`, predefined macros |
@@ -81,6 +90,8 @@ OpticC is a C frontend compiler that translates C99 source code to LLVM IR. It i
 | **Inline Asm** | ✅ | `asm volatile` with operands, clobbers, goto asm |
 | **Build System** | ✅ | Multi-file compilation, linking, parallel builds, build cache |
 | **Benchmarks** | ✅ | OpticC vs GCC vs Clang comparison suite |
+
+Phase 2 is not considered complete until the real GitHub-hosted SQLite archive passes the integration smoke test end to end.
 
 ### Phase 3: Linux Kernel 📋
 GNU C extensions, inline assembly, Kbuild integration, 30M+ LOC scale.
@@ -187,8 +198,9 @@ rustc --version  # rustc 1.95.0
 
 ### Build
 ```bash
-cargo build        # 0 errors
-cargo test         # 341 passing
+cargo build
+cargo test
+cargo test -- --list | grep -c ': test'   # 405 discovered in the current workspace
 ```
 
 ### Usage
@@ -216,7 +228,11 @@ cargo run -- benchmark --suite rebuild --compilers all --runs 2 --output-dir res
 
 # Run SQLite integration test against a local sqlite3.c truth source
 cargo run -- integration-test --test-dir /tmp/optic_test --sqlite-url /path/to/sqlite3.c
-```
+
+# Or use the default GitHub-hosted SQLite archive truth source
+cargo run -- integration-test \
+  --test-dir /tmp/optic_sqlite_github/test \
+  --output-dir /tmp/optic_sqlite_github/out
 ```
 
 ### Test Samples

@@ -1,27 +1,53 @@
-# OpticC Codebase Orientation & Suggestions
+# OpticC Orientation (Current Session Baseline)
 
-## Codebase Overview
-OpticC is an ambitious, multi-agent developed C99-to-LLVM compiler written in Rust. It utilizes an mmap arena allocator, an embedded KV-store (redb) for `#include` deduplication, and a FUSE-based VFS.
+## What this repository is
+OpticC is a Rust C99-to-LLVM compiler with a preprocessor, typed backend, build pipeline, SQLite integration harness, benchmark suites, and a growing kernel-oriented direct-driver mode.
 
-Currently, the project is moving towards compiling the Linux Kernel (Phase 3). It recently completed SQLite compilation (Phase 2), and basic inline assembly/GNU extension lowering.
+## Canonical docs to read first
+1. `docs/kernel-and-performance-roadmap.md` — current goals and blockers
+2. `jules_prompts/00_protocol.md` — workflow and shared-memory rules
+3. `jules_prompts/01_orchestrator.md` — milestone ownership and sequencing
+4. `jules_prompts/09_integration.md` — SQLite verification instructions
+5. `README.md` — user-facing commands and setup
 
-## Current State
-- `cargo check` builds successfully and all compiler warnings have been resolved.
-- `cargo test` passes 100% of the 394 tests.
+## Current verified baseline (2026-04-21)
+- `cargo build` succeeds.
+- `cargo test` succeeds; `cargo test -- --list | grep -c ': test'` reports **405** discovered tests.
+- The SQLite fixture pipeline still passes via `cargo test test_full_pipeline_local_fixture -- --nocapture`.
+- A real GitHub-hosted SQLite archive now works through the integration harness default flow:
+  - download ✅
+  - preprocess ✅
+  - OpticC compile ✅
+  - shared-library link ✅
+  - smoke test ❌
+- Current real-archive smoke blocker from `/tmp/optic_sqlite_github/out/integration_report.md`:
+  - undefined reference to `u8`
+  - undefined reference to `vtabCallConstructor`
 
-## Completed Issues & Fixes
+## Current goals
+### Phase A — SQLite truth gate
+Use the GitHub-hosted SQLite amalgamation as the standing large-input truth source. The immediate objective is to turn the current compile/link success into a passing smoke test.
 
-1. **Fix LLVM IR Type Lowering Regressions:**
-   - **Resolved.** Unstaged changes provided by the background agents successfully fixed the regressions by properly traversing function pointer declarators and extracting their underlying names and types correctly.
-   
-2. **Fix Preprocessor Test Failure:**
-   - **Resolved.** The preprocessor test `test_include_angle_bracket_not_found` was failing intermittently due to issues with how macro expansion and `#include` directives interacted. The unstaged changes also contained the necessary fixes to ensure errors are bubbled up properly when system headers are missing.
+### Phase B — Linux kernel readiness
+After the SQLite truth gate is green, the next priorities remain:
+1. atomic builtins (`__sync_*`, `__atomic_*`)
+2. remaining freestanding/kernel-driver behavior
+3. progressive validation (coreutils → module → kernel subtree → tinyconfig/QEMU)
 
-3. **Resolve Compiler Warnings for Code Hygiene:**
-   - **Resolved.** All 35+ compiler warnings were manually addressed.
-     - Unreachable code in `src/integration/mod.rs` was removed.
-     - Unused fields, constants, and variables across `src/arena.rs`, `src/backend/llvm.rs`, `src/frontend/lexer.rs`, `src/frontend/macro_expander.rs`, and `src/frontend/preprocessor.rs` were eliminated or bypassed cleanly.
-     - A complicated boolean logic clippy deny in `src/frontend/gnu_extensions.rs` was patched safely.
+## Current setup quickstart
+```bash
+apt-get update && apt-get install -y build-essential clang llvm llvm-dev lld binutils unzip curl
+cargo build
+cargo test
 
-4. **Advance Kernel Compilation Milestones:**
-   - **In Progress.** Previous agents have already added support for function attributes (`noinline`, `always_inline`, `hot`), packed structs, and `__builtin_va_list`. Future tasks will involve extending inline assembly to match exactly the required constraints for the Linux Kernel and implementing atomic builtins (`__sync_*` / `__atomic_*`).
+# default integration target now points at a GitHub SQLite archive
+cargo run -- integration-test \
+  --test-dir /tmp/optic_sqlite_github/test \
+  --output-dir /tmp/optic_sqlite_github/out
+```
+
+## Practical notes for future sessions
+- Prefer `docs/kernel-and-performance-roadmap.md` over stale historical totals in older notes.
+- The integration harness no longer depends on Cargo's `network` feature for remote archives; it can fall back to `curl`/`wget`.
+- Treat the SQLite smoke failure as a codegen/runtime blocker, not as a download/setup blocker.
+- Keep prompt files in `jules_prompts/` current whenever verified status changes.
