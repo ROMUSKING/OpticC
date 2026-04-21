@@ -1196,6 +1196,10 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                                     }
                                     // Determine field type and check for bitfield
                                     let mut has_pointer = false;
+                                    // return_has_pointer: true when the fn-pointer field's return
+                                    // type is itself a pointer (e.g. `sqlite3_mutex *(*xMutexAlloc)(int)`).
+                                    // Tracked separately so we emit ptr as the call return type.
+                                    let mut return_has_pointer = false;
                                     let mut array_len: Option<u32> = None;
                                     let mut base_kind = 2u16; // default to int
                                     let mut bitfield_width: Option<u32> = None;
@@ -1211,11 +1215,24 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                                                         nested_spec_off = check_off;
                                                     }
                                                 }
-                                                7 | 9 => {
-                                                    has_pointer = true; // pointer or function-pointer → ptr
-                                                    if cn.kind == 9 {
-                                                        fn_declarator_off = check_off;
+                                                7 => {
+                                                    has_pointer = true;
+                                                    // When the outer kind=7 pointer wraps a
+                                                    // fn-declarator (kind=9), e.g.
+                                                    //   `sqlite3_mutex *(*xMutexAlloc)(int)`
+                                                    // the fn-declarator is at cn.first_child.
+                                                    // In this layout the return type is a pointer.
+                                                    if let Some(inner) = arena.get(cn.first_child) {
+                                                        if inner.kind == 9 {
+                                                            fn_declarator_off = cn.first_child;
+                                                            return_has_pointer = true;
+                                                        }
                                                     }
+                                                }
+                                                9 => {
+                                                    has_pointer = true; // fn-pointer field → ptr
+                                                    fn_declarator_off = check_off;
+                                                    // return type is NOT a pointer for this case
                                                 }
                                                 8 => array_len = Some(cn.data),
                                                 27 => {
@@ -1246,11 +1263,26 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                                         self.node_kind_to_llvm_type(base_kind)
                                     };
                                     if fn_declarator_off != NodeOffset::NULL {
+                                        // When the function returns a pointer, use ptr as the
+                                        // return type for the registered FunctionType instead of
+                                        // the raw base struct/int type. This prevents the backend
+                                        // from emitting `call i32` and then inttoptr which
+                                        // discards the upper 32 bits of the pointer on x86-64.
+                                        let fn_ret_base_type = if return_has_pointer {
+                                            self.context
+                                                .ptr_type(inkwell::AddressSpace::default())
+                                                .as_basic_type_enum()
+                                        } else {
+                                            member_base_type
+                                        };
+                                        // Use a non-void kind so function_type_from_declarator
+                                        // falls into the base_type match rather than void_type.
+                                        let fn_ret_kind = if return_has_pointer { 7u16 } else { base_kind };
                                         if let Some(fn_type) = self.function_type_from_declarator(
                                             arena,
                                             arena.get(fn_declarator_off),
-                                            member_base_type,
-                                            base_kind,
+                                            fn_ret_base_type,
+                                            fn_ret_kind,
                                         ) {
                                             fn_field_types.insert(current_name.clone(), fn_type);
                                         }
@@ -6689,7 +6721,15 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                             None
                         }
                     })
-                    .unwrap_or_else(|| self.context.i32_type().fn_type(&param_types, false));
+                    .unwrap_or_else(|| {
+                        // Fallback: use ptr as return type to avoid truncating pointer
+                        // returns on x86-64. Using i32 would silently discard the upper
+                        // 32 bits of a returned pointer, causing a SIGSEGV on first
+                        // pointer dereference. ptr is safer as a default.
+                        self.context
+                            .ptr_type(AddressSpace::default())
+                            .fn_type(&param_types, false)
+                    });
                 let call_site = self
                     .builder
                     .build_indirect_call(fn_type, fn_ptr, &args, "indirect_call")
@@ -6697,7 +6737,12 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                 return Ok(Some(match call_site.try_as_basic_value() {
                     inkwell::values::ValueKind::Basic(v) => v,
                     inkwell::values::ValueKind::Instruction(_) => {
-                        self.context.i32_type().const_int(0, false).into()
+                        // Void-returning call: return a null pointer as a placeholder.
+                        // The caller must not use this value for void calls.
+                        self.context
+                            .ptr_type(AddressSpace::default())
+                            .const_null()
+                            .into()
                     }
                 }));
             }
