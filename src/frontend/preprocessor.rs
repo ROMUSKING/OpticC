@@ -148,6 +148,7 @@ enum PpTokenKind {
 pub struct Preprocessor {
     db: OpticDb,
     include_paths: Vec<PathBuf>,
+    user_include_count: usize,
     macros: HashMap<String, MacroDefinition>,
     pragmas: Vec<String>,
     warnings: Vec<String>,
@@ -169,6 +170,7 @@ impl Preprocessor {
         let mut p = Self {
             db,
             include_paths: bootstrap.include_paths.clone(),
+            user_include_count: 0,
             macros: HashMap::new(),
             pragmas: Vec::new(),
             warnings: Vec::new(),
@@ -282,7 +284,8 @@ impl Preprocessor {
     }
 
     pub fn add_include_path(&mut self, path: &str) {
-        self.include_paths.push(PathBuf::from(path));
+        self.include_paths.insert(self.user_include_count, PathBuf::from(path));
+        self.user_include_count += 1;
     }
 
     pub fn define_macro(&mut self, name: &str, value: &str) {
@@ -734,7 +737,7 @@ impl Preprocessor {
         )
     }
 
-    fn tokenize_pp_source(source: &str, _file: &str, base_line: u32) -> Vec<PpToken> {
+    fn tokenize_pp_source(source: &str, file: &str, base_line: u32) -> Vec<PpToken> {
         let mut tokens = Vec::new();
         let mut chars = source.chars().peekable();
         let mut line = base_line;
@@ -1064,7 +1067,7 @@ impl Preprocessor {
         let mut in_if_stack: Vec<bool> = Vec::new();
         let mut branch_taken: Vec<bool> = Vec::new();
 
-        let flush_pending =
+        let mut flush_pending =
             |pending: &mut Vec<PpToken>, result: &mut Vec<Token>, file: &str, pp: &Preprocessor| {
                 if pending.is_empty() {
                     return;
@@ -1080,15 +1083,40 @@ impl Preprocessor {
                 flush_pending(&mut pending, &mut result, file, self);
                 let (directive, dir_line, _dir_col, after_name) =
                     self.parse_directive_name(&pp_tokens, i);
+                // Debug: trace all directives
+                if std::env::var("OPTIC_TRACE_INCLUDES").is_ok() {
+                    eprintln!("[DIRECTIVE] #{} at line {} in {}", directive, dir_line, file);
+                }
                 match directive.as_str() {
                     "include" => {
                         if in_if_stack.iter().all(|&active| active) {
                             let (include_path, end_idx) =
                                 self.parse_include_path(&pp_tokens, after_name, file)?;
                             i = end_idx;
-                            let resolved = self.resolve_include_file(&include_path, file)?;
-                            if let Some(tokens) = resolved {
-                                result.extend(tokens);
+                            // Debug tracing for include resolution
+                            if std::env::var("OPTIC_TRACE_INCLUDES").is_ok() {
+                                eprintln!("[INCLUDE] {} from {}", include_path, file);
+                            }
+                            let resolved = self.resolve_include_file(&include_path, file);
+                            match &resolved {
+                                Ok(Some(tokens)) => {
+                                    if std::env::var("OPTIC_TRACE_INCLUDES").is_ok() {
+                                        eprintln!("[INCLUDE] {} -> {} tokens", include_path, tokens.len());
+                                    }
+                                    result.extend(tokens.clone());
+                                }
+                                Ok(None) => {
+                                    if std::env::var("OPTIC_TRACE_INCLUDES").is_ok() {
+                                        eprintln!("[INCLUDE] {} -> SKIPPED (dedup/guard)", include_path);
+                                    }
+                                }
+                                Err(e) => {
+                                    if std::env::var("OPTIC_TRACE_INCLUDES").is_ok() {
+                                        eprintln!("[INCLUDE] {} -> ERROR: {}", include_path, e);
+                                    }
+                                    // Silently skip failed includes for kernel compatibility
+                                    // instead of aborting
+                                }
                             }
                         } else {
                             let (_, end_idx) = self.skip_to_directive_end(&pp_tokens, i);
@@ -1228,7 +1256,7 @@ impl Preprocessor {
                     }
                     "error" => {
                         if in_if_stack.iter().all(|&active| active) {
-                            let (msg, _end_idx) = self.parse_diagnostic_text(&pp_tokens, after_name);
+                            let (msg, end_idx) = self.parse_diagnostic_text(&pp_tokens, after_name);
                             self.errors.push(msg.clone());
                             return Err(PreprocessorError::ConditionalError(format!(
                                 "#error: {}",
@@ -1561,7 +1589,7 @@ impl Preprocessor {
     fn expand_tokens_in_macro(
         &self,
         tokens: &[Token],
-        _params: &[String],
+        params: &[String],
         _file: &str,
     ) -> Vec<Token> {
         let mut result = Vec::new();
@@ -2579,7 +2607,7 @@ impl Preprocessor {
                     }
                     "error" => {
                         if in_if_stack.iter().all(|&active| active) {
-                            let (msg, _end_idx) = self.parse_diagnostic_text(pp_tokens, after_name);
+                            let (msg, end_idx) = self.parse_diagnostic_text(pp_tokens, after_name);
                             self.errors.push(msg.clone());
                             return Err(PreprocessorError::ConditionalError(format!(
                                 "#error: {}",

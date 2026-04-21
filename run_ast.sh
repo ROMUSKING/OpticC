@@ -1,3 +1,5 @@
 #!/bin/bash
-rustc --edition 2021 -L target/debug/deps --extern optic_c=target/debug/liboptic_c.rlib --extern tempfile=$(ls target/debug/deps/libtempfile-*.rlib | head -n1) print_ast.rs
-./print_ast
+SOURCE="struct Methods { int (*xAlloc)(int); void (*xFree)(void*); };"
+echo "$SOURCE" > /tmp/fnptr_debug.c
+./target/release/optic_c compile /tmp/fnptr_debug.c -o /tmp/fnptr_debug.ll 2>&1
+cat /tmp/fnptr_debug.ll

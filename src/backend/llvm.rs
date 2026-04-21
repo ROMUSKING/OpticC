@@ -60,6 +60,8 @@ pub struct LlvmBackend<'ctx, 'types> {
     llvm_used: Vec<PointerValue<'ctx>>,
     /// Function definitions that should be materialized for this translation unit.
     reachable_functions: HashSet<String>,
+    /// Counter for generating unique names for static local variables.
+    static_local_counter: u32,
 }
 
 #[derive(Clone, Copy)]
@@ -105,6 +107,7 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
             global_dtors: Vec::new(),
             llvm_used: Vec::new(),
             reachable_functions: HashSet::new(),
+            static_local_counter: 0,
         }
     }
 
@@ -142,6 +145,7 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
             global_dtors: Vec::new(),
             llvm_used: Vec::new(),
             reachable_functions: HashSet::new(),
+            static_local_counter: 0,
         }
     }
 
@@ -1063,6 +1067,25 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                             let mut bitfield_group: Option<(u16, u32, u32)> = None;
 
                             let mut member_off = child.first_child;
+                            // Pre-pass: register any nested named struct/union types first,
+                            // so that when we build this struct's field types, the nested
+                            // types are already in struct_tag_types and we get the same
+                            // object (enabling identity-based lookups later).
+                            while member_off != NodeOffset::NULL {
+                                if let Some(m) = arena.get(member_off) {
+                                    let mut scan = m.first_child;
+                                    while scan != NodeOffset::NULL {
+                                        if let Some(sn) = arena.get(scan) {
+                                            if (sn.kind == 4 || sn.kind == 5) && sn.data != 0 && sn.first_child != NodeOffset::NULL {
+                                                self.register_struct_types_in_node(arena, m);
+                                            }
+                                            scan = sn.next_sibling;
+                                        } else { break; }
+                                    }
+                                    member_off = m.next_sibling;
+                                } else { break; }
+                            }
+                            member_off = child.first_child;
                             while member_off != NodeOffset::NULL {
                                 if let Some(m) = arena.get(member_off) {
                                     if m.kind == 200 {
@@ -1085,7 +1108,7 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                                                         nested_spec_off = check_off;
                                                     }
                                                 }
-                                                7 => has_pointer = true,
+                                                7 | 9 => has_pointer = true, // pointer or function-pointer → ptr
                                                 8 => array_len = Some(cn.data),
                                                 27 => {
                                                     // Bitfield node: data = width
@@ -1456,6 +1479,29 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
         };
         let mut name = "p".to_string();
         let mut declarator_offset = NodeOffset::NULL;
+        // DFS helper: find the first kind=60 identifier in a declarator subtree
+        fn find_ident_in_decl(arena: &Arena, off: NodeOffset) -> Option<String> {
+            let n = arena.get(off)?;
+            if n.kind == 60 {
+                let s = arena.get_string(NodeOffset(n.data))?;
+                if !s.is_empty() {
+                    return Some(s.to_string());
+                }
+            }
+            // Descend into first_child for declarator nodes
+            if matches!(n.kind, 7 | 8 | 9) && n.first_child != NodeOffset::NULL {
+                if let Some(found) = find_ident_in_decl(arena, n.first_child) {
+                    return Some(found);
+                }
+            }
+            // Try next sibling (for declarators chained within the same level)
+            if n.next_sibling != NodeOffset::NULL && matches!(n.kind, 7 | 8 | 9 | 60) {
+                if let Some(found) = find_ident_in_decl(arena, n.next_sibling) {
+                    return Some(found);
+                }
+            }
+            None
+        }
         let mut off = param.first_child;
         while off != NodeOffset::NULL {
             if let Some(n) = arena.get(off) {
@@ -1470,47 +1516,11 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                         }
                     }
                 }
-                // Descend into pointer/array/function declarators to find the identifier
+                // Use DFS to find identifier in any declarator subtree (handles deeply nested
+                // function pointer params like void *(*xTask)(void*))
                 if matches!(n.kind, 7 | 8 | 9) && n.first_child != NodeOffset::NULL {
-                    let mut inner = n.first_child;
-                    while inner != NodeOffset::NULL {
-                        if let Some(inner_n) = arena.get(inner) {
-                            if inner_n.kind == 60 {
-                                if let Some(s) = arena.get_string(NodeOffset(inner_n.data)) {
-                                    if !s.is_empty() {
-                                        name = s.to_string();
-                                        break;
-                                    }
-                                }
-                            }
-                            // Recurse one more level for nested declarators (e.g., func ptr: kind=9 → kind=7 → kind=60)
-                            if matches!(inner_n.kind, 7 | 8 | 9) && inner_n.first_child != NodeOffset::NULL {
-                                let mut inner2 = inner_n.first_child;
-                                while inner2 != NodeOffset::NULL {
-                                    if let Some(inner2_n) = arena.get(inner2) {
-                                        if inner2_n.kind == 60 {
-                                            if let Some(s) = arena.get_string(NodeOffset(inner2_n.data)) {
-                                                if !s.is_empty() {
-                                                    name = s.to_string();
-                                                    break;
-                                                }
-                                            }
-                                        }
-                                        inner2 = inner2_n.next_sibling;
-                                    } else {
-                                        break;
-                                    }
-                                }
-                                if name != "p" {
-                                    break;
-                                }
-                            }
-                            inner = inner_n.next_sibling;
-                        } else {
-                            break;
-                        }
-                    }
-                    if name != "p" {
+                    if let Some(found) = find_ident_in_decl(arena, n.first_child) {
+                        name = found;
                         break;
                     }
                 }
@@ -1625,7 +1635,21 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
     }
 
     fn lower_var_decl(&mut self, arena: &Arena, node: &CAstNode) -> Result<(), BackendError> {
-        let spec_node = arena.get(node.first_child);
+        // Check for static storage class and find the actual type specifier node
+        // (first child may be storage class qualifiers like static=103, extern=102, etc.)
+        let mut is_static_local = false;
+        let mut spec_offset = node.first_child;
+        loop {
+            let Some(sn) = arena.get(spec_offset) else { break };
+            match sn.kind {
+                101 => { /* typedef */ spec_offset = sn.next_sibling; }
+                102 => { /* extern */ spec_offset = sn.next_sibling; }
+                103 => { is_static_local = true; spec_offset = sn.next_sibling; }
+                90 | 91 | 92 | 104 | 105 => { /* const/restrict/volatile/auto/register */ spec_offset = sn.next_sibling; }
+                _ => break,
+            }
+        }
+        let spec_node = arena.get(spec_offset);
         let spec_kind = spec_node.map(|n| n.kind).unwrap_or(2);
         let struct_info = self.struct_info_for_spec(arena, spec_node);
 
@@ -1681,6 +1705,103 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                             }
                         });
                         if let Some(var_name) = var_name_opt {
+                            let init_offset = declarator_node
+                                .map(|d| d.next_sibling)
+                                .unwrap_or(NodeOffset::NULL);
+                            // Static local variables must be emitted as globals with internal linkage
+                            if is_static_local {
+                                let zero: BasicValueEnum = match actual_alloca_type {
+                                    BasicTypeEnum::IntType(it) => it.const_zero().into(),
+                                    BasicTypeEnum::FloatType(ft) => ft.const_zero().into(),
+                                    BasicTypeEnum::PointerType(pt) => pt.const_null().into(),
+                                    BasicTypeEnum::StructType(st) => st.const_zero().into(),
+                                    BasicTypeEnum::ArrayType(at) => at.const_zero().into(),
+                                    _ => self.context.i32_type().const_zero().into(),
+                                };
+                                // Use a unique name to avoid collision with other statics
+                                // Use a unique counter-based name to avoid collision
+                                let static_name = {
+                                    let n = self.static_local_counter;
+                                    self.static_local_counter += 1;
+                                    format!("{}.static.{}", var_name, n)
+                                };
+                                let global = {
+                                    let g = self.module.add_global(actual_alloca_type, Some(AddressSpace::default()), &static_name);
+                                    g.set_initializer(&zero);
+                                    g.set_linkage(inkwell::module::Linkage::Internal);
+                                    g
+                                };
+                                // Handle aggregate initializer for static locals
+                                if init_offset != NodeOffset::NULL {
+                                    if let BasicTypeEnum::StructType(st) = actual_alloca_type {
+                                        // Initializer is a linked list of element nodes (first = init_offset)
+                                        let mut field_vals: Vec<BasicValueEnum> = Vec::new();
+                                        let mut item_off = init_offset;
+                                        let mut field_idx = 0u32;
+                                        if std::env::var("OPTICC_DEBUG_STATIC").is_ok() {
+                                            eprintln!("DEBUG static-init: var={} st.count_fields()={} item_off={:?}", var_name, st.count_fields(), item_off);
+                                        }
+                                        while item_off != NodeOffset::NULL && field_idx < st.count_fields() {
+                                            if let Some(item) = arena.get(item_off) {
+                                                let field_ty = st.get_field_type_at_index(field_idx).unwrap_or_else(|| self.context.i32_type().as_basic_type_enum());
+                                                let val: BasicValueEnum = match item.kind {
+                                                    60 => {
+                                                        // function pointer by name
+                                                        let fname = arena.get_string(NodeOffset(item.data)).unwrap_or("").to_string();
+                                                        if std::env::var("OPTICC_DEBUG_STATIC").is_ok() {
+                                                            eprintln!("DEBUG static-init field[{}]: fname={:?} found={}", field_idx, fname, self.module.get_function(&fname).is_some());
+                                                        }
+                                                        if fname.is_empty() {
+                                                            match field_ty { BasicTypeEnum::PointerType(pt) => pt.const_null().into(), BasicTypeEnum::IntType(it) => it.const_zero().into(), BasicTypeEnum::StructType(st2) => st2.const_zero().into(), BasicTypeEnum::ArrayType(at) => at.const_zero().into(), _ => self.context.i32_type().const_zero().into() }
+                                                        } else if let Some(f) = self.module.get_function(&fname) {
+                                                            f.as_global_value().as_pointer_value().into()
+                                                        } else {
+                                                            match field_ty { BasicTypeEnum::PointerType(pt) => pt.const_null().into(), BasicTypeEnum::StructType(st2) => st2.const_zero().into(), BasicTypeEnum::ArrayType(at) => at.const_zero().into(), _ => self.context.i32_type().const_zero().into() }
+                                                        }
+                                                    }
+                                                    61 | 80 => { // integer literal
+                                                        match field_ty { BasicTypeEnum::IntType(it) => it.const_int(item.data as u64, false).into(), BasicTypeEnum::PointerType(pt) => pt.const_null().into(), BasicTypeEnum::StructType(st2) => st2.const_zero().into(), BasicTypeEnum::ArrayType(at) => at.const_zero().into(), _ => self.context.i32_type().const_zero().into() }
+                                                    }
+                                                    _ => { match field_ty { BasicTypeEnum::PointerType(pt) => pt.const_null().into(), BasicTypeEnum::IntType(it) => it.const_zero().into(), BasicTypeEnum::StructType(st2) => st2.const_zero().into(), BasicTypeEnum::ArrayType(at) => at.const_zero().into(), _ => self.context.i32_type().const_zero().into() } }
+                                                };
+                                                field_vals.push(val);
+                                                field_idx += 1;
+                                                item_off = item.next_sibling;
+                                            } else { break; }
+                                        }
+                                        // Pad remaining fields with zeros
+                                        while field_idx < st.count_fields() {
+                                            let field_ty = st.get_field_type_at_index(field_idx).unwrap_or_else(|| self.context.i32_type().as_basic_type_enum());
+                                            let z: BasicValueEnum = match field_ty { BasicTypeEnum::IntType(it) => it.const_zero().into(), BasicTypeEnum::FloatType(ft) => ft.const_zero().into(), BasicTypeEnum::PointerType(pt) => pt.const_null().into(), BasicTypeEnum::StructType(st2) => st2.const_zero().into(), BasicTypeEnum::ArrayType(at) => at.const_zero().into(), _ => self.context.i32_type().const_zero().into() };
+                                            field_vals.push(z);
+                                            field_idx += 1;
+                                        }
+                                        if !field_vals.is_empty() {
+                                            let const_struct = self.context.const_struct(&field_vals.iter().map(|v| *v).collect::<Vec<_>>(), false);
+                                            global.set_initializer(&const_struct);
+                                        }
+                                    }
+                                }
+                                let var_ptr = global.as_pointer_value();
+                                if let Some((struct_type, field_names)) = struct_info.clone() {
+                                    self.struct_fields.insert(var_name.clone(), field_names.clone());
+                                    if actual_alloca_type.is_pointer_type() {
+                                        self.pointer_struct_types.insert(var_name.clone(), struct_type);
+                                    }
+                                }
+                                if matches!(spec_kind, 4 | 5) {
+                                    if let Some(sn) = spec_node {
+                                        if sn.data != 0 {
+                                            if let Some(tag) = arena.get_string(NodeOffset(sn.data)) {
+                                                self.var_struct_tag.insert(var_name.clone(), tag.to_string());
+                                                self.global_struct_tags.insert(var_name.clone(), tag.to_string());
+                                            }
+                                        }
+                                    }
+                                }
+                                self.insert_scoped_variable(var_name.clone(), VariableBinding { ptr: var_ptr, pointee_type: actual_alloca_type });
+                                self.global_variables.insert(var_name.clone(), VariableBinding { ptr: var_ptr, pointee_type: actual_alloca_type });
+                            } else {
                             let var_ptr = self
                                 .build_entry_alloca(actual_alloca_type, &var_name)
                                 .or_else(|_| self.builder.build_alloca(actual_alloca_type, &var_name).map_err(|_| BackendError::InvalidNode))?;
@@ -1712,9 +1833,6 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                             // Process initializer only for non-array types
                             // (array initializers require separate aggregate handling)
                             if !is_array {
-                                let init_offset = declarator_node
-                                    .map(|d| d.next_sibling)
-                                    .unwrap_or(NodeOffset::NULL);
                                 if init_offset != NodeOffset::NULL {
                                     let is_designated_init = arena
                                         .get(init_offset)
@@ -1744,9 +1862,10 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                                     }
                                 }
                             }
+                            } // end else (non-static)
                         }
                     }
-                    // Kind=60/7/8: plain scalar, pointer, or array declarator (no initializer)
+                    // Kind=60/7/8: plain scalar, pointer, or array declarator (with optional initializer as next_sibling)
                     60 | 7 | 8 => {
                         let actual_alloca_type =
                             self.declarator_llvm_type(arena, Some(child), alloca_type);
@@ -1759,7 +1878,94 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                             self.find_ident_name_in(arena, child)
                         };
 
+                        // The initializer (if any) is stored as next_sibling of the declarator.
+                        // Grab it and skip those siblings so the loop doesn't treat them as vars.
+                        let init_offset = child.next_sibling;
+
                         if let Some(var_name) = var_name_opt {
+                            if is_static_local {
+                                let zero: BasicValueEnum = match actual_alloca_type {
+                                    BasicTypeEnum::IntType(it) => it.const_zero().into(),
+                                    BasicTypeEnum::FloatType(ft) => ft.const_zero().into(),
+                                    BasicTypeEnum::PointerType(pt) => pt.const_null().into(),
+                                    BasicTypeEnum::StructType(st) => st.const_zero().into(),
+                                    BasicTypeEnum::ArrayType(at) => at.const_zero().into(),
+                                    _ => self.context.i32_type().const_zero().into(),
+                                };
+                                let static_name = {
+                                    let n = self.static_local_counter;
+                                    self.static_local_counter += 1;
+                                    format!("{}.static.{}", var_name, n)
+                                };
+                                let global = {
+                                    let g = self.module.add_global(actual_alloca_type, Some(AddressSpace::default()), &static_name);
+                                    g.set_initializer(&zero);
+                                    g.set_linkage(inkwell::module::Linkage::Internal);
+                                    g
+                                };
+                                // Handle aggregate struct initializer
+                                if init_offset != NodeOffset::NULL {
+                                    if let BasicTypeEnum::StructType(st) = actual_alloca_type {
+                                        let mut field_vals: Vec<BasicValueEnum> = Vec::new();
+                                        let mut item_off = init_offset;
+                                        let mut field_idx = 0u32;
+                                        while item_off != NodeOffset::NULL && field_idx < st.count_fields() {
+                                            if let Some(item) = arena.get(item_off) {
+                                                let field_ty = st.get_field_type_at_index(field_idx).unwrap_or_else(|| self.context.i32_type().as_basic_type_enum());
+                                                let val: BasicValueEnum = match item.kind {
+                                                    60 => { // ident (function pointer name)
+                                                        let fname = arena.get_string(NodeOffset(item.data)).unwrap_or("").to_string();
+                                                        if fname.is_empty() {
+                                                            match field_ty { BasicTypeEnum::PointerType(pt) => pt.const_null().into(), BasicTypeEnum::IntType(it) => it.const_zero().into(), BasicTypeEnum::StructType(st2) => st2.const_zero().into(), BasicTypeEnum::ArrayType(at) => at.const_zero().into(), _ => self.context.i32_type().const_zero().into() }
+                                                        } else if let Some(f) = self.module.get_function(&fname) {
+                                                            f.as_global_value().as_pointer_value().into()
+                                                        } else {
+                                                            match field_ty { BasicTypeEnum::PointerType(pt) => pt.const_null().into(), BasicTypeEnum::StructType(st2) => st2.const_zero().into(), BasicTypeEnum::ArrayType(at) => at.const_zero().into(), _ => self.context.i32_type().const_zero().into() }
+                                                        }
+                                                    }
+                                                    61 | 80 => { match field_ty { BasicTypeEnum::IntType(it) => it.const_int(item.data as u64, false).into(), BasicTypeEnum::PointerType(pt) => pt.const_null().into(), BasicTypeEnum::StructType(st2) => st2.const_zero().into(), BasicTypeEnum::ArrayType(at) => at.const_zero().into(), _ => self.context.i32_type().const_zero().into() } }
+                                                    _ => { match field_ty { BasicTypeEnum::PointerType(pt) => pt.const_null().into(), BasicTypeEnum::IntType(it) => it.const_zero().into(), BasicTypeEnum::StructType(st2) => st2.const_zero().into(), BasicTypeEnum::ArrayType(at) => at.const_zero().into(), _ => self.context.i32_type().const_zero().into() } }
+                                                };
+                                                field_vals.push(val);
+                                                field_idx += 1;
+                                                item_off = item.next_sibling;
+                                            } else { break; }
+                                        }
+                                        while field_idx < st.count_fields() {
+                                            let field_ty = st.get_field_type_at_index(field_idx).unwrap_or_else(|| self.context.i32_type().as_basic_type_enum());
+                                            let z: BasicValueEnum = match field_ty { BasicTypeEnum::IntType(it) => it.const_zero().into(), BasicTypeEnum::FloatType(ft) => ft.const_zero().into(), BasicTypeEnum::PointerType(pt) => pt.const_null().into(), BasicTypeEnum::StructType(st2) => st2.const_zero().into(), BasicTypeEnum::ArrayType(at) => at.const_zero().into(), _ => self.context.i32_type().const_zero().into() };
+                                            field_vals.push(z);
+                                            field_idx += 1;
+                                        }
+                                        if !field_vals.is_empty() {
+                                            let const_struct = self.context.const_struct(&field_vals.iter().map(|v| *v).collect::<Vec<_>>(), false);
+                                            global.set_initializer(&const_struct);
+                                        }
+                                    }
+                                }
+                                let var_ptr = global.as_pointer_value();
+                                if let Some((struct_type, field_names)) = struct_info.clone() {
+                                    self.struct_fields.insert(var_name.clone(), field_names.clone());
+                                    if actual_alloca_type.is_pointer_type() {
+                                        self.pointer_struct_types.insert(var_name.clone(), struct_type);
+                                    }
+                                }
+                                if matches!(spec_kind, 4 | 5) {
+                                    if let Some(sn) = spec_node {
+                                        if sn.data != 0 {
+                                            if let Some(tag) = arena.get_string(NodeOffset(sn.data)) {
+                                                self.var_struct_tag.insert(var_name.clone(), tag.to_string());
+                                                self.global_struct_tags.insert(var_name.clone(), tag.to_string());
+                                            }
+                                        }
+                                    }
+                                }
+                                self.insert_scoped_variable(var_name.clone(), VariableBinding { ptr: var_ptr, pointee_type: actual_alloca_type });
+                                self.global_variables.insert(var_name.clone(), VariableBinding { ptr: var_ptr, pointee_type: actual_alloca_type });
+                                // Skip the initializer elements (they are siblings of this declarator)
+                                // by breaking out — we only have one declarator in this static case
+                                break;
+                            } else {
                             let var_ptr = self
                                 .build_entry_alloca(actual_alloca_type, &var_name)
                                 .or_else(|_| self.builder.build_alloca(actual_alloca_type, &var_name).map_err(|_| BackendError::InvalidNode))?;
@@ -1788,6 +1994,7 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                                     pointee_type: actual_alloca_type,
                                 },
                             );
+                            } // end else (non-static)
                         }
                     }
                     // Type specifiers: skip
@@ -1908,24 +2115,38 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                 if let Some(idx) = tag_field_lookup {
                     idx as u32
                 } else {
-                    self.struct_fields
+                    let idx = self.struct_fields
                         .get(base_name)
                         .and_then(|fields| fields.iter().position(|f| f == &field_name))
-                        .unwrap_or(0) as u32
+                        .unwrap_or(0) as u32;
+                    idx
                 }
             };
 
-            if node.data & 0x8000_0000 != 0 {
-                let Some(struct_type) = self.pointer_struct_types.get(base_name).copied() else {
+            let binding = match self.variables.get(base_name).copied() {
+                Some(binding) => binding,
+                None => return Ok(None),
+            };
+
+            let is_arrow = node.data & 0x8000_0000 != 0;
+
+            if is_arrow {
+                // Arrow operator: base is a pointer to struct. Load the pointer, then GEP.
+                let struct_type = self.pointer_struct_types.get(base_name).copied()
+                    .or_else(|| {
+                        self.var_struct_tag.get(base_name).cloned()
+                            .and_then(|tag| self.struct_tag_types.get(&tag).copied())
+                    });
+                let Some(struct_type) = struct_type else {
                     return Ok(None);
                 };
-                let base_ptr = match self.lower_expr(arena, base_offset)? {
-                    Some(BasicValueEnum::PointerValue(ptr)) => ptr,
-                    _ => return Ok(None),
-                };
-                let field_ptr = self
-                    .builder
-                    .build_struct_gep(struct_type, base_ptr, field_idx, "arrow.gep")
+                // Load the pointer
+                let loaded_ptr = self.builder
+                    .build_load(self.context.ptr_type(AddressSpace::default()), binding.ptr, "arrow.load")
+                    .map_err(|_| BackendError::InvalidNode)?
+                    .into_pointer_value();
+                let field_ptr = self.builder
+                    .build_struct_gep(struct_type, loaded_ptr, field_idx, "arrow.gep")
                     .map_err(|_| BackendError::InvalidNode)?;
                 let field_type = struct_type
                     .get_field_type_at_index(field_idx)
@@ -1933,11 +2154,7 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                 return Ok(Some((field_ptr, field_type)));
             }
 
-            // Dot operator: base is a struct variable
-            let binding = match self.variables.get(base_name).copied() {
-                Some(binding) => binding,
-                None => return Ok(None),
-            };
+            // Dot operator: base is a struct variable (held directly, not via pointer)
             let BasicTypeEnum::StructType(struct_type) = binding.pointee_type else {
                 return Ok(None);
             };
@@ -1966,12 +2183,20 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                                 let fso = NodeOffset(base_node_cloned.data & 0x7FFF_FFFF);
                                 arena.get_string(fso).map(|s| s.to_string()).unwrap_or_default()
                             };
-                            // Look up xMalloc (field_name) in the nested struct_type
-                            // Search by tag name
+                            // Look up field_name in the nested struct type
+                            // We compare by struct identity OR by layout (field count + field types).
+                            // Identity may fail if the nested struct was built anonymously during parent
+                            // registration before the named type was registered.
                             let mut found = None;
                             for (tag_name, fields) in &self.struct_tag_fields {
                                 if let Some(st) = self.struct_tag_types.get(tag_name).copied() {
-                                    if st == struct_type {
+                                    let types_match = st == struct_type || {
+                                        let n = st.count_fields();
+                                        n == struct_type.count_fields() && (0..n).all(|i| {
+                                            st.get_field_type_at_index(i) == struct_type.get_field_type_at_index(i)
+                                        })
+                                    };
+                                    if types_match {
                                         if let Some(idx) = fields.iter().position(|f| f == &field_name) {
                                             let gep = self.builder
                                                 .build_struct_gep(struct_type, base_ptr, idx as u32, "nested.dot.gep")
@@ -2349,7 +2574,7 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                                     struct_spec_offset = check_off;
                                 }
                             }
-                            7 => has_pointer = true,
+                            7 | 9 => has_pointer = true, // pointer or function-pointer field → ptr
                             8 => array_len = Some(cn.data),
                             27 => {
                                 if cn.data > 0 {
@@ -2471,6 +2696,39 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                                             break;
                                         }
                                     }
+                                    // Descent: kind=7 → kind=9 (func-ptr like `void *(*name)(...)`)
+                                    if inner_n.kind == 9 && !found {
+                                        let mut ic = inner_n.first_child;
+                                        while ic != NodeOffset::NULL {
+                                            if let Some(ic_n) = arena.get(ic) {
+                                                if ic_n.kind == 60 {
+                                                    if let Some(name) = arena.get_string(NodeOffset(ic_n.data)) {
+                                                        names.push(name.to_string());
+                                                        found = true;
+                                                        break;
+                                                    }
+                                                }
+                                                if ic_n.kind == 7 && !found {
+                                                    let mut ic2 = ic_n.first_child;
+                                                    while ic2 != NodeOffset::NULL {
+                                                        if let Some(ic2_n) = arena.get(ic2) {
+                                                            if ic2_n.kind == 60 {
+                                                                if let Some(name) = arena.get_string(NodeOffset(ic2_n.data)) {
+                                                                    names.push(name.to_string());
+                                                                    found = true;
+                                                                    break;
+                                                                }
+                                                            }
+                                                            ic2 = ic2_n.next_sibling;
+                                                        } else { break; }
+                                                    }
+                                                }
+                                                if found { break; }
+                                                ic = ic_n.next_sibling;
+                                            } else { break; }
+                                        }
+                                    }
+                                    if found { break; }
                                     inner = inner_n.next_sibling;
                                 } else {
                                     break;
@@ -2479,6 +2737,38 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                             if found {
                                 break;
                             }
+                        }
+                        // Descend into function-pointer declarators (kind=9 → kind=7 → kind=60)
+                        if child.kind == 9 && !found {
+                            let mut inner = child.first_child;
+                            while inner != NodeOffset::NULL {
+                                if let Some(inner_n) = arena.get(inner) {
+                                    // kind=7 (pointer): look inside for the ident
+                                    if inner_n.kind == 7 {
+                                        let mut inner2 = inner_n.first_child;
+                                        while inner2 != NodeOffset::NULL {
+                                            if let Some(inner2_n) = arena.get(inner2) {
+                                                if inner2_n.kind == 60 {
+                                                    if let Some(name) = arena.get_string(NodeOffset(inner2_n.data)) {
+                                                        names.push(name.to_string());
+                                                        found = true;
+                                                        break;
+                                                    }
+                                                }
+                                                inner2 = inner2_n.next_sibling;
+                                            } else { break; }
+                                        }
+                                    } else if inner_n.kind == 60 {
+                                        if let Some(name) = arena.get_string(NodeOffset(inner_n.data)) {
+                                            names.push(name.to_string());
+                                            found = true;
+                                        }
+                                    }
+                                    if found { break; }
+                                    inner = inner_n.next_sibling;
+                                } else { break; }
+                            }
+                            if found { break; }
                         }
                         child_off = child.next_sibling;
                     } else {
@@ -2526,6 +2816,11 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                                 // Check variadic flag
                                 if func_decl.data == 1 {
                                     is_variadic = true;
+                                }
+                                // `void *fn()` — pointer declarator clears void return
+                                if child.kind == 7 && is_void_ret {
+                                    is_void_ret = false;
+                                    return_llvm_type = Some(self.context.ptr_type(inkwell::AddressSpace::default()).as_basic_type_enum());
                                 }
                                 if !is_void_ret {
                                     return_llvm_type = Some(self.declarator_llvm_type(
@@ -2630,6 +2925,11 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                             if let Some(func_decl) = arena.get(func_decl_offset) {
                                 if func_decl.data == 1 {
                                     is_variadic = true;
+                                }
+                                // `void *fn()` — pointer declarator clears void return
+                                if child.kind == 7 && is_void_ret {
+                                    is_void_ret = false;
+                                    return_llvm_type = Some(self.context.ptr_type(inkwell::AddressSpace::default()).as_basic_type_enum());
                                 }
                                 if !is_void_ret {
                                     return_llvm_type = Some(self.declarator_llvm_type(
@@ -2752,6 +3052,15 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                         // Check variadic flag (data=1 means ...)
                         if func_decl.data == 1 {
                             is_variadic = true;
+                        }
+                        // If the current node is a pointer declarator (kind=7), any
+                        // is_void_ret flag set by the void specifier must be cleared:
+                        // `void *fn()` has a pointer return type, not void.
+                        if child.kind == 7 && is_void_ret {
+                            is_void_ret = false;
+                            return_llvm_type = Some(
+                                self.context.ptr_type(AddressSpace::default()).as_basic_type_enum()
+                            );
                         }
                         if !is_void_ret {
                             return_llvm_type = Some(self.declarator_llvm_type(
@@ -3072,29 +3381,14 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
             49 => self.lower_goto_stmt(arena, &node),
             50 => self.lower_switch_stmt(arena, &node),
             51 => self.lower_labeled_stmt(arena, &node),
-            52 => {
-                // Case label: next_sibling is the inner statement
-                if node.next_sibling != NodeOffset::NULL {
-                    self.lower_stmt(arena, node.next_sibling)
-                } else {
-                    Ok(())
-                }
-            }
-            54 => {
-                // Case range: next_sibling is the inner statement (same as regular case)
-                if node.next_sibling != NodeOffset::NULL {
-                    self.lower_stmt(arena, node.next_sibling)
-                } else {
-                    Ok(())
-                }
+            52 | 54 => {
+                // Case label / case range: body follows as siblings in compound block.
+                // The switch lowering handles BB switching; nothing to do here.
+                Ok(())
             }
             53 => {
-                // Default label: first_child is the inner statement
-                if node.first_child != NodeOffset::NULL {
-                    self.lower_stmt(arena, node.first_child)
-                } else {
-                    Ok(())
-                }
+                // Default label: body follows as siblings in compound block.
+                Ok(())
             }
             27 => Ok(()), // Bitfield - skip
             1..=9 | 83 | 90..=94 | 101..=105 => Ok(()),
@@ -3427,8 +3721,19 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
     /// Lower a switch statement (kind=50).
     /// AST: first_child=condition expr, next_sibling=body (compound stmt with case/default labels)
     fn lower_switch_stmt(&mut self, arena: &Arena, node: &CAstNode) -> Result<(), BackendError> {
-        let cond_offset = node.first_child;
-        let body_offset = node.next_sibling;
+        // Layout (immune to link_siblings):
+        //   kind=50.first_child = cond_wrap(kind=0)
+        //     cond_wrap.first_child = condition_expr
+        //     cond_wrap.next_sibling = body (compound block, kind=40)
+        let cond_wrap_offset = node.first_child;
+        let cond_offset = arena
+            .get(cond_wrap_offset)
+            .map(|w| w.first_child)
+            .unwrap_or(NodeOffset::NULL);
+        let body_offset = arena
+            .get(cond_wrap_offset)
+            .map(|w| w.next_sibling)
+            .unwrap_or(NodeOffset::NULL);
 
         let function = self
             .builder
@@ -3458,89 +3763,172 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
         let end_bb = self.context.append_basic_block(function, "switch.end");
         let default_bb = self.context.append_basic_block(function, "switch.default");
 
-        // Collect case values and create basic blocks for each case
+        // Pass 1: Walk the body's children to collect case/default labels → build BBs
+        // case (52): first_child=expr, no body stored (body follows as siblings)
+        // default (53): no children
+        // case_range (54): first_child=low_expr, data=high_expr_offset
         let mut cases: Vec<(inkwell::values::IntValue<'ctx>, BasicBlock<'ctx>)> = Vec::new();
-        let mut case_bodies: Vec<(BasicBlock<'ctx>, NodeOffset)> = Vec::new();
-        let mut default_body_offset = NodeOffset::NULL;
+        // Map from BasicBlock name index to BB (we use a Vec, indexed by visit order)
+        // We also need to know which compound-block child offset corresponds to each BB.
+        // Instead, we'll build a map: child_offset → BB for case/default nodes.
+        let mut case_bb_map: Vec<(NodeOffset, BasicBlock<'ctx>)> = Vec::new();
+        let mut has_default = false;
 
-        // Walk the body to find case/default labels
-        self.collect_switch_cases(
-            arena,
-            body_offset,
-            function,
-            &cond_int,
-            &mut cases,
-            &mut case_bodies,
-            &mut default_body_offset,
-            default_bb,
-        );
-
-        // Deduplicate switch cases by value (keep last occurrence for fall-through semantics)
-        {
-            let mut seen: std::collections::HashMap<u64, usize> = std::collections::HashMap::new();
-            let mut dedup_indices: Vec<usize> = Vec::new();
-            for (i, (val, _bb)) in cases.iter().enumerate() {
-                let key = val.get_zero_extended_constant().unwrap_or(i as u64 + 1_000_000);
-                if let Some(prev) = seen.get(&key) {
-                    dedup_indices.retain(|idx| *idx != *prev);
-                }
-                seen.insert(key, i);
-                dedup_indices.push(i);
+        // Get the list of children of the body compound block
+        let body_first_child = if let Some(body_node) = arena.get(body_offset) {
+            if body_node.kind == 40 {
+                body_node.first_child
+            } else {
+                body_offset // body may itself be a case label
             }
-            if dedup_indices.len() < cases.len() {
-                let dedup_cases: Vec<_> = dedup_indices.iter().map(|&i| cases[i]).collect();
-                cases = dedup_cases;
+        } else {
+            NodeOffset::NULL
+        };
+
+        {
+            let mut child_off = body_first_child;
+            while child_off != NodeOffset::NULL {
+                let child = match arena.get(child_off) {
+                    Some(c) => c,
+                    None => break,
+                };
+                match child.kind {
+                    52 => {
+                        // case label: first_child=expr
+                        let case_bb = self.context.append_basic_block(function, "switch.case");
+                        if child.first_child != NodeOffset::NULL {
+                            if let Some(val) = self.lower_expr(arena, child.first_child).ok().flatten() {
+                                let case_int = if val.is_int_value() {
+                                    let raw = val.into_int_value();
+                                    let cond_bits = cond_int.get_type().get_bit_width();
+                                    let case_bits = raw.get_type().get_bit_width();
+                                    if case_bits < cond_bits {
+                                        self.builder.build_int_s_extend(raw, cond_int.get_type(), "case_sext").unwrap_or(raw)
+                                    } else if case_bits > cond_bits {
+                                        self.builder.build_int_truncate(raw, cond_int.get_type(), "case_trunc").unwrap_or(raw)
+                                    } else {
+                                        raw
+                                    }
+                                } else {
+                                    cond_int.get_type().const_int(0, false)
+                                };
+                                cases.push((case_int, case_bb));
+                            } else {
+                                cases.push((cond_int.get_type().const_int(0, false), case_bb));
+                            }
+                        }
+                        case_bb_map.push((child_off, case_bb));
+                    }
+                    54 => {
+                        // case range: first_child=low_expr, data=high_expr_offset
+                        let case_bb = self.context.append_basic_block(function, "switch.case_range");
+                        let lo_val = if child.first_child != NodeOffset::NULL {
+                            self.lower_expr(arena, child.first_child).ok().flatten()
+                        } else { None };
+                        let hi_val = if child.data != 0 {
+                            self.lower_expr(arena, NodeOffset(child.data)).ok().flatten()
+                        } else { None };
+                        if let (Some(lo), Some(hi)) = (lo_val, hi_val) {
+                            if lo.is_int_value() && hi.is_int_value() {
+                                let lo_c = lo.into_int_value().get_zero_extended_constant().unwrap_or(0);
+                                let hi_c = hi.into_int_value().get_zero_extended_constant().unwrap_or(0);
+                                let count = if hi_c >= lo_c { (hi_c - lo_c + 1).min(MAX_CASE_RANGE_EXPANSION) } else { 1 };
+                                for i in 0..count {
+                                    cases.push((cond_int.get_type().const_int(lo_c + i, false), case_bb));
+                                }
+                            }
+                        }
+                        case_bb_map.push((child_off, case_bb));
+                    }
+                    53 => {
+                        // default label
+                        has_default = true;
+                        case_bb_map.push((child_off, default_bb));
+                    }
+                    _ => {}
+                }
+                child_off = child.next_sibling;
             }
         }
 
+        // Deduplicate switch cases by value (keep first occurrence)
+        {
+            let mut seen: std::collections::HashSet<u64> = std::collections::HashSet::new();
+            cases.retain(|(val, _bb)| {
+                let key = val.get_zero_extended_constant().unwrap_or(u64::MAX);
+                seen.insert(key)
+            });
+        }
+
         // Build the switch instruction
-        let switch_inst = self
+        let _ = self
             .builder
             .build_switch(cond_int, default_bb, &cases)
             .map_err(|_| BackendError::InvalidNode)?;
-        let _ = switch_inst; // used for building the instruction
 
         // Push break target
         self.break_stack.push(end_bb);
 
-        // Lower case bodies in order
-        for (bb, stmt_offset) in &case_bodies {
-            self.builder.position_at_end(*bb);
-            if *stmt_offset != NodeOffset::NULL {
-                let _ = self.lower_stmt(arena, *stmt_offset);
-            }
-            // Fall-through: if no terminator, branch to next case body or end
-            // Note: C switch semantics allow fall-through between cases
-        }
+        // Pass 2: Walk body children in order, switching BBs at case/default labels.
+        // Build a lookup: NodeOffset → BB for fast lookup
+        let case_offset_to_bb: std::collections::HashMap<NodeOffset, BasicBlock<'ctx>> =
+            case_bb_map.iter().cloned().collect();
 
-        // Handle fall-through: for each case body without a terminator,
-        // branch to the next case body (fall-through) or to end
-        for i in 0..case_bodies.len() {
-            let (bb, _) = case_bodies[i];
-            if bb.get_terminator().is_none() {
-                self.builder.position_at_end(bb);
-                if i + 1 < case_bodies.len() {
-                    let next_bb = case_bodies[i + 1].0;
-                    self.builder
-                        .build_unconditional_branch(next_bb)
-                        .map_err(|_| BackendError::InvalidNode)?;
+        // We need to track the ordered list of case BBs to handle fall-through
+        let ordered_case_bbs: Vec<BasicBlock<'ctx>> = case_bb_map.iter().map(|(_, bb)| *bb).collect();
+
+        self.push_scope();
+        {
+            let mut child_off = body_first_child;
+            while child_off != NodeOffset::NULL {
+                let child = match arena.get(child_off) {
+                    Some(c) => c,
+                    None => break,
+                };
+                let next_off = child.next_sibling;
+
+                if let Some(&case_bb) = case_offset_to_bb.get(&child_off) {
+                    // This is a case or default label — switch to its BB
+                    // If current block has no terminator, fall through to this BB
+                    if self.builder.get_insert_block()
+                        .and_then(|bb| bb.get_terminator())
+                        .is_none()
+                    {
+                        let _ = self.builder.build_unconditional_branch(case_bb);
+                    }
+                    self.builder.position_at_end(case_bb);
                 } else {
-                    self.builder
-                        .build_unconditional_branch(end_bb)
-                        .map_err(|_| BackendError::InvalidNode)?;
+                    // Regular statement — lower it in current BB
+                    let _ = self.lower_stmt(arena, child_off);
                 }
+
+                child_off = next_off;
+            }
+        }
+        self.pop_scope();
+
+        // Ensure current BB (last case body) has a terminator
+        if self.builder.get_insert_block()
+            .and_then(|bb| bb.get_terminator())
+            .is_none()
+        {
+            let _ = self.builder.build_unconditional_branch(end_bb);
+        }
+
+        // Ensure default BB has a terminator (if no default label, jump to end)
+        if !has_default {
+            self.builder.position_at_end(default_bb);
+            if default_bb.get_terminator().is_none() {
+                let _ = self.builder.build_unconditional_branch(end_bb);
             }
         }
 
-        // Lower default body
-        self.builder.position_at_end(default_bb);
-        if default_body_offset != NodeOffset::NULL {
-            let _ = self.lower_stmt(arena, default_body_offset);
-        }
-        if default_bb.get_terminator().is_none() {
-            self.builder
-                .build_unconditional_branch(end_bb)
-                .map_err(|_| BackendError::InvalidNode)?;
+        // Ensure all case BBs that are unreachable/empty have terminators
+        for bb in &ordered_case_bbs {
+            if bb.get_terminator().is_none() {
+                self.builder.position_at_end(*bb);
+                let _ = self.builder.build_unconditional_branch(end_bb);
+            }
         }
 
         // Pop break target
@@ -3548,154 +3936,6 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
 
         self.builder.position_at_end(end_bb);
         Ok(())
-    }
-
-    /// Recursively walk a compound statement to collect case/default labels for switch.
-    fn collect_switch_cases(
-        &mut self,
-        arena: &Arena,
-        offset: NodeOffset,
-        function: FunctionValue<'ctx>,
-        cond_int: &inkwell::values::IntValue<'ctx>,
-        cases: &mut Vec<(inkwell::values::IntValue<'ctx>, BasicBlock<'ctx>)>,
-        case_bodies: &mut Vec<(BasicBlock<'ctx>, NodeOffset)>,
-        default_body_offset: &mut NodeOffset,
-        default_bb: BasicBlock<'ctx>,
-    ) {
-        let node = match arena.get(offset) {
-            Some(n) => n,
-            None => return,
-        };
-
-        match node.kind {
-            52 => {
-                // Case label: first_child=case_value_expr, next_sibling=stmt
-                let case_val = if node.first_child != NodeOffset::NULL {
-                    self.lower_expr(arena, node.first_child).ok().flatten()
-                } else {
-                    None
-                };
-
-                let case_bb = self.context.append_basic_block(function, "switch.case");
-                let stmt_offset = node.next_sibling;
-
-                if let Some(val) = case_val {
-                    let case_int = if val.is_int_value() {
-                        // Match bitwidth to the switch condition
-                        let raw = val.into_int_value();
-                        let cond_bits = cond_int.get_type().get_bit_width();
-                        let case_bits = raw.get_type().get_bit_width();
-                        if case_bits < cond_bits {
-                            self.builder
-                                .build_int_z_extend(raw, cond_int.get_type(), "case_zext")
-                                .unwrap_or(raw)
-                        } else if case_bits > cond_bits {
-                            self.builder
-                                .build_int_truncate(raw, cond_int.get_type(), "case_trunc")
-                                .unwrap_or(raw)
-                        } else {
-                            raw
-                        }
-                    } else {
-                        // Non-int case value: treat as 0
-                        cond_int.get_type().const_int(0, false)
-                    };
-                    cases.push((case_int, case_bb));
-                } else {
-                    // Could not evaluate case value; use 0 as fallback
-                    cases.push((cond_int.get_type().const_int(0, false), case_bb));
-                }
-
-                case_bodies.push((case_bb, stmt_offset));
-            }
-            54 => {
-                // Case range (GNU extension): case LOW ... HIGH:
-                // kind=54: first_child=low_expr, data=high_expr_offset, next_sibling=stmt
-                let low_val = if node.first_child != NodeOffset::NULL {
-                    self.lower_expr(arena, node.first_child).ok().flatten()
-                } else {
-                    None
-                };
-                let high_val = if node.data != 0 {
-                    self.lower_expr(arena, NodeOffset(node.data)).ok().flatten()
-                } else {
-                    None
-                };
-
-                let case_bb = self.context.append_basic_block(function, "switch.case_range");
-                let stmt_offset = node.next_sibling;
-
-                if let (Some(lo), Some(hi)) = (low_val, high_val) {
-                    if lo.is_int_value() && hi.is_int_value() {
-                        let lo_raw = lo.into_int_value();
-                        let hi_raw = hi.into_int_value();
-                        // Get constant values for the range
-                        let lo_const = lo_raw.get_zero_extended_constant().unwrap_or(0);
-                        let hi_const = hi_raw.get_zero_extended_constant().unwrap_or(0);
-                        // Cap range to prevent huge switch tables (max 256 entries)
-                        let count = if hi_const >= lo_const {
-                            (hi_const - lo_const + 1).min(MAX_CASE_RANGE_EXPANSION)
-                        } else {
-                            1
-                        };
-                        for i in 0..count {
-                            let val = cond_int.get_type().const_int(lo_const + i, false);
-                            cases.push((val, case_bb));
-                        }
-                    } else {
-                        // Fallback: treat as single case with low value
-                        cases.push((cond_int.get_type().const_int(0, false), case_bb));
-                    }
-                } else {
-                    cases.push((cond_int.get_type().const_int(0, false), case_bb));
-                }
-
-                case_bodies.push((case_bb, stmt_offset));
-            }
-            53 => {
-                // Default label: first_child=stmt
-                *default_body_offset = node.first_child;
-                // The default stmt may also contain nested case labels
-                if node.first_child != NodeOffset::NULL {
-                    if let Some(child) = arena.get(node.first_child) {
-                        if child.kind == 52 || child.kind == 53 || child.kind == 54 {
-                            self.collect_switch_cases(
-                                arena,
-                                node.first_child,
-                                function,
-                                cond_int,
-                                cases,
-                                case_bodies,
-                                default_body_offset,
-                                default_bb,
-                            );
-                        }
-                    }
-                }
-            }
-            40 => {
-                // Compound statement: walk children
-                let mut child_offset = node.first_child;
-                while child_offset != NodeOffset::NULL {
-                    if let Some(child) = arena.get(child_offset) {
-                        self.collect_switch_cases(
-                            arena,
-                            child_offset,
-                            function,
-                            cond_int,
-                            cases,
-                            case_bodies,
-                            default_body_offset,
-                            default_bb,
-                        );
-                        child_offset = child.next_sibling;
-                    } else {
-                        break;
-                    }
-                }
-            }
-            _ => {}
-        }
     }
 
     /// Lower a goto statement (kind=49).
@@ -4337,6 +4577,10 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
             return Ok(None);
         }
 
+        if std::env::var("OPTICC_DEBUG_FNPTR").is_ok() {
+            eprintln!("DEBUG lower_expr: kind={} offset={}", node.kind, offset.0);
+        }
+
         match node.kind {
             60 => self.lower_ident(arena, &node),
             61 => self.lower_int_const(&node),
@@ -4626,7 +4870,7 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
             }
         } else {
             // Guard against non-integer aggregate types (e.g., struct values)
-            if lhs_val.is_struct_value() || rhs_val.is_struct_value() {
+            if lhs_val.is_struct_value() || rhs_val.is_struct_value() || lhs_val.is_array_value() || rhs_val.is_array_value() {
                 return Err(BackendError::InvalidNode);
             }
             let lhs_int = lhs_val.into_int_value();
@@ -5318,13 +5562,32 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                     };
                     arg_offsets.push(expr_offset);
                     if let Some(arg_val) = self.lower_expr(arena, expr_offset)? {
-                        args.push(arg_val.into());
+                        // Array-to-pointer decay: if the arg is an array value,
+                        // get a pointer to it (GEP with index 0).
+                        let coerced = if arg_val.is_array_value() {
+                            // Store the array to a temp alloca, then pass pointer
+                            let arr_val = arg_val.into_array_value();
+                            let arr_ty = arr_val.get_type();
+                            if let Ok(alloca) = self.builder.build_alloca(arr_ty, "arr_decay") {
+                                let _ = self.builder.build_store(alloca, arr_val);
+                                alloca.into()
+                            } else {
+                                arg_val
+                            }
+                        } else {
+                            arg_val
+                        };
+                        args.push(coerced.into());
                     }
                     arg_offset = arg_node.next_sibling;
                 } else {
                     break;
                 }
             }
+        }
+
+        if std::env::var("OPTICC_DEBUG_FNPTR").is_ok() {
+            eprintln!("DEBUG lower_call_expr: func_name={func_name:?} first_child_kind={}", first_child.map(|n|n.kind).unwrap_or(999));
         }
 
         if let Some(name) = func_name {
@@ -5483,14 +5746,30 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                 _ => {}
             }
 
-            // Check if this is a function pointer variable (e.g., a parameter of function pointer type)
+            // Check if this is a function pointer variable (e.g., a parameter of function pointer type,
+            // or a local variable of typedef function-pointer type like sqlite3_loadext_entry)
+            if std::env::var("OPTICC_DEBUG_FNPTR").is_ok() {
+                eprintln!("DEBUG lower_call_expr: name={name:?} in_vars={}", self.variables.contains_key(name));
+            }
             if let Some(binding) = self.variables.get(name).copied() {
-                if binding.pointee_type.is_pointer_type() {
-                    // Load the function pointer and do an indirect call
-                    let fn_ptr = self.builder
-                        .build_load(binding.pointee_type, binding.ptr, "fn_ptr_load")
-                        .map_err(|_| BackendError::InvalidNode)?
-                        .into_pointer_value();
+                // Load the variable's value (should be a function pointer)
+                let loaded = self.builder
+                    .build_load(binding.pointee_type, binding.ptr, "fn_ptr_load")
+                    .map_err(|_| BackendError::InvalidNode)?;
+                let fn_ptr_opt: Option<inkwell::values::PointerValue> = if loaded.is_pointer_value() {
+                    Some(loaded.into_pointer_value())
+                } else if loaded.is_int_value() {
+                    // Function pointer may have been stored as an integer (e.g., from typedef)
+                    // Convert int → ptr
+                    self.builder.build_int_to_ptr(
+                        loaded.into_int_value(),
+                        self.context.ptr_type(AddressSpace::default()),
+                        "fn_i2p"
+                    ).ok()
+                } else {
+                    None
+                };
+                if let Some(fn_ptr) = fn_ptr_opt {
                     let param_types: Vec<inkwell::types::BasicMetadataTypeEnum> = args
                         .iter()
                         .map(|a| match a {
@@ -5502,7 +5781,7 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                             _ => self.context.i32_type().into(),
                         })
                         .collect();
-                    let fn_type = self.context.i32_type().fn_type(&param_types, false);
+                    let fn_type = self.context.i32_type().fn_type(&param_types, true);
                     let call_site = self.builder
                         .build_indirect_call(fn_type, fn_ptr, &args, "indirect_call")
                         .map_err(|_| BackendError::InvalidNode)?;
@@ -5513,6 +5792,7 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                         }
                     }));
                 }
+                // If the loaded value is not a pointer (wrong type), fall through to function lookup
             }
 
             if let Some(func) = self.functions.get(name) {
@@ -6616,18 +6896,32 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                         Some(inkwell::values::BasicMetadataValueEnum::PointerValue(result_ptr)),
                     ) = (args.get(0), args.get(1), args.get(2))
                     {
+                        // Coerce a and b to same width
+                        let (a_coerced, b_coerced) = {
+                            let aw = a.get_type().get_bit_width();
+                            let bw = b.get_type().get_bit_width();
+                            if aw == bw {
+                                (*a, *b)
+                            } else if aw < bw {
+                                let ext = self.builder.build_int_s_extend(*a, b.get_type(), "ovf_sext_a").unwrap_or(*a);
+                                (ext, *b)
+                            } else {
+                                let ext = self.builder.build_int_s_extend(*b, a.get_type(), "ovf_sext_b").unwrap_or(*b);
+                                (*a, ext)
+                            }
+                        };
                         let result = match builtin_name.as_str() {
                             "__builtin_add_overflow" => self
                                 .builder
-                                .build_int_add(*a, *b, "overflow_add")
+                                .build_int_add(a_coerced, b_coerced, "overflow_add")
                                 .map_err(|_| BackendError::InvalidNode)?,
                             "__builtin_sub_overflow" => self
                                 .builder
-                                .build_int_sub(*a, *b, "overflow_sub")
+                                .build_int_sub(a_coerced, b_coerced, "overflow_sub")
                                 .map_err(|_| BackendError::InvalidNode)?,
                             "__builtin_mul_overflow" => self
                                 .builder
-                                .build_int_mul(*a, *b, "overflow_mul")
+                                .build_int_mul(a_coerced, b_coerced, "overflow_mul")
                                 .map_err(|_| BackendError::InvalidNode)?,
                             _ => unreachable!("overflow builtin matched but not handled: {}", builtin_name),
                         };

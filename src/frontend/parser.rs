@@ -7,6 +7,9 @@ pub struct Parser {
     pub current: usize,
     /// Track typedef names so they can be recognized as type specifiers.
     pub typedef_names: std::collections::HashSet<String>,
+    /// Track typedef name → resolved AST node kind (for primitive typedefs).
+    /// For struct typedefs: stores kind=4 and the struct tag offset in the second field.
+    pub typedef_kinds: std::collections::HashMap<String, (u16, u32)>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -69,6 +72,7 @@ impl Parser {
             tokens: Vec::new(),
             current: 0,
             typedef_names: std::collections::HashSet::new(),
+            typedef_kinds: std::collections::HashMap::new(),
         }
     }
 
@@ -622,7 +626,10 @@ impl Parser {
             // If this is a typedef, register the declared name
             if is_typedef && declarator != NodeOffset::NULL {
                 if let Some(name) = self.find_declarator_name(declarator) {
-                    self.typedef_names.insert(name);
+                    self.typedef_names.insert(name.clone());
+                    // Also record the resolved kind so struct members can use correct LLVM types
+                    let (kind, tag_off) = self.resolve_specifier_chain_kind(specifiers);
+                    self.typedef_kinds.insert(name, (kind, tag_off));
                 }
             }
 
@@ -850,7 +857,17 @@ impl Parser {
             "typeof" | "__typeof__" => {
                 return self.parse_typeof_expr();
             }
-            _ => 2,
+            _ => {
+                // Check if this is a known typedef name with a recorded kind
+                if let Some(&(kind, struct_tag_off)) = self.typedef_kinds.get(&text) {
+                    if kind == 4 || kind == 5 {
+                        // Struct/union typedef: emit a struct/union specifier node with the tag
+                        return Ok(self.alloc_node(kind, struct_tag_off, NodeOffset::NULL, NodeOffset::NULL, NodeOffset::NULL));
+                    }
+                    return Ok(self.alloc_node(kind, 0, NodeOffset::NULL, NodeOffset::NULL, NodeOffset::NULL));
+                }
+                2
+            }
         };
 
         Ok(self.alloc_node(
@@ -1329,6 +1346,84 @@ impl Parser {
     }
 
     /// Walk a declarator AST node to find the identifier name (kind=60).
+    /// Walk a specifier chain and compute the canonical (kind, struct_tag_data) for typedef recording.
+    /// Handles combinations like: unsigned+char→(1,0), unsigned+short→(10,0), unsigned+int→(13,0),
+    /// unsigned+long+long→(11,0), long+long→(11,0), long→(11,0), struct tag→(4,tag_off), etc.
+    fn resolve_specifier_chain_kind(&self, first_spec: NodeOffset) -> (u16, u32) {
+        let mut has_unsigned = false;
+        let mut has_signed = false;
+        let mut base_kind: u16 = 2; // default int
+        let mut long_count: u32 = 0;
+        let mut struct_data: u32 = 0;
+        let mut is_struct_or_union = false;
+        let mut is_pointer = false;
+
+        let mut off = first_spec;
+        while off != NodeOffset::NULL {
+            let Some(node) = self.arena.get(off) else { break; };
+            match node.kind {
+                13 => has_unsigned = true,           // unsigned
+                12 => has_signed = true,             // signed
+                3  => base_kind = 3,                 // char
+                10 => base_kind = 10,                // short
+                2  => { if base_kind != 11 { base_kind = 2; } } // int (don't override long)
+                11 => { long_count += 1; base_kind = 11; } // long
+                83 => base_kind = 83,                // float
+                84 => base_kind = 84,                // double
+                1  => base_kind = 1,                 // void
+                14 => base_kind = 14,                // _Bool
+                4  => { base_kind = 4; struct_data = node.data; is_struct_or_union = true; }
+                5  => { base_kind = 5; struct_data = node.data; is_struct_or_union = true; }
+                7  => is_pointer = true,             // pointer declarator
+                // storage class / qualifiers / typedef keyword: skip
+                103 | 101..=105 | 200 | 6 => {}
+                _ => {
+                    // Could be a typedef-name node (kind=2 node whose string data is a typedef name)
+                    // or just an unrecognised specifier node. Try to look up in typedef_kinds.
+                    if node.data != 0 {
+                        if let Some(name) = self.arena.get_string(NodeOffset(node.data)) {
+                            if let Some(&(k, tag)) = self.typedef_kinds.get(name) {
+                                if k == 4 || k == 5 { struct_data = tag; is_struct_or_union = true; }
+                                base_kind = k;
+                            }
+                        }
+                    }
+                }
+            }
+            off = node.next_sibling;
+        }
+
+        if is_pointer {
+            return (7, 0); // pointer typedef
+        }
+        if is_struct_or_union {
+            return (base_kind, struct_data);
+        }
+
+        // Resolve combined specifiers
+        let resolved = if long_count >= 2 {
+            11 // long long → i64
+        } else if has_unsigned {
+            match base_kind {
+                3  => 1,  // unsigned char → i8
+                10 => 10, // unsigned short → i16 (keep kind=10, backend maps to i16)
+                11 => 11, // unsigned long → i64
+                _  => 13, // unsigned int → i32
+            }
+        } else if has_signed {
+            match base_kind {
+                3  => 3,  // signed char → i8
+                10 => 10, // signed short → i16
+                11 => 11, // signed long → i64
+                _  => 2,  // signed int → i32
+            }
+        } else {
+            base_kind
+        };
+
+        (resolved, 0)
+    }
+
     fn find_declarator_name(&self, offset: NodeOffset) -> Option<String> {
         let node = self.arena.get(offset)?;
         // If this is an identifier node
@@ -1413,7 +1508,9 @@ impl Parser {
                 // If this is a typedef declaration, extract and register the name
                 if is_typedef && declarator != NodeOffset::NULL {
                     if let Some(name) = self.find_declarator_name(declarator) {
-                        self.typedef_names.insert(name);
+                        self.typedef_names.insert(name.clone());
+                        let (kind, tag_off) = self.resolve_specifier_chain_kind(specifiers);
+                        self.typedef_kinds.insert(name, (kind, tag_off));
                     }
                 }
 
@@ -1636,21 +1733,24 @@ impl Parser {
             self.advance(); // skip '...'
             let high_expr = self.parse_constant_expression()?;
             self.expect(":")?;
-            let stmt = self.parse_statement()?;
-            // kind=54 (case_range): first_child=low_expr, data=high_expr.0, next_sibling=stmt
-            return Ok(self.alloc_node(54, high_expr.0, NodeOffset::NULL, expr, stmt));
+            // kind=54 (case_range): first_child=low_expr, data=high_expr.0
+            // The body statements follow as siblings in the compound block.
+            return Ok(self.alloc_node(54, high_expr.0, NodeOffset::NULL, expr, NodeOffset::NULL));
         }
 
         self.expect(":")?;
-        let stmt = self.parse_statement()?;
-        Ok(self.alloc_node(52, 0, NodeOffset::NULL, expr, stmt))
+        // Do NOT parse a statement here — the body statements follow as siblings
+        // in the compound block. Storing them in next_sibling would be overwritten
+        // by link_siblings when the case node is linked into the compound block.
+        Ok(self.alloc_node(52, 0, NodeOffset::NULL, expr, NodeOffset::NULL))
     }
 
     fn parse_default_label(&mut self) -> Result<NodeOffset, ParseError> {
         self.expect("default")?;
         self.expect(":")?;
-        let stmt = self.parse_statement()?;
-        Ok(self.alloc_node(53, 0, NodeOffset::NULL, stmt, NodeOffset::NULL))
+        // Do NOT parse a statement here — the body statements follow as siblings
+        // in the compound block.
+        Ok(self.alloc_node(53, 0, NodeOffset::NULL, NodeOffset::NULL, NodeOffset::NULL))
     }
 
     fn parse_if_statement(&mut self) -> Result<NodeOffset, ParseError> {
@@ -1659,7 +1759,10 @@ impl Parser {
         let condition = self.parse_expression()?;
         self.expect(")")?;
         let then_stmt = self.parse_statement()?;
-        let else_stmt = if self.skip_punctuator("else") {
+        let else_stmt = if (self.current_token().kind == TokenKind::Keyword || self.current_token().kind == TokenKind::Identifier)
+            && self.current_token().text == "else"
+        {
+            self.advance();
             Some(self.parse_statement()?)
         } else {
             None
@@ -1767,7 +1870,12 @@ impl Parser {
         self.expect(")")?;
         let body = self.parse_statement()?;
 
-        Ok(self.alloc_node(50, 0, NodeOffset::NULL, condition, body))
+        // Layout (immune to link_siblings overwriting kind=50.next_sibling):
+        //   kind=50.first_child = cond_wrap(kind=0)
+        //     cond_wrap.first_child = condition_expr
+        //     cond_wrap.next_sibling = body (compound block)
+        let cond_wrap = self.alloc_node(0, 0, NodeOffset::NULL, condition, body);
+        Ok(self.alloc_node(50, 0, NodeOffset::NULL, cond_wrap, NodeOffset::NULL))
     }
 
     fn parse_goto_statement(&mut self) -> Result<NodeOffset, ParseError> {
