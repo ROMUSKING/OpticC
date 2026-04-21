@@ -2288,6 +2288,16 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                     Ok(Some((binding.ptr, binding.pointee_type)))
                 }
             }
+            65 if node.data == 5 => {
+                let ptr = match self.lower_expr(arena, node.first_child)? {
+                    Some(value) if value.is_pointer_value() => value.into_pointer_value(),
+                    _ => return Ok(None),
+                };
+                Ok(Some((
+                    ptr,
+                    self.context.ptr_type(AddressSpace::default()).as_basic_type_enum(),
+                )))
+            }
             68 => self.lower_array_element_ptr(arena, node),
             69 => self.lower_member_access_ptr(arena, node),
             _ => Ok(None),
@@ -8053,6 +8063,21 @@ mod tests {
         assert!(
             ir.contains("define i32 @consume(ptr"),
             "Expected va_list parameter to lower to ptr:\n{}",
+            ir
+        );
+    }
+
+    #[test]
+    fn test_pointer_deref_assignment_emits_store() {
+        let ir = compile_c_to_ir(
+            "int write_ptr(int **out, int *value) { \
+                *out = value; \
+                return 0; \
+            }"
+        );
+        assert!(
+            ir.contains("store ptr %value") && ir.contains(", ptr %out"),
+            "Expected dereference assignment to emit pointer store:\n{}",
             ir
         );
     }

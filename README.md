@@ -214,8 +214,8 @@ cargo run -- benchmark --suite sqlite --sqlite-source /path/to/sqlite3.c --outpu
 # Benchmark cold compile vs warm recompile
 cargo run -- benchmark --suite rebuild --compilers all --runs 2 --output-dir results
 
-# Run SQLite integration test
-cargo run -- integration-test --test-dir /tmp/optic_test
+# Run SQLite integration test against a local sqlite3.c truth source
+cargo run -- integration-test --test-dir /tmp/optic_test --sqlite-url /path/to/sqlite3.c
 ```
 ```
 

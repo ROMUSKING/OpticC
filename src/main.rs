@@ -744,6 +744,14 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 }
             );
             println!(
+                "  Smoke: {}",
+                if result.smoke_test_success {
+                    "SUCCESS"
+                } else {
+                    "FAILED"
+                }
+            );
+            println!(
                 "  Library: {}",
                 if result.library_created {
                     "CREATED"
