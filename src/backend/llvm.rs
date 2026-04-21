@@ -2345,6 +2345,25 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                                 .unwrap_or(NodeOffset::NULL);
                             // Static local variables must be emitted as globals with internal linkage
                             if is_static_local {
+                                // For unsized static local arrays (declarator data=0), determine the
+                                // true element count from the flat initializer list.
+                                let actual_alloca_type = if let BasicTypeEnum::ArrayType(at) = actual_alloca_type {
+                                    if at.len() == 0 && init_offset != NodeOffset::NULL {
+                                        if let BasicTypeEnum::StructType(elem_st) = at.get_element_type() {
+                                            let nf = elem_st.count_fields() as usize;
+                                            if nf > 0 {
+                                                let mut cnt = 0usize;
+                                                let mut off = init_offset;
+                                                while off != NodeOffset::NULL {
+                                                    cnt += 1;
+                                                    off = arena.get(off).map(|n| n.next_sibling).unwrap_or(NodeOffset::NULL);
+                                                }
+                                                let ne = cnt / nf;
+                                                if ne > 0 { elem_st.array_type(ne as u32).as_basic_type_enum() } else { actual_alloca_type }
+                                            } else { actual_alloca_type }
+                                        } else { actual_alloca_type }
+                                    } else { actual_alloca_type }
+                                } else { actual_alloca_type };
                                 let zero: BasicValueEnum = match actual_alloca_type {
                                     BasicTypeEnum::IntType(it) => it.const_zero().into(),
                                     BasicTypeEnum::FloatType(ft) => ft.const_zero().into(),
@@ -2397,6 +2416,17 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                                                     61 | 80 => { // integer literal
                                                         match field_ty { BasicTypeEnum::IntType(it) => it.const_int(item.data as u64, false).into(), BasicTypeEnum::PointerType(pt) => pt.const_null().into(), BasicTypeEnum::StructType(st2) => st2.const_zero().into(), BasicTypeEnum::ArrayType(at) => at.const_zero().into(), _ => self.context.i32_type().const_zero().into() }
                                                     }
+                                                    63 | 81 | 82 => {
+                                                        // String literal → create a const global string and return its pointer
+                                                        let s = arena.get_string(NodeOffset(item.data)).unwrap_or("");
+                                                        let sv = self.context.const_string(s.as_bytes(), true);
+                                                        let sg = self.module.add_global(sv.get_type(), Some(AddressSpace::default()), ".str");
+                                                        sg.set_initializer(&sv);
+                                                        sg.set_constant(true);
+                                                        sg.set_linkage(inkwell::module::Linkage::Private);
+                                                        sg.set_unnamed_addr(true);
+                                                        sg.as_pointer_value().into()
+                                                    }
                                                     _ => { match field_ty { BasicTypeEnum::PointerType(pt) => pt.const_null().into(), BasicTypeEnum::IntType(it) => it.const_zero().into(), BasicTypeEnum::StructType(st2) => st2.const_zero().into(), BasicTypeEnum::ArrayType(at) => at.const_zero().into(), _ => self.context.i32_type().const_zero().into() } }
                                                 };
                                                 field_vals.push(val);
@@ -2414,6 +2444,57 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                                         if !field_vals.is_empty() {
                                             let const_struct = self.context.const_struct(&field_vals.iter().map(|v| *v).collect::<Vec<_>>(), false);
                                             global.set_initializer(&const_struct);
+                                        }
+                                    } else if let BasicTypeEnum::ArrayType(at) = actual_alloca_type {
+                                        // Array of structs (e.g. static FuncDef arr[] = { {...}, {...} })
+                                        if let BasicTypeEnum::StructType(elem_st) = at.get_element_type() {
+                                            let n_elems = at.len() as usize;
+                                            let n_fields = elem_st.count_fields();
+                                            let mut item_off = init_offset;
+                                            let mut struct_vals: Vec<inkwell::values::StructValue<'ctx>> = Vec::new();
+                                            for _ in 0..n_elems {
+                                                let mut fvals: Vec<BasicValueEnum<'ctx>> = Vec::new();
+                                                let mut fi = 0u32;
+                                                while fi < n_fields && item_off != NodeOffset::NULL {
+                                                    let Some(item) = arena.get(item_off) else { break; };
+                                                    let ft = elem_st.get_field_type_at_index(fi).unwrap_or_else(|| self.context.i32_type().as_basic_type_enum());
+                                                    let val: BasicValueEnum = match item.kind {
+                                                        60 => {
+                                                            let fname = arena.get_string(NodeOffset(item.data)).unwrap_or("").to_string();
+                                                            if fname.is_empty() { match ft { BasicTypeEnum::PointerType(pt) => pt.const_null().into(), BasicTypeEnum::IntType(it) => it.const_zero().into(), _ => self.context.i32_type().const_zero().into() } }
+                                                            else if let Some(f) = self.module.get_function(&fname) { f.as_global_value().as_pointer_value().into() }
+                                                            else if let Some(g) = self.module.get_global(&fname) { g.as_pointer_value().into() }
+                                                            else { match ft { BasicTypeEnum::PointerType(pt) => pt.const_null().into(), _ => self.context.i32_type().const_zero().into() } }
+                                                        }
+                                                        61 | 80 => { match ft { BasicTypeEnum::IntType(it) => it.const_int(item.data as u64, false).into(), BasicTypeEnum::PointerType(pt) => pt.const_null().into(), _ => self.context.i32_type().const_zero().into() } }
+                                                        63 | 81 | 82 => {
+                                                            let s = arena.get_string(NodeOffset(item.data)).unwrap_or("");
+                                                            let sv = self.context.const_string(s.as_bytes(), true);
+                                                            let sg = self.module.add_global(sv.get_type(), Some(AddressSpace::default()), ".str");
+                                                            sg.set_initializer(&sv);
+                                                            sg.set_constant(true);
+                                                            sg.set_linkage(inkwell::module::Linkage::Private);
+                                                            sg.set_unnamed_addr(true);
+                                                            sg.as_pointer_value().into()
+                                                        }
+                                                        _ => { match ft { BasicTypeEnum::PointerType(pt) => pt.const_null().into(), BasicTypeEnum::IntType(it) => it.const_zero().into(), BasicTypeEnum::StructType(st2) => st2.const_zero().into(), BasicTypeEnum::ArrayType(at2) => at2.const_zero().into(), _ => self.context.i32_type().const_zero().into() } }
+                                                    };
+                                                    fvals.push(val);
+                                                    fi += 1;
+                                                    item_off = item.next_sibling;
+                                                }
+                                                // Pad remaining fields
+                                                while fi < n_fields {
+                                                    let ft = elem_st.get_field_type_at_index(fi).unwrap_or_else(|| self.context.i32_type().as_basic_type_enum());
+                                                    fvals.push(match ft { BasicTypeEnum::IntType(it) => it.const_zero().into(), BasicTypeEnum::FloatType(flt) => flt.const_zero().into(), BasicTypeEnum::PointerType(pt) => pt.const_null().into(), BasicTypeEnum::StructType(st2) => st2.const_zero().into(), BasicTypeEnum::ArrayType(at2) => at2.const_zero().into(), _ => self.context.i32_type().const_zero().into() });
+                                                    fi += 1;
+                                                }
+                                                struct_vals.push(self.context.const_struct(&fvals, false));
+                                            }
+                                            if !struct_vals.is_empty() {
+                                                let arr_const = elem_st.const_array(&struct_vals);
+                                                global.set_initializer(&arr_const);
+                                            }
                                         }
                                     }
                                 }
@@ -2680,6 +2761,8 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
             (BasicTypeEnum::IntType(_), BasicValueEnum::IntValue(_)) => true,
             (BasicTypeEnum::FloatType(_), BasicValueEnum::FloatValue(_)) => true,
             (BasicTypeEnum::PointerType(_), BasicValueEnum::PointerValue(_)) => true,
+            (BasicTypeEnum::StructType(_), BasicValueEnum::StructValue(_)) => true,
+            (BasicTypeEnum::ArrayType(_), BasicValueEnum::ArrayValue(_)) => true,
             _ => false,
         }
     }
@@ -5773,6 +5856,34 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                             .into(),
                         _ => unreachable!(),
                     }
+                }
+                BasicValueEnum::PointerValue(ptr_value) => {
+                    // Pointer increment/decrement: advance by sizeof(*ptr).
+                    // Resolve element type from pointer_struct_types or var_struct_tag.
+                    let element_type: BasicTypeEnum<'ctx> = arena
+                        .get(child_offset)
+                        .filter(|n| n.kind == 60)
+                        .and_then(|n| arena.get_string(NodeOffset(n.data)))
+                        .and_then(|vname| {
+                            self.pointer_struct_types
+                                .get(vname)
+                                .map(|st| st.as_basic_type_enum())
+                                .or_else(|| {
+                                    self.var_struct_tag
+                                        .get(vname)
+                                        .and_then(|tag| self.struct_tag_types.get(tag))
+                                        .map(|st| st.as_basic_type_enum())
+                                })
+                        })
+                        .unwrap_or_else(|| self.context.i8_type().as_basic_type_enum());
+                    let step: u64 = if node.data == 6 { 1 } else { u64::MAX }; // +1 or -1 (wrapping)
+                    let index = self.context.i64_type().const_int(step, true);
+                    let new_ptr = unsafe {
+                        self.builder
+                            .build_gep(element_type, ptr_value, &[index], "ptrinc")
+                            .map_err(|_| BackendError::InvalidNode)?
+                    };
+                    new_ptr.into()
                 }
                 _ => return Err(BackendError::InvalidNode),
             };

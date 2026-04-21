@@ -1606,6 +1606,13 @@ impl Parser {
                     self.parse_initializer()?
                 };
                 self.link_siblings(&mut first_elem, &mut last_elem, elem);
+                // If `elem` is itself a chain (nested brace init), walk to its end
+                // so the next link_siblings call appends after the full chain, not after
+                // just the first element.
+                while let Some(n) = self.arena.get(last_elem) {
+                    if n.next_sibling == NodeOffset::NULL { break; }
+                    last_elem = n.next_sibling;
+                }
 
                 if self.skip_punctuator("}") {
                     break;
