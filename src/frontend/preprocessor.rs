@@ -1424,9 +1424,19 @@ impl Preprocessor {
         for search_path in &search_paths {
             let full_path = search_path.join(path);
             if full_path.exists() {
-                let resolved_path = full_path
-                    .canonicalize()
-                    .unwrap_or_else(|_| full_path.clone());
+                let resolved_path = match full_path.canonicalize() {
+                    Ok(path) => path,
+                    Err(err) => {
+                        if std::env::var("OPTIC_TRACE_INCLUDES").is_ok() {
+                            eprintln!(
+                                "[INCLUDE] canonicalize fallback for {}: {}",
+                                full_path.display(),
+                                err
+                            );
+                        }
+                        full_path.clone()
+                    }
+                };
                 let resolved_path_str = resolved_path.to_string_lossy().to_string();
                 if self.include_stack.contains(&resolved_path_str) {
                     return Ok(None);

@@ -1291,6 +1291,8 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
             10 => self.context.i16_type().as_basic_type_enum(),
             11 => self.context.i64_type().as_basic_type_enum(),
             12 | 13 => self.context.i32_type().as_basic_type_enum(),
+            // kind 16 = va_list / __builtin_va_list / __gnuc_va_list.
+            // Lower as an opaque pointer so LLVM va_arg/variadic flows remain compatible.
             16 => self.context.ptr_type(AddressSpace::default()).as_basic_type_enum(),
             83 => self.context.f32_type().as_basic_type_enum(),
             84 => self.context.f64_type().as_basic_type_enum(),
@@ -1324,6 +1326,7 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
             3 | 14 => Some((1, 1)),
             10 => Some((2, 2)),
             11 | 84 => Some((8, 8)),
+            // kind 16 = va_list family. Model it as pointer-sized for 64-bit targets.
             16 => Some((8, 8)),
             4 | 5 => self.ast_record_size_align(arena, node),
             _ => {
