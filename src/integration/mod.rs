@@ -1,11 +1,18 @@
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::io::{self, Read, Write};
+use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Instant;
 
 use crate::build::{BuildConfig, Builder, OutputType};
+
+#[cfg(feature = "network")]
+use std::io::{Read, Write};
+
+pub const DEFAULT_SQLITE_GITHUB_URL: &str =
+    "https://github.com/abramov7613/sqlite-amalgamation-mirror/archive/refs/heads/main.zip";
+pub const DEFAULT_SQLITE_GITHUB_VERSION: &str = "github-main";
 
 pub struct IntegrationTest {
     pub test_dir: PathBuf,
@@ -116,11 +123,14 @@ impl IntegrationTest {
         IntegrationTest::new(
             PathBuf::from("/tmp/optic_integration"),
             PathBuf::from("/tmp/optic_integration/output"),
-            "https://www.sqlite.org/2026/sqlite-amalgamation-3490200.zip".to_string(),
+            DEFAULT_SQLITE_GITHUB_URL.to_string(),
         )
     }
 
     fn extract_version_from_url(url: &str) -> String {
+        if url == DEFAULT_SQLITE_GITHUB_URL {
+            return DEFAULT_SQLITE_GITHUB_VERSION.to_string();
+        }
         if let Some(pos) = url.rfind("sqlite-amalgamation-") {
             let rest = &url[pos + "sqlite-amalgamation-".len()..];
             if let Some(end) = rest.find(".zip") {
@@ -158,33 +168,79 @@ impl IntegrationTest {
 
         #[cfg(feature = "network")]
         {
-            let response = ureq::get(&self.sqlite_url).call().map_err(|e| {
-                format!(
-                    "Failed to download SQLite: {}. This may be an environment limitation.",
-                    e
-                )
-            })?;
-
-            let mut file = fs::File::create(&zip_path)
-                .map_err(|e| format!("Failed to create zip file: {}", e))?;
-
-            let mut bytes = Vec::new();
-            response
-                .into_reader()
-                .read_to_end(&mut bytes)
-                .map_err(|e| format!("Failed to read response: {}", e))?;
-
-            file.write_all(&bytes)
-                .map_err(|e| format!("Failed to write zip file: {}", e))?;
-
-            return Ok(zip_path);
+            match self.download_sqlite_with_network_feature(&zip_path) {
+                Ok(path) => return Ok(path),
+                Err(network_error) => {
+                    return self
+                        .download_sqlite_with_system_tool(&zip_path)
+                        .map_err(|system_error| {
+                            format!(
+                                "Failed to download SQLite with network feature ({}) or system downloader ({}).",
+                                network_error, system_error
+                            )
+                        });
+                }
+            }
         }
 
         #[cfg(not(feature = "network"))]
         {
-            let _ = zip_path;
-            return Err("Network downloads require the 'network' feature. This is an environment limitation.".to_string());
+            return self.download_sqlite_with_system_tool(&zip_path);
         }
+    }
+
+    #[cfg(feature = "network")]
+    fn download_sqlite_with_network_feature(&self, zip_path: &Path) -> Result<PathBuf, String> {
+        let response = ureq::get(&self.sqlite_url).call().map_err(|e| {
+            format!(
+                "Failed to download SQLite: {}. This may be an environment limitation.",
+                e
+            )
+        })?;
+
+        let mut file = fs::File::create(zip_path)
+            .map_err(|e| format!("Failed to create zip file: {}", e))?;
+
+        let mut bytes = Vec::new();
+        response
+            .into_reader()
+            .read_to_end(&mut bytes)
+            .map_err(|e| format!("Failed to read response: {}", e))?;
+
+        file.write_all(&bytes)
+            .map_err(|e| format!("Failed to write zip file: {}", e))?;
+
+        Ok(zip_path.to_path_buf())
+    }
+
+    fn download_sqlite_with_system_tool(&self, zip_path: &Path) -> Result<PathBuf, String> {
+        let curl = Command::new("curl")
+            .arg("-L")
+            .arg("--fail")
+            .arg("--output")
+            .arg(zip_path)
+            .arg(&self.sqlite_url)
+            .output();
+
+        if let Ok(output) = curl {
+            if output.status.success() {
+                return Ok(zip_path.to_path_buf());
+            }
+        }
+
+        let wget = Command::new("wget")
+            .arg("-O")
+            .arg(zip_path)
+            .arg(&self.sqlite_url)
+            .output();
+
+        if let Ok(output) = wget {
+            if output.status.success() {
+                return Ok(zip_path.to_path_buf());
+            }
+        }
+
+        Err("No working downloader found; tried curl and wget".to_string())
     }
 
     pub fn download_sqlite_mock(&self) -> Result<PathBuf, String> {
@@ -674,15 +730,12 @@ mod tests {
         let test = IntegrationTest::new(
             PathBuf::from("/tmp/test"),
             PathBuf::from("/tmp/test/output"),
-            "https://www.sqlite.org/2026/sqlite-amalgamation-3490200.zip".to_string(),
+            DEFAULT_SQLITE_GITHUB_URL.to_string(),
         );
         assert_eq!(test.test_dir, PathBuf::from("/tmp/test"));
         assert_eq!(test.output_dir, PathBuf::from("/tmp/test/output"));
-        assert_eq!(
-            test.sqlite_url,
-            "https://www.sqlite.org/2026/sqlite-amalgamation-3490200.zip"
-        );
-        assert_eq!(test.sqlite_version, "3490200");
+        assert_eq!(test.sqlite_url, DEFAULT_SQLITE_GITHUB_URL);
+        assert_eq!(test.sqlite_version, DEFAULT_SQLITE_GITHUB_VERSION);
     }
 
     #[test]
@@ -781,7 +834,7 @@ mod tests {
         let test = IntegrationTest::new(
             PathBuf::from("/tmp/test_integration"),
             PathBuf::from("/tmp/test_integration/output"),
-            "https://www.sqlite.org/2026/sqlite-amalgamation-3490200.zip".to_string(),
+            DEFAULT_SQLITE_GITHUB_URL.to_string(),
         );
         assert!(test.test_dir.is_absolute());
         assert!(test.output_dir.is_absolute());
@@ -884,7 +937,7 @@ mod tests {
         let test = IntegrationTest::new(
             temp_dir.clone(),
             output_dir.clone(),
-            "https://www.sqlite.org/2026/sqlite-amalgamation-3490200.zip".to_string(),
+            DEFAULT_SQLITE_GITHUB_URL.to_string(),
         );
 
         let result = test.download_sqlite_mock();
@@ -908,7 +961,7 @@ mod tests {
         let test = IntegrationTest::new(
             temp_dir.clone(),
             output_dir.clone(),
-            "https://www.sqlite.org/2026/sqlite-amalgamation-3490200.zip".to_string(),
+            DEFAULT_SQLITE_GITHUB_URL.to_string(),
         );
 
         let result = test.preprocess_sqlite_mock(&source);
@@ -932,7 +985,7 @@ mod tests {
         let test = IntegrationTest::new(
             temp_dir.clone(),
             output_dir.clone(),
-            "https://www.sqlite.org/2026/sqlite-amalgamation-3490200.zip".to_string(),
+            DEFAULT_SQLITE_GITHUB_URL.to_string(),
         );
 
         let result = test.compile_sqlite_mock(&source);
@@ -956,7 +1009,7 @@ mod tests {
         let test = IntegrationTest::new(
             temp_dir.clone(),
             output_dir.clone(),
-            "https://www.sqlite.org/2026/sqlite-amalgamation-3490200.zip".to_string(),
+            DEFAULT_SQLITE_GITHUB_URL.to_string(),
         );
 
         let result = test.link_sqlite_mock(&obj);
@@ -978,7 +1031,7 @@ mod tests {
         let test = IntegrationTest::new(
             temp_dir.clone(),
             output_dir.clone(),
-            "https://www.sqlite.org/2026/sqlite-amalgamation-3490200.zip".to_string(),
+            DEFAULT_SQLITE_GITHUB_URL.to_string(),
         );
 
         let result = test.extract_sqlite_mock();

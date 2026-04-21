@@ -62,7 +62,8 @@ enum Commands {
         output_dir: PathBuf,
         #[arg(
             long,
-            default_value = "https://www.sqlite.org/2026/sqlite-amalgamation-3490200.zip"
+            help = "SQLite source: local sqlite3.c, local dir/zip, or GitHub-hosted zip archive",
+            default_value = "https://github.com/abramov7613/sqlite-amalgamation-mirror/archive/refs/heads/main.zip"
         )]
         sqlite_url: String,
     },
