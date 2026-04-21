@@ -1,0 +1,31 @@
+; ModuleID = 'test_atomics'
+source_filename = "test_atomics"
+
+@counter = global i32 0
+@tls_var = thread_local global i32 42
+
+define i32 @test_atomic_add() {
+entry:
+  %counter = load i32, ptr @counter, align 4
+  %0 = atomicrmw add ptr @counter, i32 5 seq_cst, align 4
+  ret i32 %0
+}
+
+define i32 @test_atomic_cas() {
+entry:
+  %expected = alloca i32, align 4
+  store i32 5, ptr %expected, align 4
+  %counter = load i32, ptr @counter, align 4
+  %expected1 = load i32, ptr %expected, align 4
+  %0 = cmpxchg ptr @counter, i32 %expected1, i32 10 seq_cst seq_cst, align 4
+  %sync_cas_old = extractvalue { i32, i1 } %0, 0
+  ret i32 %sync_cas_old
+}
+
+define i32 @main() {
+entry:
+  %call = call i32 @test_atomic_add()
+  %call1 = call i32 @test_atomic_cas()
+  %tls_var = load i32, ptr @tls_var, align 4
+  ret i32 %tls_var
+}

@@ -1,0 +1,7 @@
+; ModuleID = 'test_simple'
+source_filename = "test_simple"
+
+define i32 @main() {
+entry:
+  ret i32 5
+}
