@@ -520,6 +520,8 @@ impl Parser {
                 | "__signed__"
                 | "__signed"
                 | "__builtin_va_list"
+                | "__gnuc_va_list"
+                | "va_list"
                 | "__int128"
                 | "__int128_t"
                 | "__uint128_t"
@@ -555,10 +557,10 @@ impl Parser {
 
     pub fn is_storage_class_specifier(&self) -> bool {
         let token = self.current_token();
-        token.kind == TokenKind::Keyword
+        (token.kind == TokenKind::Keyword || token.kind == TokenKind::Identifier)
             && matches!(
                 token.text.as_str(),
-                "typedef" | "extern" | "static" | "auto" | "register"
+                "typedef" | "extern" | "static" | "auto" | "register" | "_Thread_local" | "__thread"
             )
     }
 
@@ -821,6 +823,7 @@ impl Parser {
             "static" => 103,
             "auto" => 104,
             "register" => 105,
+            "_Thread_local" | "__thread" => 106,
             _ => 101,
         };
 
@@ -853,7 +856,8 @@ impl Parser {
             "enum" => return self.parse_enum_specifier(),
             "_Bool" => 14,
             "_Complex" => 15,
-            "__builtin_va_list" | "__int128" | "__int128_t" | "__uint128_t" => 2,
+            "__builtin_va_list" | "__gnuc_va_list" | "va_list" => 16,
+            "__int128" | "__int128_t" | "__uint128_t" => 2,
             "typeof" | "__typeof__" => {
                 return self.parse_typeof_expr();
             }
@@ -1374,9 +1378,10 @@ impl Parser {
                 14 => base_kind = 14,                // _Bool
                 4  => { base_kind = 4; struct_data = node.data; is_struct_or_union = true; }
                 5  => { base_kind = 5; struct_data = node.data; is_struct_or_union = true; }
+                16 => base_kind = 16,                // va_list / __builtin_va_list
                 7  => is_pointer = true,             // pointer declarator
                 // storage class / qualifiers / typedef keyword: skip
-                103 | 101..=105 | 200 | 6 => {}
+                101..=106 | 200 | 6 => {}
                 _ => {
                     // Could be a typedef-name node (kind=2 node whose string data is a typedef name)
                     // or just an unrecognised specifier node. Try to look up in typedef_kinds.

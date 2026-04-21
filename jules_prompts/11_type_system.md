@@ -127,6 +127,10 @@ Add `typedef_struct_tags: HashMap<String, String>` to parser state. When `typede
 ### Option C: Full typedef integration with TypeSystem
 Wire the TypeSystem's `resolve_typedef` to the backend's struct member type resolution. When `register_struct_types_in_node` processes a kind=2 child that was originally a typedef, look it up in the TypeSystem to get the real LLVM type. This requires the TypeSystem to be populated during compilation (it's already wired via `with_types()`).
 
+### Recent verified progress (2026-04-21)
+- `__builtin_va_list`, `__gnuc_va_list`, and `va_list` now lower through a dedicated pointer-like parser/backend path, so stdarg typedef chains no longer collapse to `i32` in function signatures.
+- `_Thread_local` / `__thread` storage-class parsing now reaches backend lowering, and global declarations emit LLVM `thread_local` with targeted regression coverage.
+
 
 ## ACCEPTANCE CRITERIA
 1. Type resolver correctly identifies all primitive types in a C source file

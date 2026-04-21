@@ -385,6 +385,8 @@ impl<'a> Lexer<'a> {
                 | b"void"
                 | b"volatile"
                 | b"while"
+                | b"_Thread_local"
+                | b"__thread"
                 | b"_Bool"
                 | b"_Complex"
                 | b"_Imaginary"
@@ -427,6 +429,8 @@ const KEYWORDS: &[&[u8]] = &[
     b"void",
     b"volatile",
     b"while",
+    b"_Thread_local",
+    b"__thread",
     b"_Bool",
     b"_Complex",
     b"_Imaginary",

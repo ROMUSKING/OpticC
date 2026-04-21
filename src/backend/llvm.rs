@@ -6,7 +6,7 @@ use inkwell::module::Module;
 use inkwell::types::{BasicMetadataTypeEnum, BasicType, BasicTypeEnum, StructType};
 use inkwell::values::{BasicValue, BasicValueEnum, FunctionValue, PointerValue};
 use inkwell::basic_block::BasicBlock;
-use inkwell::AddressSpace;
+use inkwell::{AddressSpace, ThreadLocalMode};
 use std::collections::{HashMap, HashSet};
 
 /// Maximum number of switch entries to emit for a single `case LOW ... HIGH:` range.
@@ -303,6 +303,7 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
         is_pointer: &mut bool,
         is_array: &mut bool,
         is_static: &mut bool,
+        is_thread_local: &mut bool,
         init_offset: &mut NodeOffset,
     ) {
         let mut current = offset;
@@ -336,6 +337,7 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                     }
                 }
                 103 => *is_static = true,
+                106 => *is_thread_local = true,
                 _ => {}
             }
 
@@ -347,6 +349,7 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                     is_pointer,
                     is_array,
                     is_static,
+                    is_thread_local,
                     init_offset,
                 );
             }
@@ -752,7 +755,7 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
         while scan_off != NodeOffset::NULL {
             if let Some(child) = arena.get(scan_off) {
                 match child.kind {
-                    1..=6 | 83 => {
+                    1..=6 | 16 | 83 => {
                         spec_kind = child.kind;
                         if first_spec == NodeOffset::NULL {
                             first_spec = scan_off;
@@ -773,13 +776,15 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
         // Also track whether we found a type specifier (to handle bare ident vars)
         let mut found_type_spec = false;
         let mut is_static_decl = false;
+        let mut is_thread_local_decl = false;
         child_offset = node.first_child;
         while child_offset != NodeOffset::NULL {
             if let Some(child) = arena.get(child_offset) {
                 match child.kind {
-                    1..=6 | 83 => { found_type_spec = true; }
-                    101..=105 => {
+                    1..=6 | 16 | 83 => { found_type_spec = true; }
+                    101..=106 => {
                         if child.kind == 103 { is_static_decl = true; }
+                        if child.kind == 106 { is_thread_local_decl = true; }
                     }
                     21 => {
                         // Try to handle as a global variable
@@ -819,6 +824,12 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                                 global.set_initializer(&zero);
                                 if is_static_decl {
                                     global.set_linkage(inkwell::module::Linkage::Internal);
+                                }
+                                if is_thread_local_decl {
+                                    global.set_thread_local(true);
+                                    global.set_thread_local_mode(Some(
+                                        ThreadLocalMode::GeneralDynamicTLSModel,
+                                    ));
                                 }
                                 let binding = VariableBinding { ptr: global.as_pointer_value(), pointee_type: llvm_type };
                                 if let Some(ref tag) = struct_tag {
@@ -862,7 +873,7 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
             let mut ch = node.first_child;
             while ch != NodeOffset::NULL {
                 if let Some(c) = arena.get(ch) {
-                    if matches!(c.kind, 1..=6 | 83) {
+                    if matches!(c.kind, 1..=6 | 16 | 83) {
                         spec_kind = c.kind;
                         spec_node_offset = ch;
                         break;
@@ -892,6 +903,7 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
         let mut is_pointer = false;
         let mut is_array = false;
         let mut is_static = false;
+        let mut is_thread_local = false;
         let mut init_offset = NodeOffset::NULL;
         self.scan_global_var_shape(
             arena,
@@ -900,6 +912,7 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
             &mut is_pointer,
             &mut is_array,
             &mut is_static,
+            &mut is_thread_local,
             &mut init_offset,
         );
 
@@ -945,6 +958,12 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                         if is_static {
                             global.set_linkage(inkwell::module::Linkage::Internal);
                         }
+                        if is_thread_local {
+                            global.set_thread_local(true);
+                            global.set_thread_local_mode(Some(
+                                ThreadLocalMode::GeneralDynamicTLSModel,
+                            ));
+                        }
                         self.apply_global_attributes(global, &attrs);
                         self.register_used_attributes(global.as_pointer_value(), &attrs);
                         // Store in variables for later reference
@@ -983,6 +1002,12 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                         if is_static {
                             global.set_linkage(inkwell::module::Linkage::Internal);
                         }
+                        if is_thread_local {
+                            global.set_thread_local(true);
+                            global.set_thread_local_mode(Some(
+                                ThreadLocalMode::GeneralDynamicTLSModel,
+                            ));
+                        }
                         self.apply_global_attributes(global, &attrs);
                         self.register_used_attributes(global.as_pointer_value(), &attrs);
                         if let Some(ref tag) = global_struct_tag {
@@ -1012,6 +1037,10 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
             global.set_initializer(&zero);
             if is_static {
                 global.set_linkage(inkwell::module::Linkage::Internal);
+            }
+            if is_thread_local {
+                global.set_thread_local(true);
+                global.set_thread_local_mode(Some(ThreadLocalMode::GeneralDynamicTLSModel));
             }
             self.apply_global_attributes(global, &attrs);
             self.register_used_attributes(global.as_pointer_value(), &attrs);
@@ -1102,7 +1131,7 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                                     while check_off != NodeOffset::NULL {
                                         if let Some(cn) = arena.get(check_off) {
                                             match cn.kind {
-                                                1..=6 | 10..=13 | 83 | 84 => {
+                                                1..=6 | 10..=13 | 16 | 83 | 84 => {
                                                     base_kind = cn.kind;
                                                     if matches!(cn.kind, 4 | 5) {
                                                         nested_spec_off = check_off;
@@ -1207,6 +1236,7 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
             10 => self.context.i16_type().as_basic_type_enum(),
             11 => self.context.i64_type().as_basic_type_enum(),
             12 | 13 => self.context.i32_type().as_basic_type_enum(),
+            16 => self.context.ptr_type(AddressSpace::default()).as_basic_type_enum(),
             83 => self.context.f32_type().as_basic_type_enum(),
             84 => self.context.f64_type().as_basic_type_enum(),
             _ => self.context.i32_type().as_basic_type_enum(),
@@ -1239,6 +1269,7 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
             3 | 14 => Some((1, 1)),
             10 => Some((2, 2)),
             11 | 84 => Some((8, 8)),
+            16 => Some((8, 8)),
             4 | 5 => self.ast_record_size_align(arena, node),
             _ => {
                 if node.first_child != NodeOffset::NULL {
@@ -1645,7 +1676,7 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                 101 => { /* typedef */ spec_offset = sn.next_sibling; }
                 102 => { /* extern */ spec_offset = sn.next_sibling; }
                 103 => { is_static_local = true; spec_offset = sn.next_sibling; }
-                90 | 91 | 92 | 104 | 105 => { /* const/restrict/volatile/auto/register */ spec_offset = sn.next_sibling; }
+                90 | 91 | 92 | 104 | 105 | 106 => { /* const/restrict/volatile/auto/register/thread_local */ spec_offset = sn.next_sibling; }
                 _ => break,
             }
         }
@@ -2801,7 +2832,7 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
         while child_offset != NodeOffset::NULL {
             if let Some(child) = arena.get(child_offset) {
                 match child.kind {
-                    1..=6 | 83 => {
+                    1..=6 | 16 | 83 => {
                         is_void_ret = child.kind == 1;
                         if !is_void_ret {
                             return_llvm_type = Some(self.specifier_to_llvm_type(arena, child));
@@ -2911,7 +2942,7 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
         while child_offset != NodeOffset::NULL {
             if let Some(child) = arena.get(child_offset) {
                 match child.kind {
-                    1..=6 | 83 => {
+                    1..=6 | 16 | 83 => {
                         is_void_ret = child.kind == 1;
                         if !is_void_ret {
                             return_llvm_type = Some(self.specifier_to_llvm_type(arena, child));
@@ -3026,12 +3057,12 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                 // After func declarator, any non-spec/non-decl child is the body
                 if seen_func_declarator
                     && body_offset == NodeOffset::NULL
-                    && !matches!(child.kind, 1..=9 | 83 | 101..=105)
+                    && !matches!(child.kind, 1..=9 | 16 | 83 | 101..=106)
                 {
                     body_offset = child_offset;
                 }
                 match child.kind {
-                    1..=6 | 83 => {
+                    1..=6 | 16 | 83 => {
                         is_void_ret = child.kind == 1;
                         if !is_void_ret {
                             return_llvm_type = Some(self.specifier_to_llvm_type(arena, child));
@@ -7802,6 +7833,19 @@ mod tests {
     }
 
     #[test]
+    fn test_va_list_typedef_parameter_lowers_to_ptr() {
+        let ir = compile_c_to_ir(
+            "typedef __builtin_va_list va_list; \
+             int consume(va_list ap) { return 0; }"
+        );
+        assert!(
+            ir.contains("define i32 @consume(ptr"),
+            "Expected va_list parameter to lower to ptr:\n{}",
+            ir
+        );
+    }
+
+    #[test]
     fn test_asm_basic_volatile() {
         let ir = compile_c_to_ir(
             "void test_asm() { \
@@ -7984,6 +8028,16 @@ mod tests {
         assert!(ir.contains("my_weak_func"), "Expected function in IR:\n{}", ir);
         // weak linkage should appear as `weak` or `extern_weak`
         assert!(ir.contains("weak"), "Expected weak linkage in IR:\n{}", ir);
+    }
+
+    #[test]
+    fn test_thread_local_global_lowering() {
+        let ir = compile_c_to_ir("__thread int per_cpu_counter;");
+        assert!(
+            ir.contains("@per_cpu_counter = thread_local"),
+            "Expected thread_local global in IR:\n{}",
+            ir
+        );
     }
 
     #[test]

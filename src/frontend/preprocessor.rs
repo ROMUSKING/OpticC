@@ -706,6 +706,8 @@ impl Preprocessor {
                 | "void"
                 | "volatile"
                 | "while"
+                | "_Thread_local"
+                | "__thread"
                 | "_Bool"
                 | "_Complex"
                 | "_Imaginary"

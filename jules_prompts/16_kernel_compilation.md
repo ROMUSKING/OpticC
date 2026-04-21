@@ -52,7 +52,7 @@ OpticC is targeting compilation of a **minimal Linux 6.6 LTS kernel** using `tin
 - [x] Flexible array members: `struct s { int n; char data[]; }`
 - [ ] Anonymous structs/unions in struct members
 - [ ] `_Static_assert(expr, "msg")` → compile-time assertion
-- [ ] `_Thread_local` / `__thread` → LLVM `thread_local` globals
+- [x] `_Thread_local` / `__thread` → LLVM `thread_local` globals
 - [ ] `_Atomic` full lowering with atomic operations
 - **Owner**: Jules-Type-System + Jules-Parser
 - **Files**: `src/types/mod.rs`, `src/frontend/parser.rs`, `src/backend/llvm.rs`
@@ -160,7 +160,7 @@ qemu-system-x86_64 -kernel bzImage -initrd /tmp/initramfs.cpio.gz \
 | Flexible array members | 📋 | M9 | Kernel buffer structs |
 | Anonymous structs/unions | 📋 | M9 | Kernel nested types |
 | _Static_assert | 📋 | M9 | Compile-time checks |
-| _Thread_local | 📋 | M9 | Per-CPU variables |
+| _Thread_local | ✅ | M9 | Parser and backend now emit LLVM `thread_local` globals for `_Thread_local` / `__thread` declarations |
 | __has_attribute/builtin/include | 📋 | M10 | Kernel feature detection |
 | _Pragma | 📋 | M10 | Inline pragmas |
 | -ffreestanding | 📋 | M11 | Kernel build mode |
@@ -196,7 +196,7 @@ $(CC) -Wp,-MD,path/.file.o.d -nostdinc -isystem $(shell $(CC) -print-file-name=i
 - The kernel build tree is now installed under /lib/modules/$(uname -r)/build, so real out-of-tree module validation now runs in-container.
 - Objtool RETHUNK rejection is now cleared for the hello-module path.
 - Current live blocker: hello-module builds now reach modpost, which still reports missing MODULE_LICENSE metadata on the emitted object.
-- Remaining atomic ordering constants, anonymous aggregate promotion, and broader kernel-scale validation are still open.
+- Remaining anonymous aggregate promotion, `_Static_assert`, broader atomic validation, and kernel-scale validation are still open.
 - Freestanding flags, force-includes, feature probes, packed struct layout, constructor/destructor lowering, flexible array layout, compile-time builtin support, and thunk-safe return lowering are now verified, but further metadata-preservation hardening is still needed for full kernel correctness.
 
 ## LESSONS LEARNED
