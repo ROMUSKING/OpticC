@@ -1928,21 +1928,102 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
         let field_name = arena
             .get_string(NodeOffset(node.data & 0x7FFF_FFFF))
             .map(|s| s.to_string())?;
-        let root_name = self.find_member_access_root_var(arena, node)?;
-        let tag = self
-            .var_struct_tag
-            .get(&root_name)
-            .or_else(|| self.global_struct_tags.get(&root_name))
-            .cloned()
-            .or_else(|| {
-                let struct_type = self.pointer_struct_types.get(&root_name)?;
-                self.struct_tag_types
-                    .iter()
-                    .find_map(|(tag, ty)| if ty == struct_type { Some(tag.clone()) } else { None })
-            })?;
+        let base_struct_type = self.member_access_base_struct_type(arena, node)?;
+        let tag = self.struct_tag_for_type(base_struct_type)?;
         self.struct_field_fn_types
             .get(&tag)
             .and_then(|fields| fields.get(&field_name).copied())
+    }
+
+    fn struct_tag_for_type(&self, struct_type: StructType<'ctx>) -> Option<String> {
+        self.struct_tag_types.iter().find_map(|(tag, ty)| {
+            let same_layout = ty.count_fields() == struct_type.count_fields()
+                && (0..ty.count_fields()).all(|i| {
+                    ty.get_field_type_at_index(i) == struct_type.get_field_type_at_index(i)
+                });
+            if *ty == struct_type || same_layout {
+                Some(tag.clone())
+            } else {
+                None
+            }
+        })
+    }
+
+    fn member_access_result_type(
+        &self,
+        arena: &Arena,
+        node: &CAstNode,
+    ) -> Option<BasicTypeEnum<'ctx>> {
+        if node.kind != 69 {
+            return None;
+        }
+
+        let base_struct_type = self.member_access_base_struct_type(arena, node)?;
+        let field_name = arena
+            .get_string(NodeOffset(node.data & 0x7FFF_FFFF))
+            .map(|s| s.to_string())?;
+        let tag = self.struct_tag_for_type(base_struct_type)?;
+        let field_idx = self
+            .struct_tag_fields
+            .get(&tag)
+            .and_then(|fields| fields.iter().position(|f| f == &field_name))?;
+        base_struct_type.get_field_type_at_index(field_idx as u32)
+    }
+
+    fn member_access_base_struct_type(
+        &self,
+        arena: &Arena,
+        node: &CAstNode,
+    ) -> Option<StructType<'ctx>> {
+        let base_offset = node.first_child;
+        let is_arrow = node.data & 0x8000_0000 != 0;
+        let base_node = arena.get(base_offset)?;
+
+        if base_node.kind == 60 {
+            let base_name = arena.get_string(NodeOffset(base_node.data))?;
+            if is_arrow {
+                return self
+                    .pointer_struct_types
+                    .get(base_name)
+                    .copied()
+                    .or_else(|| {
+                        self.var_struct_tag
+                            .get(base_name)
+                            .or_else(|| self.global_struct_tags.get(base_name))
+                            .and_then(|tag| self.struct_tag_types.get(tag))
+                            .copied()
+                    });
+            }
+
+            if let Some(binding) = self
+                .variables
+                .get(base_name)
+                .copied()
+                .or_else(|| self.global_variables.get(base_name).copied())
+            {
+                if let BasicTypeEnum::StructType(struct_type) = binding.pointee_type {
+                    return Some(struct_type);
+                }
+            }
+
+            return self
+                .var_struct_tag
+                .get(base_name)
+                .or_else(|| self.global_struct_tags.get(base_name))
+                .and_then(|tag| self.struct_tag_types.get(tag))
+                .copied();
+        }
+
+        if base_node.kind == 69 {
+            return self
+                .member_access_result_type(arena, base_node)
+                .and_then(|ty| match ty {
+                    BasicTypeEnum::StructType(struct_type) => Some(struct_type),
+                    _ => None,
+                });
+        }
+
+        None
     }
 
     /// Extract (llvm_type, param_name) from a kind=24 parameter declaration node.
@@ -5746,7 +5827,26 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
             }
             5 => {
                 if operand.is_pointer_value() {
-                    let pointee_type = self.to_llvm_type(self.default_type());
+                    let pointee_type = arena
+                        .get(child_offset)
+                        .filter(|child| child.kind == 204)
+                        .and_then(|child| {
+                            arena
+                                .get_string(NodeOffset(child.data))
+                                .map(|s| (child, s.to_string()))
+                        })
+                        .and_then(|(child, name)| {
+                            if name == "__builtin_va_arg" {
+                                arena
+                                    .get(child.first_child)
+                                    .map(|arg1| arg1.next_sibling)
+                                    .filter(|off| *off != NodeOffset::NULL)
+                                    .and_then(|type_off| self.lower_builtin_pointee_type_ast(arena, type_off))
+                            } else {
+                                None
+                            }
+                        })
+                        .unwrap_or_else(|| self.to_llvm_type(self.default_type()));
                     self.builder
                         .build_load(pointee_type, operand.into_pointer_value(), "deref")
                         .map_err(|_| BackendError::InvalidNode)?
@@ -7075,6 +7175,70 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
         }
     }
 
+    fn lower_builtin_type_ast(&self, arena: &Arena, offset: NodeOffset) -> Option<BasicTypeEnum<'ctx>> {
+        let mut current = offset;
+        let mut base_type: Option<BasicTypeEnum<'ctx>> = None;
+
+        while current != NodeOffset::NULL {
+            let node = arena.get(current)?;
+            match node.kind {
+                7 | 8 | 9 => {
+                    return Some(self.context.ptr_type(AddressSpace::default()).as_basic_type_enum())
+                }
+                4 | 5 => return Some(self.specifier_to_llvm_type(arena, node)),
+                1 | 2 | 3 | 10 | 11 | 12 | 13 | 14 | 16 | 83 | 84 => {
+                    if base_type.is_none() {
+                        base_type = Some(self.node_kind_to_llvm_type(node.kind));
+                    }
+                }
+                74 | 201 => return self.lower_builtin_type_ast(arena, node.first_child),
+                60 => {
+                    if let Some(name) = arena.get_string(NodeOffset(node.data)) {
+                        if self.typedef_aliases.contains(name) {
+                            return Some(self.context.ptr_type(AddressSpace::default()).as_basic_type_enum());
+                        }
+                    }
+                }
+                _ => {
+                    if node.first_child != NodeOffset::NULL {
+                        if let Some(inner) = self.lower_builtin_type_ast(arena, node.first_child) {
+                            return Some(inner);
+                        }
+                    }
+                }
+            }
+            current = node.next_sibling;
+        }
+
+        base_type
+    }
+
+    fn lower_builtin_pointee_type_ast(
+        &self,
+        arena: &Arena,
+        offset: NodeOffset,
+    ) -> Option<BasicTypeEnum<'ctx>> {
+        let node = arena.get(offset)?;
+        match node.kind {
+            7 => {
+                if node.first_child != NodeOffset::NULL {
+                    self.lower_builtin_type_ast(arena, node.first_child)
+                } else {
+                    Some(self.context.i8_type().as_basic_type_enum())
+                }
+            }
+            8 | 9 => Some(self.context.ptr_type(AddressSpace::default()).as_basic_type_enum()),
+            74 | 201 => self.lower_builtin_pointee_type_ast(arena, node.first_child),
+            _ => {
+                if node.first_child != NodeOffset::NULL {
+                    self.lower_builtin_pointee_type_ast(arena, node.first_child)
+                } else {
+                    None
+                }
+            }
+        }
+    }
+
     fn lower_builtin_call(
         &mut self,
         arena: &Arena,
@@ -7199,10 +7363,83 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                     _ => self.context.i32_type().const_int(0, false).into(),
                 }))
             }
-            "__builtin_va_arg" => Ok(Some(self.context.i32_type().const_int(0, false).into())),
-            "__builtin_va_start" | "__builtin_va_end" | "__builtin_va_copy" => {
-                // va_start/va_end/va_copy: side-effect-only, return nothing meaningful
-                Ok(Some(self.context.i32_type().const_int(0, false).into()))
+            "__builtin_va_start" => {
+                let va_start_type = self
+                    .context
+                    .void_type()
+                    .fn_type(&[self.context.ptr_type(AddressSpace::default()).into()], false);
+                let va_start_fn = self
+                    .module
+                    .get_function("llvm.va_start")
+                    .unwrap_or_else(|| self.module.add_function("llvm.va_start", va_start_type, None));
+                if let Some(ap_off) = arg_offsets.first().copied() {
+                    if let Some((ap_ptr, _)) = self.lower_lvalue_ptr(arena, ap_off)? {
+                        let _ = self.builder.build_call(va_start_fn, &[ap_ptr.into()], "");
+                    }
+                }
+                Ok(Some(self.context.i32_type().const_zero().into()))
+            }
+            "__builtin_va_end" => {
+                let va_end_type = self
+                    .context
+                    .void_type()
+                    .fn_type(&[self.context.ptr_type(AddressSpace::default()).into()], false);
+                let va_end_fn = self
+                    .module
+                    .get_function("llvm.va_end")
+                    .unwrap_or_else(|| self.module.add_function("llvm.va_end", va_end_type, None));
+                if let Some(ap_off) = arg_offsets.first().copied() {
+                    if let Some((ap_ptr, _)) = self.lower_lvalue_ptr(arena, ap_off)? {
+                        let _ = self.builder.build_call(va_end_fn, &[ap_ptr.into()], "");
+                    }
+                }
+                Ok(Some(self.context.i32_type().const_zero().into()))
+            }
+            "__builtin_va_copy" => {
+                if let (Some(dst_off), Some(src_off)) =
+                    (arg_offsets.first().copied(), arg_offsets.get(1).copied())
+                {
+                    if let Some((dst_ptr, dst_type)) = self.lower_lvalue_ptr(arena, dst_off)? {
+                        if let Some(src_val) = self.lower_expr(arena, src_off)? {
+                            let to_store = if Self::types_compatible(dst_type, src_val) {
+                                src_val
+                            } else {
+                                self.context.ptr_type(AddressSpace::default()).const_null().into()
+                            };
+                            self.builder
+                                .build_store(dst_ptr, to_store)
+                                .map_err(|_| BackendError::InvalidNode)?;
+                        }
+                    }
+                }
+                Ok(Some(self.context.i32_type().const_zero().into()))
+            }
+            "__builtin_va_arg" => {
+                let Some(ap_off) = arg_offsets.first().copied() else {
+                    return Ok(Some(self.context.i32_type().const_zero().into()));
+                };
+                let Some(type_off) = arg_offsets.get(1).copied() else {
+                    return Ok(Some(self.context.i32_type().const_zero().into()));
+                };
+                let Some((ap_ptr, _)) = self.lower_lvalue_ptr(arena, ap_off)? else {
+                    return Ok(Some(self.context.i32_type().const_zero().into()));
+                };
+                let Some(va_type) = self.lower_builtin_type_ast(arena, type_off) else {
+                    return Ok(Some(self.context.i32_type().const_zero().into()));
+                };
+                let value = match va_type {
+                    BasicTypeEnum::ArrayType(ty) => self.builder.build_va_arg(ap_ptr, ty, "vaarg"),
+                    BasicTypeEnum::FloatType(ty) => self.builder.build_va_arg(ap_ptr, ty, "vaarg"),
+                    BasicTypeEnum::IntType(ty) => self.builder.build_va_arg(ap_ptr, ty, "vaarg"),
+                    BasicTypeEnum::PointerType(ty) => self.builder.build_va_arg(ap_ptr, ty, "vaarg"),
+                    BasicTypeEnum::StructType(ty) => self.builder.build_va_arg(ap_ptr, ty, "vaarg"),
+                    BasicTypeEnum::VectorType(ty) => self.builder.build_va_arg(ap_ptr, ty, "vaarg"),
+                    BasicTypeEnum::ScalableVectorType(ty) => {
+                        self.builder.build_va_arg(ap_ptr, ty, "vaarg")
+                    }
+                }
+                .map_err(|_| BackendError::InvalidNode)?;
+                Ok(Some(value))
             }
             "__builtin_types_compatible_p" => {
                 let lhs = arg_offsets

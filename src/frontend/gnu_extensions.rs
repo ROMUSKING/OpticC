@@ -421,6 +421,7 @@ impl Parser {
             loop {
                 let arg = if (matches!(builtin_kind, BuiltinKind::TypesCompatibleP) && arg_index < 2)
                     || (matches!(builtin_kind, BuiltinKind::OffsetOf) && arg_index == 0)
+                    || (matches!(builtin_kind, BuiltinKind::VaArg) && arg_index == 1)
                 {
                     if self.is_type_specifier()
                         || matches!(
