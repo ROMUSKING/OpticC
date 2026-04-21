@@ -1,11 +1,18 @@
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::io::{self, Read, Write};
+use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Instant;
 
 use crate::build::{BuildConfig, Builder, OutputType};
+
+#[cfg(feature = "network")]
+use std::io::{Read, Write};
+
+pub const DEFAULT_SQLITE_GITHUB_URL: &str =
+    "https://github.com/abramov7613/sqlite-amalgamation-mirror/archive/refs/heads/main.zip";
+pub const DEFAULT_SQLITE_GITHUB_VERSION: &str = "github-main";
 
 pub struct IntegrationTest {
     pub test_dir: PathBuf,
@@ -20,6 +27,7 @@ pub struct IntegrationResult {
     pub preprocess_success: bool,
     pub compile_success: bool,
     pub link_success: bool,
+    pub smoke_test_success: bool,
     pub library_created: bool,
     pub library_size_bytes: u64,
     pub compile_time_ms: u64,
@@ -34,6 +42,7 @@ impl IntegrationResult {
             preprocess_success: false,
             compile_success: false,
             link_success: false,
+            smoke_test_success: false,
             library_created: false,
             library_size_bytes: 0,
             compile_time_ms: 0,
@@ -47,7 +56,10 @@ impl IntegrationResult {
             && self.preprocess_success
             && self.compile_success
             && self.link_success
+            && self.smoke_test_success
             && self.library_created
+            && self.errors.is_empty()
+            && self.warnings.is_empty()
     }
 
     pub fn add_error(&mut self, msg: &str) {
@@ -71,6 +83,7 @@ pub struct IntegrationResultSerializable {
     pub preprocess_success: bool,
     pub compile_success: bool,
     pub link_success: bool,
+    pub smoke_test_success: bool,
     pub library_created: bool,
     pub library_size_bytes: u64,
     pub compile_time_ms: u64,
@@ -85,6 +98,7 @@ impl From<&IntegrationResult> for IntegrationResultSerializable {
             preprocess_success: result.preprocess_success,
             compile_success: result.compile_success,
             link_success: result.link_success,
+            smoke_test_success: result.smoke_test_success,
             library_created: result.library_created,
             library_size_bytes: result.library_size_bytes,
             compile_time_ms: result.compile_time_ms,
@@ -109,11 +123,14 @@ impl IntegrationTest {
         IntegrationTest::new(
             PathBuf::from("/tmp/optic_integration"),
             PathBuf::from("/tmp/optic_integration/output"),
-            "https://www.sqlite.org/2026/sqlite-amalgamation-3490200.zip".to_string(),
+            DEFAULT_SQLITE_GITHUB_URL.to_string(),
         )
     }
 
     fn extract_version_from_url(url: &str) -> String {
+        if url == DEFAULT_SQLITE_GITHUB_URL {
+            return DEFAULT_SQLITE_GITHUB_VERSION.to_string();
+        }
         if let Some(pos) = url.rfind("sqlite-amalgamation-") {
             let rest = &url[pos + "sqlite-amalgamation-".len()..];
             if let Some(end) = rest.find(".zip") {
@@ -151,33 +168,79 @@ impl IntegrationTest {
 
         #[cfg(feature = "network")]
         {
-            let response = ureq::get(&self.sqlite_url).call().map_err(|e| {
-                format!(
-                    "Failed to download SQLite: {}. This may be an environment limitation.",
-                    e
-                )
-            })?;
-
-            let mut file = fs::File::create(&zip_path)
-                .map_err(|e| format!("Failed to create zip file: {}", e))?;
-
-            let mut bytes = Vec::new();
-            response
-                .into_reader()
-                .read_to_end(&mut bytes)
-                .map_err(|e| format!("Failed to read response: {}", e))?;
-
-            file.write_all(&bytes)
-                .map_err(|e| format!("Failed to write zip file: {}", e))?;
-
-            return Ok(zip_path);
+            match self.download_sqlite_with_network_feature(&zip_path) {
+                Ok(path) => return Ok(path),
+                Err(network_error) => {
+                    return self
+                        .download_sqlite_with_system_tool(&zip_path)
+                        .map_err(|system_error| {
+                            format!(
+                                "Failed to download SQLite with network feature ({}) or system downloader ({}).",
+                                network_error, system_error
+                            )
+                        });
+                }
+            }
         }
 
         #[cfg(not(feature = "network"))]
         {
-            let _ = zip_path;
-            return Err("Network downloads require the 'network' feature. This is an environment limitation.".to_string());
+            return self.download_sqlite_with_system_tool(&zip_path);
         }
+    }
+
+    #[cfg(feature = "network")]
+    fn download_sqlite_with_network_feature(&self, zip_path: &Path) -> Result<PathBuf, String> {
+        let response = ureq::get(&self.sqlite_url).call().map_err(|e| {
+            format!(
+                "Failed to download SQLite: {}. This may be an environment limitation.",
+                e
+            )
+        })?;
+
+        let mut file = fs::File::create(zip_path)
+            .map_err(|e| format!("Failed to create zip file: {}", e))?;
+
+        let mut bytes = Vec::new();
+        response
+            .into_reader()
+            .read_to_end(&mut bytes)
+            .map_err(|e| format!("Failed to read response: {}", e))?;
+
+        file.write_all(&bytes)
+            .map_err(|e| format!("Failed to write zip file: {}", e))?;
+
+        Ok(zip_path.to_path_buf())
+    }
+
+    fn download_sqlite_with_system_tool(&self, zip_path: &Path) -> Result<PathBuf, String> {
+        let curl = Command::new("curl")
+            .arg("-L")
+            .arg("--fail")
+            .arg("--output")
+            .arg(zip_path)
+            .arg(&self.sqlite_url)
+            .output();
+
+        if let Ok(output) = curl {
+            if output.status.success() {
+                return Ok(zip_path.to_path_buf());
+            }
+        }
+
+        let wget = Command::new("wget")
+            .arg("-O")
+            .arg(zip_path)
+            .arg(&self.sqlite_url)
+            .output();
+
+        if let Ok(output) = wget {
+            if output.status.success() {
+                return Ok(zip_path.to_path_buf());
+            }
+        }
+
+        Err("No working downloader found; tried curl and wget".to_string())
     }
 
     pub fn download_sqlite_mock(&self) -> Result<PathBuf, String> {
@@ -369,37 +432,7 @@ const char *sqlite3_sourceid(void) {
                     Err("Object file not created after successful build".to_string())
                 }
             }
-            Err(e) => {
-                let _ = self.compile_sqlite_fallback(source, &obj_path);
-                if obj_path.exists() {
-                    Ok(obj_path)
-                } else {
-                    Err(format!("Compilation failed: {}", e))
-                }
-            }
-        }
-    }
-
-    fn compile_sqlite_fallback(&self, source: &Path, obj_path: &Path) -> Result<(), String> {
-        let cc = self.find_tool(&["gcc", "clang", "cc"]);
-        match cc {
-            Ok(compiler) => {
-                let output = Command::new(&compiler)
-                    .arg("-fPIC")
-                    .arg("-c")
-                    .arg("-o")
-                    .arg(obj_path)
-                    .arg(source)
-                    .output()
-                    .map_err(|e| format!("Failed to run compiler: {}", e))?;
-
-                if !output.status.success() {
-                    let stderr = String::from_utf8_lossy(&output.stderr);
-                    return Err(format!("Fallback compilation failed: {}", stderr));
-                }
-                Ok(())
-            }
-            Err(_) => Err("No compiler available for fallback compilation".to_string()),
+            Err(e) => Err(format!("Compilation failed: {}", e)),
         }
     }
 
@@ -431,10 +464,7 @@ const char *sqlite3_sourceid(void) {
                     return Err(format!("Linking failed: {}", stderr));
                 }
             }
-            Err(_) => {
-                fs::copy(obj_path, &lib_path)
-                    .map_err(|e| format!("Failed to create mock library: {}", e))?;
-            }
+            Err(e) => return Err(e),
         }
 
         Ok(lib_path)
@@ -474,14 +504,7 @@ const char *sqlite3_sourceid(void) {
             }
             Err(e) => {
                 result.add_error(&format!("Download failed: {}", e));
-                result.add_warning("Attempting to use mock SQLite for testing");
-                match self.download_sqlite_mock() {
-                    Ok(path) => path,
-                    Err(e) => {
-                        result.add_error(&format!("Mock download also failed: {}", e));
-                        return result;
-                    }
-                }
+                return result;
             }
         };
 
@@ -489,13 +512,7 @@ const char *sqlite3_sourceid(void) {
             Ok(path) => path,
             Err(e) => {
                 result.add_error(&format!("Extraction failed: {}", e));
-                match self.extract_sqlite_mock() {
-                    Ok(path) => path,
-                    Err(e) => {
-                        result.add_error(&format!("Mock extraction also failed: {}", e));
-                        return result;
-                    }
-                }
+                return result;
             }
         };
 
@@ -506,13 +523,7 @@ const char *sqlite3_sourceid(void) {
             }
             Err(e) => {
                 result.add_error(&format!("Preprocessing failed: {}", e));
-                match self.preprocess_sqlite_mock(&sqlite_c) {
-                    Ok(path) => path,
-                    Err(e) => {
-                        result.add_error(&format!("Mock preprocessing also failed: {}", e));
-                        return result;
-                    }
-                }
+                return result;
             }
         };
 
@@ -524,13 +535,7 @@ const char *sqlite3_sourceid(void) {
             }
             Err(e) => {
                 result.add_error(&format!("Compilation failed: {}", e));
-                match self.compile_sqlite_mock(&preprocessed) {
-                    Ok(path) => path,
-                    Err(e) => {
-                        result.add_error(&format!("Mock compilation also failed: {}", e));
-                        return result;
-                    }
-                }
+                return result;
             }
         };
         result.compile_time_ms = start.elapsed().as_millis() as u64;
@@ -542,13 +547,7 @@ const char *sqlite3_sourceid(void) {
             }
             Err(e) => {
                 result.add_error(&format!("Linking failed: {}", e));
-                match self.link_sqlite_mock(&obj_path) {
-                    Ok(path) => path,
-                    Err(e) => {
-                        result.add_error(&format!("Mock linking also failed: {}", e));
-                        return result;
-                    }
-                }
+                return result;
             }
         };
 
@@ -559,7 +558,78 @@ const char *sqlite3_sourceid(void) {
             }
         }
 
+        match self.run_sqlite_smoke_test(&lib_path) {
+            Ok(()) => result.smoke_test_success = true,
+            Err(e) => result.add_error(&format!("Smoke test failed: {}", e)),
+        }
+
         result
+    }
+
+    fn run_sqlite_smoke_test(&self, lib_path: &Path) -> Result<(), String> {
+        let compiler = self.find_tool(&["clang", "gcc", "cc"])?;
+        fs::create_dir_all(&self.output_dir)
+            .map_err(|e| format!("Failed to create output directory: {}", e))?;
+
+        let smoke_source = self.output_dir.join("sqlite_smoke.c");
+        let smoke_binary = self.output_dir.join("sqlite_smoke");
+        let smoke_program = r#"typedef struct sqlite3 sqlite3;
+extern int sqlite3_open(const char *filename, sqlite3 **pp_db);
+extern int sqlite3_exec(sqlite3 *db, const char *sql, void *callback, void *arg, char **errmsg);
+extern int sqlite3_close(sqlite3 *db);
+
+int main(void) {
+    sqlite3 *db = 0;
+    if (sqlite3_open(":memory:", &db) != 0 || db == 0) {
+        return 1;
+    }
+    if (sqlite3_exec(db, "CREATE TABLE t(x);", 0, 0, 0) != 0) {
+        return 2;
+    }
+    if (sqlite3_close(db) != 0) {
+        return 3;
+    }
+    return 0;
+}
+"#;
+        fs::write(&smoke_source, smoke_program)
+            .map_err(|e| format!("Failed to write smoke source: {}", e))?;
+
+        let output = Command::new(&compiler)
+            .arg(&smoke_source)
+            .arg("-L")
+            .arg(&self.output_dir)
+            .arg(format!("-Wl,-rpath,{}", self.output_dir.display()))
+            .arg("-lsqlite3")
+            .arg("-o")
+            .arg(&smoke_binary)
+            .output()
+            .map_err(|e| format!("Failed to build smoke test: {}", e))?;
+
+        if !output.status.success() {
+            return Err(format!(
+                "smoke build failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            ));
+        }
+
+        let output = Command::new(&smoke_binary)
+            .env("LD_LIBRARY_PATH", &self.output_dir)
+            .output()
+            .map_err(|e| format!("Failed to run smoke test: {}", e))?;
+
+        if !output.status.success() {
+            return Err(format!(
+                "smoke binary exited with status {}",
+                output.status
+            ));
+        }
+
+        if !lib_path.exists() {
+            return Err(format!("library not found: {}", lib_path.display()));
+        }
+
+        Ok(())
     }
 
     pub fn generate_report(&self, result: &IntegrationResult) -> String {
@@ -599,6 +669,10 @@ const char *sqlite3_sourceid(void) {
         report.push_str(&format!(
             "- Link: {}\n",
             self.bool_status(result.link_success)
+        ));
+        report.push_str(&format!(
+            "- Smoke Test: {}\n",
+            self.bool_status(result.smoke_test_success)
         ));
         report.push_str(&format!(
             "- Library Created: {}\n",
@@ -656,15 +730,12 @@ mod tests {
         let test = IntegrationTest::new(
             PathBuf::from("/tmp/test"),
             PathBuf::from("/tmp/test/output"),
-            "https://www.sqlite.org/2026/sqlite-amalgamation-3490200.zip".to_string(),
+            DEFAULT_SQLITE_GITHUB_URL.to_string(),
         );
         assert_eq!(test.test_dir, PathBuf::from("/tmp/test"));
         assert_eq!(test.output_dir, PathBuf::from("/tmp/test/output"));
-        assert_eq!(
-            test.sqlite_url,
-            "https://www.sqlite.org/2026/sqlite-amalgamation-3490200.zip"
-        );
-        assert_eq!(test.sqlite_version, "3490200");
+        assert_eq!(test.sqlite_url, DEFAULT_SQLITE_GITHUB_URL);
+        assert_eq!(test.sqlite_version, DEFAULT_SQLITE_GITHUB_VERSION);
     }
 
     #[test]
@@ -685,6 +756,7 @@ mod tests {
         assert!(!result.preprocess_success);
         assert!(!result.compile_success);
         assert!(!result.link_success);
+        assert!(!result.smoke_test_success);
         assert!(!result.library_created);
         assert_eq!(result.library_size_bytes, 0);
         assert_eq!(result.compile_time_ms, 0);
@@ -701,6 +773,7 @@ mod tests {
         result.preprocess_success = true;
         result.compile_success = true;
         result.link_success = true;
+        result.smoke_test_success = true;
         result.library_created = true;
         assert!(result.all_passed());
     }
@@ -761,7 +834,7 @@ mod tests {
         let test = IntegrationTest::new(
             PathBuf::from("/tmp/test_integration"),
             PathBuf::from("/tmp/test_integration/output"),
-            "https://www.sqlite.org/2026/sqlite-amalgamation-3490200.zip".to_string(),
+            DEFAULT_SQLITE_GITHUB_URL.to_string(),
         );
         assert!(test.test_dir.is_absolute());
         assert!(test.output_dir.is_absolute());
@@ -790,6 +863,7 @@ mod tests {
         result.preprocess_success = true;
         result.compile_success = true;
         result.link_success = true;
+        result.smoke_test_success = true;
         result.library_created = true;
         result.library_size_bytes = 1234567;
         result.compile_time_ms = 5000;
@@ -804,6 +878,7 @@ mod tests {
         assert!(report.contains("Preprocess: SUCCESS"));
         assert!(report.contains("Compile: SUCCESS"));
         assert!(report.contains("Link: SUCCESS"));
+        assert!(report.contains("Smoke Test: SUCCESS"));
         assert!(report.contains("Library Created: SUCCESS"));
         assert!(report.contains("1234567"));
         assert!(report.contains("5000"));
@@ -830,6 +905,7 @@ mod tests {
         let mut result = IntegrationResult::new();
         result.download_success = true;
         result.compile_success = true;
+        result.smoke_test_success = true;
         result.library_size_bytes = 1024;
         result.compile_time_ms = 100;
         result.add_error("test error");
@@ -846,6 +922,7 @@ mod tests {
         let deserialized: IntegrationResultSerializable = serde_json::from_str(&json).unwrap();
         assert_eq!(deserialized.download_success, true);
         assert_eq!(deserialized.compile_success, true);
+        assert_eq!(deserialized.smoke_test_success, true);
         assert_eq!(deserialized.library_size_bytes, 1024);
         assert_eq!(deserialized.compile_time_ms, 100);
         assert_eq!(deserialized.errors.len(), 1);
@@ -860,7 +937,7 @@ mod tests {
         let test = IntegrationTest::new(
             temp_dir.clone(),
             output_dir.clone(),
-            "https://www.sqlite.org/2026/sqlite-amalgamation-3490200.zip".to_string(),
+            DEFAULT_SQLITE_GITHUB_URL.to_string(),
         );
 
         let result = test.download_sqlite_mock();
@@ -884,7 +961,7 @@ mod tests {
         let test = IntegrationTest::new(
             temp_dir.clone(),
             output_dir.clone(),
-            "https://www.sqlite.org/2026/sqlite-amalgamation-3490200.zip".to_string(),
+            DEFAULT_SQLITE_GITHUB_URL.to_string(),
         );
 
         let result = test.preprocess_sqlite_mock(&source);
@@ -908,7 +985,7 @@ mod tests {
         let test = IntegrationTest::new(
             temp_dir.clone(),
             output_dir.clone(),
-            "https://www.sqlite.org/2026/sqlite-amalgamation-3490200.zip".to_string(),
+            DEFAULT_SQLITE_GITHUB_URL.to_string(),
         );
 
         let result = test.compile_sqlite_mock(&source);
@@ -932,7 +1009,7 @@ mod tests {
         let test = IntegrationTest::new(
             temp_dir.clone(),
             output_dir.clone(),
-            "https://www.sqlite.org/2026/sqlite-amalgamation-3490200.zip".to_string(),
+            DEFAULT_SQLITE_GITHUB_URL.to_string(),
         );
 
         let result = test.link_sqlite_mock(&obj);
@@ -954,7 +1031,7 @@ mod tests {
         let test = IntegrationTest::new(
             temp_dir.clone(),
             output_dir.clone(),
-            "https://www.sqlite.org/2026/sqlite-amalgamation-3490200.zip".to_string(),
+            DEFAULT_SQLITE_GITHUB_URL.to_string(),
         );
 
         let result = test.extract_sqlite_mock();
@@ -971,28 +1048,55 @@ mod tests {
     }
 
     #[test]
-    fn test_full_pipeline_mock() {
+    fn test_full_pipeline_local_fixture() {
         let temp_dir =
             std::env::temp_dir().join(format!("optic_integration_test_fp_{}", std::process::id()));
         let output_dir = temp_dir.join("output");
+        fs::create_dir_all(&output_dir).unwrap();
+
+        let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/sqlite_smoke/sqlite3.c");
 
         let test = IntegrationTest::new(
             temp_dir.clone(),
             output_dir.clone(),
-            "https://www.sqlite.org/2026/sqlite-amalgamation-3490200.zip".to_string(),
+            fixture.to_string_lossy().to_string(),
         );
 
         let result = test.run();
 
-        assert!(result.download_success || !result.errors.is_empty());
-        assert!(result.preprocess_success || !result.errors.is_empty());
-        assert!(result.compile_success || !result.errors.is_empty());
-        assert!(result.link_success || !result.errors.is_empty());
+        assert!(result.all_passed(), "errors: {:?}", result.errors);
+        assert!(result.download_success);
+        assert!(result.preprocess_success);
+        assert!(result.compile_success);
+        assert!(result.link_success);
+        assert!(result.smoke_test_success);
 
         let report = test.generate_report(&result);
         assert!(report.contains("OpticC SQLite Integration Test Report"));
+        assert!(report.contains("Overall Status: PASS"));
 
         let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_run_fails_without_fallbacks() {
+        let temp_dir =
+            std::env::temp_dir().join(format!("optic_integration_test_fail_{}", std::process::id()));
+        let output_dir = temp_dir.join("output");
+
+        let test = IntegrationTest::new(
+            temp_dir.clone(),
+            output_dir,
+            "/definitely/missing/sqlite3.c".to_string(),
+        );
+
+        let result = test.run();
+        assert!(!result.all_passed());
+        assert!(!result.download_success);
+        assert!(!result.smoke_test_success);
+        assert!(!result.errors.is_empty());
+        assert!(result.warnings.is_empty());
     }
 
     #[test]

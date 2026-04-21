@@ -71,6 +71,8 @@ OpticC already includes a substantial preprocessor implementation. The current c
 - **Parameter placeholder handling**: Improved macro expansion with proper parameter substitution.
 - **GNU/compiler predefined macros**: Added `__GNUC_PATCHLEVEL__`, `__STDC_HOSTED__`, and common `__SIZEOF_*__` macros so kernel-style `#if` gating can take the expected branches.
 - **`#if` numeric macro evaluation**: Integer macros with suffixes such as `201112L` now evaluate correctly inside conditional expressions instead of falling back to truthy/non-truthy handling.
+- **Strict missing-include baseline restored**: missing includes now return errors by default again, with an explicit `set_allow_missing_includes(bool)` escape hatch for lenient kernel-style experiments.
+- **Nested relative include resolution**: included files now recurse using their resolved full path, so headers like `asm/unwind_hints.h` can find sibling quoted includes such as `"orc_types.h"`.
 
 ## KNOWN LIMITATIONS (SQLite Testing)
 - **Complex macro patterns**: sqlite3.c uses advanced macro patterns that the current preprocessor doesn't handle:
@@ -78,7 +80,7 @@ OpticC already includes a substantial preprocessor implementation. The current c
   - Variadic macros with complex argument patterns
   - Macros that expand to partial syntax (e.g., `#define BEGIN {` without matching `}`)
   - Nested macro definitions with conditional compilation
-- **va_list / __builtin_va_list typedef**: The preprocessor/parser pipeline does NOT recognize `va_list` or `__builtin_va_list` as a valid type. Functions with `va_list` parameters (e.g., `char *sqlite3VMPrintf(sqlite3 *db, const char *zFormat, va_list ap)`) fail to compile because param extraction can't resolve the type. **FIX NEEDED**: Add `va_list` and `__builtin_va_list` to the typedef set (they're typedefed in the preprocessed output as `typedef __builtin_va_list __gnuc_va_list; typedef __gnuc_va_list va_list;`).
+- **va_list / __builtin_va_list typedef**: No longer a preprocessor/parser blocker; the frontend now recognizes builtin/stdarg `va_list` forms. Remaining SQLite work is backend/runtime validation on real amalgamation inputs.
 - **LLVM toolchain caveat**: the repository now targets the LLVM 18 C API through `inkwell`/`llvm-sys`; keep Cargo pointed at `/usr/lib/llvm-18` via `LLVM_SYS_181_PREFIX` when validating.
 - **Next step**: Enhance preprocessor to handle attribute-style macros and complex variadic patterns for SQLite compilation.
 

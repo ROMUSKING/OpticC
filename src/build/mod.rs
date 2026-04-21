@@ -19,7 +19,7 @@ use crate::types::TypeSystem;
 
 const LARGE_COMPILER_STACK_SIZE: usize = 64 * 1024 * 1024;
 const LARGE_STACK_INPUT_THRESHOLD_BYTES: u64 = 512 * 1024;
-const CACHE_SCHEMA_VERSION: &str = "v2-kernel-object-fixes";
+const CACHE_SCHEMA_VERSION: &str = "v4-sqlite-smoke-fixes";
 
 static COMPILE_INVOCATION_ID: AtomicU64 = AtomicU64::new(1);
 

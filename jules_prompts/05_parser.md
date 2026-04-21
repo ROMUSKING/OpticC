@@ -63,6 +63,8 @@ ASM: 207=asm_stmt, 208=asm_operand_out, 209=asm_operand_in, 210=asm_clobber, 211
 - **Member access field name encoding**: kind=69 nodes now store field name as string offset in `data & 0x7FFF_FFFF`, with is_arrow in bit 31. Previously used `next_sibling` for the field name, which was clobbered by call argument linking.
 - **Hex/octal/suffix integers**: `parse_primary_expression` now handles `0x`/`0X` hex, leading-zero octal, and `UL`/`ULL` suffixes. Previously, `token.text.parse::<u32>()` returned 0 for hex literals.
 - **`__builtin_va_list` in type specifiers**: Added to the known type keywords in `is_type_specifier`. Prevents typedef resolution failure for `va_list` parameters.
+- **Builtin/stdarg va_list lowering**: `__builtin_va_list`, `__gnuc_va_list`, and `va_list` now parse as a dedicated pointer-like type-specifier kind so typedef chains preserve pointer semantics in function signatures.
+- **Thread-local storage class parsing**: `_Thread_local` and `__thread` are now recognized as storage-class specifiers in both lexer and parser flows.
 
 ### RECENTLY FIXED (Session 2026-04-20)
 - **Inline asm in function bodies**: `asm volatile("nop");` now dispatches to `parse_asm_stmt()` from `parse_statement()` (was previously unhandled, falling through to expression statement).
@@ -80,5 +82,5 @@ ASM: 207=asm_stmt, 208=asm_operand_out, 209=asm_operand_in, 210=asm_clobber, 211
 ## SQLITE COMPILATION BLOCKERS (updated 2026-04-21)
 - **Typedef types in struct members** (CRITICAL): `typedef unsigned char u8;` followed by `struct S { u8 x; };` — the parser maps `u8` to kind=2 (i32) losing the typedef resolution. All typedef'd primitive types (u8, u16, u32, u64, sqlite3_int64, etc.) appear as i32 in struct LLVM types. This causes wrong layouts and wrong GEP byte offsets. Fix: track `typedef_primitive_kinds: HashMap<String, u16>` during parse, resolve at type specifier emission.
 - **Function pointer declarator params**: When a function has a parameter like `void(*xDel)(void*)`, the parser creates a kind=9 (function declarator) nested inside a kind=7 (pointer declarator). The backend's `extract_param_type_name` only detects kind=7 (pointer) but not nested kind=9 function pointers. Either the parser should normalize these to just `kind=7` (ptr type), or the backend needs to handle nested declarators.
-- **va_list as typedef**: The preprocessed source has `typedef __builtin_va_list va_list;`. The parser's `typedef_names` set should include `va_list` and `__builtin_va_list` so parameters with these types are recognized during parsing.
+- **va_list as typedef**: Fixed for parser recognition and pointer-like lowering. Remaining SQLite work is backend/runtime validation, not parser acceptance.
 - **Function pointer call syntax**: `obj.field(args)` and `ptr->field(args)` where `field` is a function pointer. The parser currently creates a kind=67 (call) node with `first_child.data` pointing to the field name string. This makes the backend treat it as a direct call to `@field`. Instead, the first_child should be a kind=69 (member_access) node so the backend can lower it as an indirect call through the loaded field.

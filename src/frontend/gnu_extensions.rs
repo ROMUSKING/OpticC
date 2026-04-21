@@ -421,6 +421,7 @@ impl Parser {
             loop {
                 let arg = if (matches!(builtin_kind, BuiltinKind::TypesCompatibleP) && arg_index < 2)
                     || (matches!(builtin_kind, BuiltinKind::OffsetOf) && arg_index == 0)
+                    || (matches!(builtin_kind, BuiltinKind::VaArg) && arg_index == 1)
                 {
                     if self.is_type_specifier()
                         || matches!(
@@ -437,7 +438,37 @@ impl Parser {
                                 | "_Atomic"
                         )
                     {
-                        self.parse_declaration_specifiers()?
+                        let spec = self.parse_declaration_specifiers()?;
+                        // Parse abstract pointer declarators (e.g. `int*`, `struct Foo**`).
+                        // `parse_declaration_specifiers` only consumes the base type; the `*`
+                        // tokens that follow are part of the type name and must also be consumed
+                        // here. Without this, `expect(")")` would fail on the remaining `*`,
+                        // causing the containing statement to be silently dropped.
+                        let mut depth = 0u32;
+                        while self.current_token().kind == TokenKind::Punctuator
+                            && self.current_token().text == "*"
+                        {
+                            self.advance();
+                            depth += 1;
+                            // Skip cv-qualifiers that may appear after `*` (e.g. `int * const`)
+                            while matches!(
+                                self.current_token().text.as_str(),
+                                "const" | "volatile" | "restrict"
+                                    | "__const" | "__const__"
+                                    | "__restrict" | "__restrict__"
+                                    | "__volatile" | "__volatile__"
+                                    | "_Atomic"
+                            ) {
+                                self.advance();
+                            }
+                        }
+                        if depth > 0 {
+                            // Wrap base type in a pointer-declarator node (kind=7, data=depth).
+                            // Backend `lower_builtin_type_ast` recognises kind=7 as ptr_type.
+                            self.alloc_node(7, depth, NodeOffset::NULL, spec, NodeOffset::NULL)
+                        } else {
+                            spec
+                        }
                     } else {
                         self.parse_assignment_expression()?
                     }

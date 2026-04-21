@@ -520,6 +520,8 @@ impl Parser {
                 | "__signed__"
                 | "__signed"
                 | "__builtin_va_list"
+                | "__gnuc_va_list"
+                | "va_list"
                 | "__int128"
                 | "__int128_t"
                 | "__uint128_t"
@@ -555,10 +557,10 @@ impl Parser {
 
     pub fn is_storage_class_specifier(&self) -> bool {
         let token = self.current_token();
-        token.kind == TokenKind::Keyword
+        (token.kind == TokenKind::Keyword || token.kind == TokenKind::Identifier)
             && matches!(
                 token.text.as_str(),
-                "typedef" | "extern" | "static" | "auto" | "register"
+                "typedef" | "extern" | "static" | "auto" | "register" | "_Thread_local" | "__thread"
             )
     }
 
@@ -821,6 +823,7 @@ impl Parser {
             "static" => 103,
             "auto" => 104,
             "register" => 105,
+            "_Thread_local" | "__thread" => 106,
             _ => 101,
         };
 
@@ -853,7 +856,8 @@ impl Parser {
             "enum" => return self.parse_enum_specifier(),
             "_Bool" => 14,
             "_Complex" => 15,
-            "__builtin_va_list" | "__int128" | "__int128_t" | "__uint128_t" => 2,
+            "__builtin_va_list" | "__gnuc_va_list" | "va_list" => 16,
+            "__int128" | "__int128_t" | "__uint128_t" => 2,
             "typeof" | "__typeof__" => {
                 return self.parse_typeof_expr();
             }
@@ -1187,6 +1191,9 @@ impl Parser {
 
         while self.skip_punctuator("*") {
             pointer_depth += 1;
+            while self.is_type_qualifier() {
+                let _ = self.parse_type_qualifier()?;
+            }
         }
 
         let direct_decl = self.parse_direct_declarator()?;
@@ -1347,7 +1354,7 @@ impl Parser {
 
     /// Walk a declarator AST node to find the identifier name (kind=60).
     /// Walk a specifier chain and compute the canonical (kind, struct_tag_data) for typedef recording.
-    /// Handles combinations like: unsigned+char→(1,0), unsigned+short→(10,0), unsigned+int→(13,0),
+        /// Handles combinations like: unsigned+char→(3,0), unsigned+short→(10,0), unsigned+int→(13,0),
     /// unsigned+long+long→(11,0), long+long→(11,0), long→(11,0), struct tag→(4,tag_off), etc.
     fn resolve_specifier_chain_kind(&self, first_spec: NodeOffset) -> (u16, u32) {
         let mut has_unsigned = false;
@@ -1374,9 +1381,10 @@ impl Parser {
                 14 => base_kind = 14,                // _Bool
                 4  => { base_kind = 4; struct_data = node.data; is_struct_or_union = true; }
                 5  => { base_kind = 5; struct_data = node.data; is_struct_or_union = true; }
+                16 => base_kind = 16,                // va_list / __builtin_va_list
                 7  => is_pointer = true,             // pointer declarator
                 // storage class / qualifiers / typedef keyword: skip
-                103 | 101..=105 | 200 | 6 => {}
+                101..=106 | 200 | 6 => {}
                 _ => {
                     // Could be a typedef-name node (kind=2 node whose string data is a typedef name)
                     // or just an unrecognised specifier node. Try to look up in typedef_kinds.
@@ -1405,7 +1413,7 @@ impl Parser {
             11 // long long → i64
         } else if has_unsigned {
             match base_kind {
-                3  => 1,  // unsigned char → i8
+                3  => 3,  // unsigned char → i8
                 10 => 10, // unsigned short → i16 (keep kind=10, backend maps to i16)
                 11 => 11, // unsigned long → i64
                 _  => 13, // unsigned int → i32
@@ -1598,6 +1606,13 @@ impl Parser {
                     self.parse_initializer()?
                 };
                 self.link_siblings(&mut first_elem, &mut last_elem, elem);
+                // If `elem` is itself a chain (nested brace init), walk to its end
+                // so the next link_siblings call appends after the full chain, not after
+                // just the first element.
+                while let Some(n) = self.arena.get(last_elem) {
+                    if n.next_sibling == NodeOffset::NULL { break; }
+                    last_elem = n.next_sibling;
+                }
 
                 if self.skip_punctuator("}") {
                     break;
@@ -2156,7 +2171,22 @@ impl Parser {
                         ));
                     }
                     let expr = self.parse_cast_expression()?;
-                    return Ok(self.alloc_node(70, 0, NodeOffset::NULL, cast_type, expr));
+                    let mut tail = cast_type;
+                    loop {
+                        let ns = self
+                            .arena
+                            .get(tail)
+                            .map(|n| n.next_sibling)
+                            .unwrap_or(NodeOffset::NULL);
+                        if ns == NodeOffset::NULL {
+                            break;
+                        }
+                        tail = ns;
+                    }
+                    if let Some(node) = self.arena.get_mut(tail) {
+                        node.next_sibling = expr;
+                    }
+                    return Ok(self.alloc_node(70, 0, NodeOffset::NULL, cast_type, NodeOffset::NULL));
                 }
             }
 
