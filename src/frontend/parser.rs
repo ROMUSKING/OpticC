@@ -1191,6 +1191,9 @@ impl Parser {
 
         while self.skip_punctuator("*") {
             pointer_depth += 1;
+            while self.is_type_qualifier() {
+                let _ = self.parse_type_qualifier()?;
+            }
         }
 
         let direct_decl = self.parse_direct_declarator()?;
@@ -1351,7 +1354,7 @@ impl Parser {
 
     /// Walk a declarator AST node to find the identifier name (kind=60).
     /// Walk a specifier chain and compute the canonical (kind, struct_tag_data) for typedef recording.
-    /// Handles combinations like: unsigned+char→(1,0), unsigned+short→(10,0), unsigned+int→(13,0),
+        /// Handles combinations like: unsigned+char→(3,0), unsigned+short→(10,0), unsigned+int→(13,0),
     /// unsigned+long+long→(11,0), long+long→(11,0), long→(11,0), struct tag→(4,tag_off), etc.
     fn resolve_specifier_chain_kind(&self, first_spec: NodeOffset) -> (u16, u32) {
         let mut has_unsigned = false;
@@ -1410,7 +1413,7 @@ impl Parser {
             11 // long long → i64
         } else if has_unsigned {
             match base_kind {
-                3  => 1,  // unsigned char → i8
+                3  => 3,  // unsigned char → i8
                 10 => 10, // unsigned short → i16 (keep kind=10, backend maps to i16)
                 11 => 11, // unsigned long → i64
                 _  => 13, // unsigned int → i32
@@ -2161,7 +2164,22 @@ impl Parser {
                         ));
                     }
                     let expr = self.parse_cast_expression()?;
-                    return Ok(self.alloc_node(70, 0, NodeOffset::NULL, cast_type, expr));
+                    let mut tail = cast_type;
+                    loop {
+                        let ns = self
+                            .arena
+                            .get(tail)
+                            .map(|n| n.next_sibling)
+                            .unwrap_or(NodeOffset::NULL);
+                        if ns == NodeOffset::NULL {
+                            break;
+                        }
+                        tail = ns;
+                    }
+                    if let Some(node) = self.arena.get_mut(tail) {
+                        node.next_sibling = expr;
+                    }
+                    return Ok(self.alloc_node(70, 0, NodeOffset::NULL, cast_type, NodeOffset::NULL));
                 }
             }
 
