@@ -1676,7 +1676,10 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                 101 => { /* typedef */ spec_offset = sn.next_sibling; }
                 102 => { /* extern */ spec_offset = sn.next_sibling; }
                 103 => { is_static_local = true; spec_offset = sn.next_sibling; }
-                90 | 91 | 92 | 104 | 105 | 106 => { /* const/restrict/volatile/auto/register/thread_local */ spec_offset = sn.next_sibling; }
+                90 | 91 | 92 | 104 | 105 | 106 => {
+                    /* const/restrict/volatile/auto/register/_Thread_local(kind=106) */
+                    spec_offset = sn.next_sibling;
+                }
                 _ => break,
             }
         }
