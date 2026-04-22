@@ -155,7 +155,10 @@ impl IntegrationTest {
             if path.exists() {
                 return Ok(path);
             }
-            return Err(format!("Local SQLite path does not exist: {}", path.display()));
+            return Err(format!(
+                "Local SQLite path does not exist: {}",
+                path.display()
+            ));
         }
 
         let direct_path = PathBuf::from(&self.sqlite_url);
@@ -198,8 +201,8 @@ impl IntegrationTest {
             )
         })?;
 
-        let mut file = fs::File::create(zip_path)
-            .map_err(|e| format!("Failed to create zip file: {}", e))?;
+        let mut file =
+            fs::File::create(zip_path).map_err(|e| format!("Failed to create zip file: {}", e))?;
 
         let mut bytes = Vec::new();
         response
@@ -620,10 +623,7 @@ int main(void) {
             .map_err(|e| format!("Failed to run smoke test: {}", e))?;
 
         if !output.status.success() {
-            return Err(format!(
-                "smoke binary exited with status {}",
-                output.status
-            ));
+            return Err(format!("smoke binary exited with status {}", output.status));
         }
 
         if !lib_path.exists() {
@@ -1055,8 +1055,8 @@ mod tests {
         let output_dir = temp_dir.join("output");
         fs::create_dir_all(&output_dir).unwrap();
 
-        let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/fixtures/sqlite_smoke/sqlite3.c");
+        let fixture =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/sqlite_smoke/sqlite3.c");
 
         let test = IntegrationTest::new(
             temp_dir.clone(),
@@ -1082,8 +1082,10 @@ mod tests {
 
     #[test]
     fn test_run_fails_without_fallbacks() {
-        let temp_dir =
-            std::env::temp_dir().join(format!("optic_integration_test_fail_{}", std::process::id()));
+        let temp_dir = std::env::temp_dir().join(format!(
+            "optic_integration_test_fail_{}",
+            std::process::id()
+        ));
         let output_dir = temp_dir.join("output");
 
         let test = IntegrationTest::new(

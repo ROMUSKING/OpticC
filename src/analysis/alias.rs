@@ -1,4 +1,4 @@
-use crate::arena::{Arena, NodeOffset, SourceLocation, CAstNode, NodeFlags};
+use crate::arena::{Arena, CAstNode, NodeFlags, NodeOffset, SourceLocation};
 use std::collections::{HashMap, HashSet};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

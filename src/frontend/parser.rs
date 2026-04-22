@@ -553,12 +553,7 @@ impl Parser {
         (token.kind == TokenKind::Keyword || token.kind == TokenKind::Identifier)
             && matches!(
                 token.text.as_str(),
-                "inline"
-                    | "__inline"
-                    | "__inline__"
-                    | "_Noreturn"
-                    | "noreturn"
-                    | "__noreturn__"
+                "inline" | "__inline" | "__inline__" | "_Noreturn" | "noreturn" | "__noreturn__"
             )
     }
 
@@ -567,7 +562,13 @@ impl Parser {
         (token.kind == TokenKind::Keyword || token.kind == TokenKind::Identifier)
             && matches!(
                 token.text.as_str(),
-                "typedef" | "extern" | "static" | "auto" | "register" | "_Thread_local" | "__thread"
+                "typedef"
+                    | "extern"
+                    | "static"
+                    | "auto"
+                    | "register"
+                    | "_Thread_local"
+                    | "__thread"
             )
     }
 
@@ -621,7 +622,11 @@ impl Parser {
         let mut last_child = specifiers;
         if last_child != NodeOffset::NULL {
             loop {
-                let ns = self.arena.get(last_child).map(|n| n.next_sibling).unwrap_or(NodeOffset::NULL);
+                let ns = self
+                    .arena
+                    .get(last_child)
+                    .map(|n| n.next_sibling)
+                    .unwrap_or(NodeOffset::NULL);
                 if ns == NodeOffset::NULL {
                     break;
                 }
@@ -662,19 +667,27 @@ impl Parser {
                 let init = self.parse_initializer()?;
                 // Create an init-declarator (kind=73) wrapping the declarator
                 // with the initializer as a sibling of the declarator's first child
-                let init_decl = self.alloc_node(73, 0, NodeOffset::NULL, declarator, NodeOffset::NULL);
+                let init_decl =
+                    self.alloc_node(73, 0, NodeOffset::NULL, declarator, NodeOffset::NULL);
                 // Link the initializer as next_sibling of the declarator
                 if let Some(decl_node) = self.arena.get_mut(declarator) {
                     decl_node.next_sibling = init;
                 }
                 // Create a var_decl (kind=21) with the specifiers and init-declarator
-                let var_decl = self.alloc_node(21, 0, NodeOffset::NULL, specifiers, NodeOffset::NULL);
+                let var_decl =
+                    self.alloc_node(21, 0, NodeOffset::NULL, specifiers, NodeOffset::NULL);
                 // Link init_decl as sibling of specifiers
                 if specifiers != NodeOffset::NULL {
                     let mut tail = specifiers;
                     loop {
-                        let ns = self.arena.get(tail).map(|n| n.next_sibling).unwrap_or(NodeOffset::NULL);
-                        if ns == NodeOffset::NULL { break; }
+                        let ns = self
+                            .arena
+                            .get(tail)
+                            .map(|n| n.next_sibling)
+                            .unwrap_or(NodeOffset::NULL);
+                        if ns == NodeOffset::NULL {
+                            break;
+                        }
                         tail = ns;
                     }
                     if let Some(tail_node) = self.arena.get_mut(tail) {
@@ -876,9 +889,21 @@ impl Parser {
                 if let Some(&(kind, struct_tag_off)) = self.typedef_kinds.get(&text) {
                     if kind == 4 || kind == 5 {
                         // Struct/union typedef: emit a struct/union specifier node with the tag
-                        return Ok(self.alloc_node(kind, struct_tag_off, NodeOffset::NULL, NodeOffset::NULL, NodeOffset::NULL));
+                        return Ok(self.alloc_node(
+                            kind,
+                            struct_tag_off,
+                            NodeOffset::NULL,
+                            NodeOffset::NULL,
+                            NodeOffset::NULL,
+                        ));
                     }
-                    return Ok(self.alloc_node(kind, 0, NodeOffset::NULL, NodeOffset::NULL, NodeOffset::NULL));
+                    return Ok(self.alloc_node(
+                        kind,
+                        0,
+                        NodeOffset::NULL,
+                        NodeOffset::NULL,
+                        NodeOffset::NULL,
+                    ));
                 }
                 2
             }
@@ -1050,8 +1075,13 @@ impl Parser {
                 self.advance(); // skip ':'
                 let width = self.parse_constant_expression()?;
                 let width_val = self.eval_constant_u32(width).unwrap_or(0);
-                let bitfield_node =
-                    self.alloc_node(27, width_val, NodeOffset::NULL, NodeOffset::NULL, NodeOffset::NULL);
+                let bitfield_node = self.alloc_node(
+                    27,
+                    width_val,
+                    NodeOffset::NULL,
+                    NodeOffset::NULL,
+                    NodeOffset::NULL,
+                );
                 self.link_siblings(&mut first_declarator, &mut last_declarator, bitfield_node);
                 continue;
             }
@@ -1071,8 +1101,13 @@ impl Parser {
                 let width = self.parse_constant_expression()?;
                 let width_val = self.eval_constant_u32(width).unwrap_or(0);
                 // Wrap as bitfield node (kind=27) with declarator as child
-                let bitfield_node =
-                    self.alloc_node(27, width_val, NodeOffset::NULL, declarator, NodeOffset::NULL);
+                let bitfield_node = self.alloc_node(
+                    27,
+                    width_val,
+                    NodeOffset::NULL,
+                    declarator,
+                    NodeOffset::NULL,
+                );
                 self.link_siblings(&mut first_declarator, &mut last_declarator, bitfield_node);
             } else {
                 self.link_siblings(&mut first_declarator, &mut last_declarator, declarator);
@@ -1134,10 +1169,7 @@ impl Parser {
                 next_enum_value = value_i64.wrapping_add(1);
 
                 self.constant_ints.insert(name.clone(), value_i64);
-                let name_offset = self
-                    .arena
-                    .store_string(&name)
-                    .unwrap_or(NodeOffset::NULL);
+                let name_offset = self.arena.store_string(&name).unwrap_or(NodeOffset::NULL);
 
                 let const_node = self.alloc_node(
                     26,
@@ -1146,8 +1178,13 @@ impl Parser {
                     NodeOffset::NULL,
                     NodeOffset::NULL,
                 );
-                let ident_node =
-                    self.alloc_node(60, name_offset.0, const_node, NodeOffset::NULL, NodeOffset::NULL);
+                let ident_node = self.alloc_node(
+                    60,
+                    name_offset.0,
+                    const_node,
+                    NodeOffset::NULL,
+                    NodeOffset::NULL,
+                );
                 if let Some(cn) = self.arena.get_mut(const_node) {
                     cn.first_child = ident_node;
                 }
@@ -1221,7 +1258,13 @@ impl Parser {
             // node.  This avoids chaining pointer nodes via `next_sibling`, which
             // is later reused by `link_siblings` / initializer attachment and would
             // corrupt the pointer-depth information.
-            let pointer_node = self.alloc_node(7, pointer_depth, NodeOffset::NULL, direct_decl, NodeOffset::NULL);
+            let pointer_node = self.alloc_node(
+                7,
+                pointer_depth,
+                NodeOffset::NULL,
+                direct_decl,
+                NodeOffset::NULL,
+            );
             return Ok(pointer_node);
         }
 
@@ -1333,7 +1376,8 @@ impl Parser {
     }
 
     fn parse_parameter_declaration(&mut self) -> Result<NodeOffset, ParseError> {
-        if self.is_type_specifier() || self.is_type_qualifier() || self.is_storage_class_specifier() {
+        if self.is_type_specifier() || self.is_type_qualifier() || self.is_storage_class_specifier()
+        {
             let specifiers = self.parse_declaration_specifiers()?;
             let declarator = if self.is_declarator_start() {
                 self.parse_declarator()?
@@ -1368,7 +1412,7 @@ impl Parser {
 
     /// Walk a declarator AST node to find the identifier name (kind=60).
     /// Walk a specifier chain and compute the canonical (kind, struct_tag_data) for typedef recording.
-        /// Handles combinations like: unsigned+char→(3,0), unsigned+short→(10,0), unsigned+int→(13,0),
+    /// Handles combinations like: unsigned+char→(3,0), unsigned+short→(10,0), unsigned+int→(13,0),
     /// unsigned+long+long→(11,0), long+long→(11,0), long→(11,0), struct tag→(4,tag_off), etc.
     fn resolve_specifier_chain_kind(&self, first_spec: NodeOffset) -> (u16, u32) {
         let mut has_unsigned = false;
@@ -1381,22 +1425,39 @@ impl Parser {
 
         let mut off = first_spec;
         while off != NodeOffset::NULL {
-            let Some(node) = self.arena.get(off) else { break; };
+            let Some(node) = self.arena.get(off) else {
+                break;
+            };
             match node.kind {
-                13 => has_unsigned = true,           // unsigned
-                12 => has_signed = true,             // signed
-                3  => base_kind = 3,                 // char
-                10 => base_kind = 10,                // short
-                2  => { if base_kind != 11 { base_kind = 2; } } // int (don't override long)
-                11 => { long_count += 1; base_kind = 11; } // long
-                83 => base_kind = 83,                // float
-                84 => base_kind = 84,                // double
-                1  => base_kind = 1,                 // void
-                14 => base_kind = 14,                // _Bool
-                4  => { base_kind = 4; struct_data = node.data; is_struct_or_union = true; }
-                5  => { base_kind = 5; struct_data = node.data; is_struct_or_union = true; }
-                16 => base_kind = 16,                // va_list / __builtin_va_list
-                7  => is_pointer = true,             // pointer declarator
+                13 => has_unsigned = true, // unsigned
+                12 => has_signed = true,   // signed
+                3 => base_kind = 3,        // char
+                10 => base_kind = 10,      // short
+                2 => {
+                    if base_kind != 11 {
+                        base_kind = 2;
+                    }
+                } // int (don't override long)
+                11 => {
+                    long_count += 1;
+                    base_kind = 11;
+                } // long
+                83 => base_kind = 83,      // float
+                84 => base_kind = 84,      // double
+                1 => base_kind = 1,        // void
+                14 => base_kind = 14,      // _Bool
+                4 => {
+                    base_kind = 4;
+                    struct_data = node.data;
+                    is_struct_or_union = true;
+                }
+                5 => {
+                    base_kind = 5;
+                    struct_data = node.data;
+                    is_struct_or_union = true;
+                }
+                16 => base_kind = 16,   // va_list / __builtin_va_list
+                7 => is_pointer = true, // pointer declarator
                 // storage class / qualifiers / typedef keyword: skip
                 101..=106 | 200 | 6 => {}
                 _ => {
@@ -1405,7 +1466,10 @@ impl Parser {
                     if node.data != 0 {
                         if let Some(name) = self.arena.get_string(NodeOffset(node.data)) {
                             if let Some(&(k, tag)) = self.typedef_kinds.get(name) {
-                                if k == 4 || k == 5 { struct_data = tag; is_struct_or_union = true; }
+                                if k == 4 || k == 5 {
+                                    struct_data = tag;
+                                    is_struct_or_union = true;
+                                }
                                 base_kind = k;
                             }
                         }
@@ -1427,17 +1491,17 @@ impl Parser {
             11 // long long → i64
         } else if has_unsigned {
             match base_kind {
-                3  => 3,  // unsigned char → i8
+                3 => 3,   // unsigned char → i8
                 10 => 10, // unsigned short → i16 (keep kind=10, backend maps to i16)
                 11 => 11, // unsigned long → i64
-                _  => 13, // unsigned int → i32
+                _ => 13,  // unsigned int → i32
             }
         } else if has_signed {
             match base_kind {
-                3  => 3,  // signed char → i8
+                3 => 3,   // signed char → i8
                 10 => 10, // signed short → i16
                 11 => 11, // signed long → i64
-                _  => 2,  // signed int → i32
+                _ => 2,   // signed int → i32
             }
         } else {
             base_kind
@@ -1450,7 +1514,10 @@ impl Parser {
         let node = self.arena.get(offset)?;
         // If this is an identifier node
         if node.kind == 60 {
-            return self.arena.get_string(NodeOffset(node.data)).map(|s| s.to_string());
+            return self
+                .arena
+                .get_string(NodeOffset(node.data))
+                .map(|s| s.to_string());
         }
         // Recurse into first_child (for pointer/array/function declarators)
         if node.first_child != NodeOffset::NULL {
@@ -1474,10 +1541,14 @@ impl Parser {
         if node.kind == 7 {
             return true;
         }
-        if node.first_child != NodeOffset::NULL && self.declarator_contains_pointer(node.first_child) {
+        if node.first_child != NodeOffset::NULL
+            && self.declarator_contains_pointer(node.first_child)
+        {
             return true;
         }
-        if node.next_sibling != NodeOffset::NULL && self.declarator_contains_pointer(node.next_sibling) {
+        if node.next_sibling != NodeOffset::NULL
+            && self.declarator_contains_pointer(node.next_sibling)
+        {
             return true;
         }
         false
@@ -1643,7 +1714,9 @@ impl Parser {
                 // so the next link_siblings call appends after the full chain, not after
                 // just the first element.
                 while let Some(n) = self.arena.get(last_elem) {
-                    if n.next_sibling == NodeOffset::NULL { break; }
+                    if n.next_sibling == NodeOffset::NULL {
+                        break;
+                    }
                     last_elem = n.next_sibling;
                 }
 
@@ -1750,7 +1823,7 @@ impl Parser {
                     let label_name = token.text.clone();
                     self.advance(); // skip label name
                     self.advance(); // skip ':'
-                    // Store label name in arena so backend can resolve it
+                                    // Store label name in arena so backend can resolve it
                     let label_str_offset = self
                         .arena
                         .store_string(&label_name)
@@ -1777,7 +1850,8 @@ impl Parser {
         let expr = self.parse_constant_expression()?;
 
         // Check for GNU case range extension: case LOW ... HIGH:
-        if self.current_token().kind == TokenKind::Punctuator && self.current_token().text == "..." {
+        if self.current_token().kind == TokenKind::Punctuator && self.current_token().text == "..."
+        {
             self.advance(); // skip '...'
             let high_expr = self.parse_constant_expression()?;
             self.expect(":")?;
@@ -1807,7 +1881,8 @@ impl Parser {
         let condition = self.parse_expression()?;
         self.expect(")")?;
         let then_stmt = self.parse_statement()?;
-        let else_stmt = if (self.current_token().kind == TokenKind::Keyword || self.current_token().kind == TokenKind::Identifier)
+        let else_stmt = if (self.current_token().kind == TokenKind::Keyword
+            || self.current_token().kind == TokenKind::Identifier)
             && self.current_token().text == "else"
         {
             self.advance();
@@ -1940,10 +2015,7 @@ impl Parser {
             self.advance();
             self.skip_punctuator(";");
             // Store label name in arena
-            let label_str_offset = self
-                .arena
-                .store_string(&label)
-                .unwrap_or(NodeOffset::NULL);
+            let label_str_offset = self.arena.store_string(&label).unwrap_or(NodeOffset::NULL);
             Ok(self.alloc_node(
                 49,
                 label_str_offset.0,
@@ -2183,8 +2255,14 @@ impl Parser {
                         // Chain declarator onto the specifier chain
                         let mut last = cast_type;
                         loop {
-                            let ns = self.arena.get(last).map(|n| n.next_sibling).unwrap_or(NodeOffset::NULL);
-                            if ns == NodeOffset::NULL { break; }
+                            let ns = self
+                                .arena
+                                .get(last)
+                                .map(|n| n.next_sibling)
+                                .unwrap_or(NodeOffset::NULL);
+                            if ns == NodeOffset::NULL {
+                                break;
+                            }
                             last = ns;
                         }
                         if let Some(n) = self.arena.get_mut(last) {
@@ -2222,7 +2300,13 @@ impl Parser {
                     if let Some(node) = self.arena.get_mut(tail) {
                         node.next_sibling = expr;
                     }
-                    return Ok(self.alloc_node(70, 0, NodeOffset::NULL, cast_type, NodeOffset::NULL));
+                    return Ok(self.alloc_node(
+                        70,
+                        0,
+                        NodeOffset::NULL,
+                        cast_type,
+                        NodeOffset::NULL,
+                    ));
                 }
             }
 
@@ -2258,7 +2342,13 @@ impl Parser {
                     let member_offset =
                         self.arena.store_string(&member).unwrap_or(NodeOffset::NULL);
                     // Store field name offset in data (bit 31=0 for dot)
-                    expr = self.alloc_node(69, member_offset.0, NodeOffset::NULL, expr, NodeOffset::NULL);
+                    expr = self.alloc_node(
+                        69,
+                        member_offset.0,
+                        NodeOffset::NULL,
+                        expr,
+                        NodeOffset::NULL,
+                    );
                 }
             } else if self.skip_punctuator("->") {
                 if self.current_token().kind == TokenKind::Identifier {
@@ -2360,8 +2450,12 @@ impl Parser {
                 ))
             }
             TokenKind::IntConstant => {
-                let text = token.text.trim_end_matches(|c| matches!(c, 'u'|'U'|'l'|'L'));
-                let value: u32 = if let Some(hex) = text.strip_prefix("0x").or_else(|| text.strip_prefix("0X")) {
+                let text = token
+                    .text
+                    .trim_end_matches(|c| matches!(c, 'u' | 'U' | 'l' | 'L'));
+                let value: u32 = if let Some(hex) =
+                    text.strip_prefix("0x").or_else(|| text.strip_prefix("0X"))
+                {
                     u32::from_str_radix(hex, 16).unwrap_or(0)
                 } else if text.starts_with('0') && text.len() > 1 {
                     u32::from_str_radix(&text[1..], 8).unwrap_or(0)
@@ -2381,8 +2475,9 @@ impl Parser {
                 let text = token.text.clone();
                 self.advance();
                 // Parse char constant value: 'x' -> x as u32
-                let char_val = if text.len() >= 3 && text.starts_with('\'') && text.ends_with('\'') {
-                    let inner = &text[1..text.len()-1];
+                let char_val = if text.len() >= 3 && text.starts_with('\'') && text.ends_with('\'')
+                {
+                    let inner = &text[1..text.len() - 1];
                     if inner.starts_with('\\') && inner.len() >= 2 {
                         match inner.as_bytes()[1] {
                             b'n' => 10u32,
@@ -2407,14 +2502,20 @@ impl Parser {
                 } else {
                     0
                 };
-                Ok(self.alloc_node(62, char_val, NodeOffset::NULL, NodeOffset::NULL, NodeOffset::NULL))
+                Ok(self.alloc_node(
+                    62,
+                    char_val,
+                    NodeOffset::NULL,
+                    NodeOffset::NULL,
+                    NodeOffset::NULL,
+                ))
             }
             TokenKind::StringLiteral => {
                 let text = token.text.clone();
                 self.advance();
                 // Strip quotes and process escape sequences
                 let inner = if text.len() >= 2 && text.starts_with('"') && text.ends_with('"') {
-                    let raw = &text[1..text.len()-1];
+                    let raw = &text[1..text.len() - 1];
                     let mut result = String::new();
                     let mut chars = raw.chars();
                     while let Some(c) = chars.next() {
@@ -2431,7 +2532,10 @@ impl Parser {
                                 Some('b') => result.push('\x08'),
                                 Some('f') => result.push('\x0C'),
                                 Some('v') => result.push('\x0B'),
-                                Some(other) => { result.push('\\'); result.push(other); }
+                                Some(other) => {
+                                    result.push('\\');
+                                    result.push(other);
+                                }
                                 None => result.push('\\'),
                             }
                         } else {
@@ -2444,11 +2548,16 @@ impl Parser {
                 };
                 // Concatenate adjacent string literals
                 let mut full_string = inner;
-                while self.current < self.tokens.len() && self.tokens[self.current].kind == TokenKind::StringLiteral {
+                while self.current < self.tokens.len()
+                    && self.tokens[self.current].kind == TokenKind::StringLiteral
+                {
                     let next_text = self.tokens[self.current].text.clone();
                     self.advance();
-                    let raw = if next_text.len() >= 2 && next_text.starts_with('"') && next_text.ends_with('"') {
-                        next_text[1..next_text.len()-1].to_string()
+                    let raw = if next_text.len() >= 2
+                        && next_text.starts_with('"')
+                        && next_text.ends_with('"')
+                    {
+                        next_text[1..next_text.len() - 1].to_string()
                     } else {
                         next_text
                     };
@@ -2463,7 +2572,10 @@ impl Parser {
                                 Some('\\') => full_string.push('\\'),
                                 Some('"') => full_string.push('"'),
                                 Some('\'') => full_string.push('\''),
-                                Some(other) => { full_string.push('\\'); full_string.push(other); }
+                                Some(other) => {
+                                    full_string.push('\\');
+                                    full_string.push(other);
+                                }
                                 None => full_string.push('\\'),
                             }
                         } else {
@@ -2471,8 +2583,17 @@ impl Parser {
                         }
                     }
                 }
-                let string_offset = self.arena.store_string(&full_string).unwrap_or(NodeOffset::NULL);
-                Ok(self.alloc_node(63, string_offset.0, NodeOffset::NULL, NodeOffset::NULL, NodeOffset::NULL))
+                let string_offset = self
+                    .arena
+                    .store_string(&full_string)
+                    .unwrap_or(NodeOffset::NULL);
+                Ok(self.alloc_node(
+                    63,
+                    string_offset.0,
+                    NodeOffset::NULL,
+                    NodeOffset::NULL,
+                    NodeOffset::NULL,
+                ))
             }
             TokenKind::Punctuator if token.text == "(" => {
                 self.advance();
@@ -2489,7 +2610,8 @@ impl Parser {
     }
 
     fn eval_constant_u32(&self, offset: NodeOffset) -> Option<u32> {
-        self.eval_constant_i64(offset).and_then(|v| u32::try_from(v).ok())
+        self.eval_constant_i64(offset)
+            .and_then(|v| u32::try_from(v).ok())
     }
 
     fn eval_constant_i64(&self, offset: NodeOffset) -> Option<i64> {
@@ -2751,9 +2873,12 @@ mod tests {
             Some(12),
             "enum constant table should capture SQLITE_N_LIMIT"
         );
-        let array_size = find_first_kind_data(&parser.arena, root, 8)
-            .expect("array declarator should exist");
-        assert_eq!(array_size, 12, "enum-backed array bound should evaluate to 12");
+        let array_size =
+            find_first_kind_data(&parser.arena, root, 8).expect("array declarator should exist");
+        assert_eq!(
+            array_size, 12,
+            "enum-backed array bound should evaluate to 12"
+        );
     }
 }
 

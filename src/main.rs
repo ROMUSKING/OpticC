@@ -121,7 +121,9 @@ impl Default for DirectDriverInvocation {
 fn is_direct_driver_invocation(args: &[String]) -> bool {
     match args.get(1).map(String::as_str) {
         None => false,
-        Some("compile" | "build" | "benchmark" | "integration-test" | "help" | "--help" | "-h") => false,
+        Some("compile" | "build" | "benchmark" | "integration-test" | "help" | "--help" | "-h") => {
+            false
+        }
         Some(_) => true,
     }
 }
@@ -472,7 +474,9 @@ fn write_depfile(
     Ok(())
 }
 
-fn execute_direct_driver(invocation: DirectDriverInvocation) -> Result<(), Box<dyn std::error::Error>> {
+fn execute_direct_driver(
+    invocation: DirectDriverInvocation,
+) -> Result<(), Box<dyn std::error::Error>> {
     if invocation.print_version {
         println!("optic_c {}", env!("CARGO_PKG_VERSION"));
         return Ok(());
@@ -510,7 +514,12 @@ fn execute_direct_driver(invocation: DirectDriverInvocation) -> Result<(), Box<d
         let target = invocation
             .dep_target
             .unwrap_or_else(|| invocation.output.display().to_string());
-        write_depfile(&depfile, &target, &invocation.source_files, invocation.dep_phony)?;
+        write_depfile(
+            &depfile,
+            &target,
+            &invocation.source_files,
+            invocation.dep_phony,
+        )?;
     }
 
     Ok(())
@@ -526,8 +535,7 @@ fn main() {
 fn run() -> Result<(), Box<dyn std::error::Error>> {
     let raw_args: Vec<String> = std::env::args().collect();
     if is_direct_driver_invocation(&raw_args) {
-        let invocation = parse_direct_driver_args(&raw_args)
-            .map_err(std::io::Error::other)?;
+        let invocation = parse_direct_driver_args(&raw_args).map_err(std::io::Error::other)?;
         return execute_direct_driver(invocation);
     }
 
@@ -827,7 +835,10 @@ mod tests {
     fn test_direct_driver_probe_parsing() {
         let args = vec!["optic_c".to_string(), "-dumpmachine".to_string()];
         let invocation = parse_direct_driver_args(&args).expect("driver probe");
-        assert_eq!(invocation.print_target, Some("x86_64-linux-gnu".to_string()));
+        assert_eq!(
+            invocation.print_target,
+            Some("x86_64-linux-gnu".to_string())
+        );
     }
 
     #[test]
@@ -853,9 +864,15 @@ mod tests {
 
         let invocation = parse_direct_driver_args(&args).expect("kbuild-style invocation");
         assert_eq!(invocation.source_files, vec![PathBuf::from("module.c")]);
-        assert!(invocation.include_paths.contains(&PathBuf::from("/usr/include")));
-        assert!(invocation.include_paths.contains(&PathBuf::from("include/generated")));
-        assert!(invocation.force_includes.contains(&PathBuf::from("generated/autoconf.h")));
+        assert!(invocation
+            .include_paths
+            .contains(&PathBuf::from("/usr/include")));
+        assert!(invocation
+            .include_paths
+            .contains(&PathBuf::from("include/generated")));
+        assert!(invocation
+            .force_includes
+            .contains(&PathBuf::from("generated/autoconf.h")));
         assert_eq!(invocation.depfile, Some(PathBuf::from("module.d")));
         assert!(invocation.return_thunk_extern);
         assert!(!invocation.defines.contains_key("DEBUG"));
