@@ -1,0 +1,23 @@
+--- src/build/mod.rs
++++ src/build/mod.rs
+@@ -1152,6 +1152,20 @@
+     use super::*;
+     use crate::utils::fs::find_tool;
+
++    #[test]
++    fn test_compile_phase_timings_total_ms() {
++        let timings = CompilePhaseTimings {
++            preprocess_ms: 10,
++            parse_ms: 20,
++            codegen_ms: 30,
++            optimize_ms: 40,
++            ir_write_ms: 50,
++            llc_ms: 60,
++        };
++        assert_eq!(timings.total_ms(), 210);
++        assert_eq!(CompilePhaseTimings::default().total_ms(), 0);
++    }
++
+     #[test]
+     fn test_build_config_defaults() {
+         let config = BuildConfig::new();
