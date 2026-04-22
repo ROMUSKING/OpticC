@@ -831,6 +831,20 @@ mod tests {
     }
 
     #[test]
+    fn test_expand_response_files_error() {
+        let args = vec![
+            "optic_c".to_string(),
+            "@non_existent_response_file_xyz_123.txt".to_string(),
+        ];
+
+        let result = expand_response_files(&args);
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err();
+        assert!(err_msg.contains("Failed to read response file"));
+        assert!(err_msg.contains("non_existent_response_file_xyz_123.txt"));
+    }
+
+    #[test]
     fn test_kbuild_style_flag_parsing() {
         let args = vec![
             "optic_c".to_string(),
