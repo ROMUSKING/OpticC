@@ -126,7 +126,6 @@ api_reference:
         - "new(config: BuildConfig) -> Self"
         - "build(&mut self) -> Result<(), BuildError>"
         - "compile_file(&self, source: &Path) -> Result<PathBuf, BuildError>"
-        - "run_external(&self, cmd: &str, args: &[&str]) -> Result<(), BuildError>"
         - "object_files(&self) -> &[PathBuf]"
         - "temp_dir(&self) -> &Path"
 
