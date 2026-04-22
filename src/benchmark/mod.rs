@@ -6,6 +6,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::fmt::Write;
 use std::time::Instant;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -749,7 +750,8 @@ pub fn generate_markdown_report(results: &[BenchmarkResult]) -> String {
     md.push_str("|-----------|----------|--------------|-------------------|---------------------|-----------------|-------------|\n");
 
     for result in results {
-        md.push_str(&format!(
+        write!(
+            md,
             "| {} | {} | {} | {} | {} | {} | {} |\n",
             result.name,
             result.compiler,
@@ -758,13 +760,14 @@ pub fn generate_markdown_report(results: &[BenchmarkResult]) -> String {
             result.metrics.warm_compile_time_ms,
             result.metrics.output_size_bytes,
             result.metrics.correctness,
-        ));
+        )
+        .unwrap();
     }
 
     md.push_str("\n## Compiler Comparison\n\n");
 
     for bench in &benchmarks {
-        md.push_str(&format!("### {}\n\n", bench));
+        write!(md, "### {}\n\n", bench).unwrap();
         let bench_results: Vec<&BenchmarkResult> =
             results.iter().filter(|r| r.name == *bench).collect();
 
@@ -777,10 +780,12 @@ pub fn generate_markdown_report(results: &[BenchmarkResult]) -> String {
                     }
 
                     if r.metrics.correctness == "error" {
-                        md.push_str(&format!(
+                        write!(
+                            md,
                             "- {} vs {}: unavailable (compile error)\n",
                             r.compiler, base.compiler
-                        ));
+                        )
+                        .unwrap();
                     } else if base.metrics.compile_time_ms > 0 {
                         let cold_ratio =
                             r.metrics.compile_time_ms as f64 / base.metrics.compile_time_ms as f64;
@@ -790,10 +795,12 @@ pub fn generate_markdown_report(results: &[BenchmarkResult]) -> String {
                         } else {
                             cold_ratio
                         };
-                        md.push_str(&format!(
+                        write!(
+                            md,
                             "- {} vs {}: {:.2}x cold compile, {:.2}x warm recompile\n",
                             r.compiler, base.compiler, cold_ratio, warm_ratio
-                        ));
+                        )
+                        .unwrap();
                     }
                 }
             }
@@ -820,16 +827,21 @@ pub fn generate_markdown_report(results: &[BenchmarkResult]) -> String {
         .filter(|r| r.metrics.correctness == "skipped")
         .count();
 
-    md.push_str(&format!("- Total benchmarks: {}\n", total));
-    md.push_str(&format!("- Passed: {}\n", passed));
-    md.push_str(&format!("- Failed: {}\n", failed));
-    md.push_str(&format!("- Errors: {}\n", errors));
-    md.push_str(&format!("- Skipped correctness checks: {}\n", skipped));
+    write!(md, "- Total benchmarks: {}\n", total).unwrap();
+    write!(md, "- Passed: {}\n", passed).unwrap();
+    write!(md, "- Failed: {}\n", failed).unwrap();
+    write!(md, "- Errors: {}\n", errors).unwrap();
+    write!(md, "- Skipped correctness checks: {}\n", skipped).unwrap();
     let rebuild_measured = results
         .iter()
         .filter(|r| r.metrics.warm_compile_time_ms > 0)
         .count();
-    md.push_str(&format!("- Rebuild measurements captured: {}\n", rebuild_measured));
+    write!(
+        md,
+        "- Rebuild measurements captured: {}\n",
+        rebuild_measured
+    )
+    .unwrap();
 
     let opticc_results: Vec<&BenchmarkResult> =
         results.iter().filter(|r| r.compiler == "opticc").collect();
@@ -839,7 +851,8 @@ pub fn generate_markdown_report(results: &[BenchmarkResult]) -> String {
         md.push_str("|-----------|--------------|------------|-------|---------|----------|----------|-----|\n");
 
         for result in opticc_results {
-            md.push_str(&format!(
+            write!(
+                md,
                 "| {} | {} | {} | {} | {} | {} | {} | {} |\n",
                 result.name,
                 result.optimization,
@@ -849,7 +862,8 @@ pub fn generate_markdown_report(results: &[BenchmarkResult]) -> String {
                 result.metrics.optimize_time_ms,
                 result.metrics.ir_write_time_ms,
                 result.metrics.llc_time_ms,
-            ));
+            )
+            .unwrap();
         }
     }
 
