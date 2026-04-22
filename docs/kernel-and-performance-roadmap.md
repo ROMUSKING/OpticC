@@ -1,6 +1,6 @@
 # OpticC Kernel and Performance Roadmap
 
-## Current verified baseline (2026-04-21)
+## Current verified baseline (2026-04-22)
 - `cargo build` succeeds.
 - `cargo test` succeeds.
 - `cargo test -- --list | grep -c ': test'` reports **405** discovered tests in the current workspace.
@@ -11,9 +11,8 @@
   - preprocessing
   - OpticC compilation
   - shared-library link
-- The same real-archive run still fails the smoke test due to unresolved library symbols:
-  - `u8`
-  - `vtabCallConstructor`
+- The same real-archive run still fails the smoke test on runtime correctness.
+- Latest diagnostics: `sqlite3_open(":memory:")` path reaches `openDatabase` and crashes in error cleanup (`sqlite3_free`) with an invalid pointer (`0x313ffff`).
 
 ## Phase A — SQLite truth gate
 ### Goal
@@ -22,10 +21,10 @@ Turn the verified large-input compile/link pipeline into a passing SQLite smoke 
 ### Current state
 - Acquisition is no longer blocked: the integration harness now defaults to a GitHub SQLite archive and can fetch it without the Cargo `network` feature.
 - Build-scale compilation is working for a real SQLite amalgamation archive.
-- Runtime/smoke correctness is still blocked by unresolved symbols in the produced shared library.
+- Runtime/smoke correctness is still blocked by pointer-semantics/codegen issues in SQLite error paths.
 
 ### Immediate next actions
-1. Fix the remaining real-SQLite smoke failure (`u8`, `vtabCallConstructor`).
+1. Fix remaining pointer-semantics/runtime corruption in real-SQLite smoke (`openDatabase` / URI-error path).
 2. Re-run `cargo run -- integration-test` against the GitHub archive after each relevant backend/type-system fix.
 3. Keep `benchmark --suite sqlite --sqlite-source ...` aligned with the same truth source once smoke is green.
 

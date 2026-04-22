@@ -19,7 +19,7 @@ use crate::types::TypeSystem;
 
 const LARGE_COMPILER_STACK_SIZE: usize = 64 * 1024 * 1024;
 const LARGE_STACK_INPUT_THRESHOLD_BYTES: u64 = 512 * 1024;
-const CACHE_SCHEMA_VERSION: &str = "v4-sqlite-smoke-fixes";
+const CACHE_SCHEMA_VERSION: &str = "v5-lvalue-array-index-fix";
 
 static COMPILE_INVOCATION_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -164,6 +164,7 @@ fn build_cache_key(
     force_includes: &[PathBuf],
     defines: &HashMap<String, String>,
     optimization: u32,
+    nostdinc: bool,
     return_thunk_extern: bool,
 ) -> Result<CacheKey, BuildError> {
     let source_text = fs::read_to_string(source)
@@ -186,6 +187,9 @@ fn build_cache_key(
     }
     flags.push(format!("-O{}", optimization));
     flags.push(format!("--cache-schema={}", CACHE_SCHEMA_VERSION));
+    if nostdinc {
+        flags.push("-nostdinc".to_string());
+    }
     if return_thunk_extern {
         flags.push("-mfunction-return=thunk-extern".to_string());
     }
@@ -240,6 +244,7 @@ pub struct BuildConfig {
     pub jobs: usize,
     pub optimization: u32,
     pub output_type: OutputType,
+    pub nostdinc: bool,
     pub return_thunk_extern: bool,
 }
 
@@ -255,6 +260,7 @@ impl BuildConfig {
             jobs: 1,
             optimization: 0,
             output_type: OutputType::Executable,
+            nostdinc: false,
             return_thunk_extern: false,
         }
     }
@@ -306,6 +312,11 @@ impl BuildConfig {
 
     pub fn with_return_thunk_extern(mut self, enabled: bool) -> Self {
         self.return_thunk_extern = enabled;
+        self
+    }
+
+    pub fn with_nostdinc(mut self, enabled: bool) -> Self {
+        self.nostdinc = enabled;
         self
     }
 
@@ -415,6 +426,7 @@ impl Builder {
         let force_includes = self.config.force_includes.clone();
         let defines = self.config.defines.clone();
         let optimization = self.config.optimization;
+        let nostdinc = self.config.nostdinc;
         let return_thunk_extern = self.config.return_thunk_extern;
         let source_files = self.config.source_files.clone();
 
@@ -440,6 +452,7 @@ impl Builder {
                         &force_includes,
                         &defines,
                         optimization,
+                        nostdinc,
                         return_thunk_extern,
                     )
                 })
@@ -466,6 +479,7 @@ impl Builder {
             &self.config.force_includes,
             &self.config.defines,
             self.config.optimization,
+            self.config.nostdinc,
             self.config.return_thunk_extern,
         )
     }
@@ -601,6 +615,7 @@ fn compile_file_to_object(
     force_includes: &[PathBuf],
     defines: &HashMap<String, String>,
     optimization: u32,
+    nostdinc: bool,
     return_thunk_extern: bool,
 ) -> Result<PathBuf, BuildError> {
     if !should_use_large_stack(source) {
@@ -611,6 +626,7 @@ fn compile_file_to_object(
             force_includes,
             defines,
             optimization,
+            nostdinc,
             return_thunk_extern,
         );
     }
@@ -639,6 +655,7 @@ fn compile_file_to_object(
                 &force_includes,
                 &defines,
                 optimization,
+                nostdinc,
                 return_thunk_extern,
             )
         })
@@ -659,6 +676,7 @@ fn compile_file_to_object_impl(
     force_includes: &[PathBuf],
     defines: &HashMap<String, String>,
     optimization: u32,
+    nostdinc: bool,
     return_thunk_extern: bool,
 ) -> Result<PathBuf, BuildError> {
     let stem = source
@@ -677,6 +695,7 @@ fn compile_file_to_object_impl(
         force_includes,
         defines,
         optimization,
+        nostdinc,
         return_thunk_extern,
     )?;
 
@@ -756,6 +775,7 @@ fn compile_single_file_impl(
             std::process::id(),
             compile_id
         ),
+        false,
     )?;
 
     let start = Instant::now();
@@ -806,6 +826,7 @@ pub fn compile_source_to_object_with_stats(
             defines,
             opt_level,
             false,
+            false,
         );
     }
 
@@ -835,6 +856,7 @@ pub fn compile_source_to_object_with_stats(
                 &defines,
                 opt_level,
                 false,
+                false,
             )
         })
         .map_err(BuildError::IoError)?
@@ -860,6 +882,7 @@ fn compile_source_to_object_with_stats_impl(
     force_includes: &[PathBuf],
     defines: &HashMap<String, String>,
     optimization: u32,
+    nostdinc: bool,
     return_thunk_extern: bool,
 ) -> Result<CompilePhaseTimings, BuildError> {
     let cache_key = build_cache_key(
@@ -868,6 +891,7 @@ fn compile_source_to_object_with_stats_impl(
         force_includes,
         defines,
         optimization,
+        nostdinc,
         return_thunk_extern,
     )?;
     if restore_cached_object(&cache_key, obj_path)? {
@@ -891,6 +915,7 @@ fn compile_source_to_object_with_stats_impl(
             std::process::id(),
             compile_id
         ),
+        nostdinc,
     )
     .map_err(|e| BuildError::CompileError(source.display().to_string(), e))?;
     let mut timings = artifacts.timings;
@@ -1013,11 +1038,15 @@ fn compile_to_ir_artifacts(
     defines: &HashMap<String, String>,
     db_path: &str,
     arena_path: &str,
+    nostdinc: bool,
 ) -> Result<CompileArtifacts, String> {
     let result = (|| {
         let db = OpticDb::new(db_path).map_err(|e| format!("Failed to create database: {}", e))?;
 
         let mut pp = Preprocessor::new(db);
+        if nostdinc {
+            pp.disable_default_include_paths();
+        }
 
         for path in include_paths {
             pp.add_include_path(path.to_str().unwrap_or(""));
@@ -1433,6 +1462,7 @@ mod tests {
             &HashMap::new(),
             missing_db.to_str().unwrap(),
             missing_arena.to_str().unwrap(),
+            false,
         );
         assert!(without_force.is_err());
         let without_force_err = without_force.err().unwrap();
@@ -1446,6 +1476,7 @@ mod tests {
             &HashMap::new(),
             ok_db.to_str().unwrap(),
             ok_arena.to_str().unwrap(),
+            false,
         );
         assert!(with_force.is_ok(), "force-include compilation should succeed");
     }
@@ -1618,6 +1649,7 @@ mod tests {
             &HashMap::new(),
             &db_path1,
             &arena_path1,
+            false,
         );
         assert!(
             helper_result.is_ok(),
@@ -1641,6 +1673,7 @@ mod tests {
             &HashMap::new(),
             &db_path2,
             &arena_path2,
+            false,
         );
         assert!(
             main_result.is_ok(),
@@ -1743,6 +1776,7 @@ mod tests {
             &HashMap::new(),
             0,
             false,
+            false,
         );
         assert!(
             helper_obj.is_ok(),
@@ -1764,6 +1798,7 @@ mod tests {
             &[],
             &HashMap::new(),
             0,
+            false,
             false,
         );
         assert!(

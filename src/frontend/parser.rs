@@ -10,6 +10,10 @@ pub struct Parser {
     /// Track typedef name → resolved AST node kind (for primitive typedefs).
     /// For struct typedefs: stores kind=4 and the struct tag offset in the second field.
     pub typedef_kinds: std::collections::HashMap<String, (u16, u32)>,
+    /// Constant integer identifiers currently known to the parser.
+    /// This is primarily populated from enum constants and used to
+    /// evaluate constant expressions like array bounds.
+    pub constant_ints: std::collections::HashMap<String, i64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -73,12 +77,14 @@ impl Parser {
             current: 0,
             typedef_names: std::collections::HashSet::new(),
             typedef_kinds: std::collections::HashMap::new(),
+            constant_ints: std::collections::HashMap::new(),
         }
     }
 
     pub fn parse(&mut self, source: &str) -> Result<NodeOffset, ParseError> {
         self.tokens = self.lex(source);
         self.current = 0;
+        self.constant_ints.clear();
         self.parse_translation_unit()
     }
 
@@ -104,6 +110,7 @@ impl Parser {
             file: String::new(),
         });
         self.current = 0;
+        self.constant_ints.clear();
         self.parse_translation_unit()
     }
 
@@ -1042,7 +1049,7 @@ impl Parser {
             {
                 self.advance(); // skip ':'
                 let width = self.parse_constant_expression()?;
-                let width_val = self.arena.get(width).map(|n| if n.kind == 61 { n.data } else { 0 }).unwrap_or(0);
+                let width_val = self.eval_constant_u32(width).unwrap_or(0);
                 let bitfield_node =
                     self.alloc_node(27, width_val, NodeOffset::NULL, NodeOffset::NULL, NodeOffset::NULL);
                 self.link_siblings(&mut first_declarator, &mut last_declarator, bitfield_node);
@@ -1062,7 +1069,7 @@ impl Parser {
             {
                 self.advance(); // skip ':'
                 let width = self.parse_constant_expression()?;
-                let width_val = self.arena.get(width).map(|n| if n.kind == 61 { n.data } else { 0 }).unwrap_or(0);
+                let width_val = self.eval_constant_u32(width).unwrap_or(0);
                 // Wrap as bitfield node (kind=27) with declarator as child
                 let bitfield_node =
                     self.alloc_node(27, width_val, NodeOffset::NULL, declarator, NodeOffset::NULL);
@@ -1103,6 +1110,7 @@ impl Parser {
     fn parse_enum_specifier(&mut self) -> Result<NodeOffset, ParseError> {
         let mut first_const = NodeOffset::NULL;
         let mut last_const = NodeOffset::NULL;
+        let mut next_enum_value: i64 = 0;
 
         // Optionally consume an enum tag name
         if self.current_token().kind == TokenKind::Identifier {
@@ -1114,25 +1122,32 @@ impl Parser {
                 if self.current_token().kind != TokenKind::Identifier {
                     break;
                 }
-                let _name = self.current_token().text.clone();
+                let name = self.current_token().text.clone();
                 self.advance();
 
-                let value = if self.skip_punctuator("=") {
+                let value_i64 = if self.skip_punctuator("=") {
                     let const_expr = self.parse_constant_expression()?;
-                    const_expr.0
+                    self.eval_constant_i64(const_expr).unwrap_or(0)
                 } else {
-                    0
+                    next_enum_value
                 };
+                next_enum_value = value_i64.wrapping_add(1);
+
+                self.constant_ints.insert(name.clone(), value_i64);
+                let name_offset = self
+                    .arena
+                    .store_string(&name)
+                    .unwrap_or(NodeOffset::NULL);
 
                 let const_node = self.alloc_node(
                     26,
-                    value,
+                    value_i64 as u32,
                     NodeOffset::NULL,
                     NodeOffset::NULL,
                     NodeOffset::NULL,
                 );
                 let ident_node =
-                    self.alloc_node(60, 0, const_node, NodeOffset::NULL, NodeOffset::NULL);
+                    self.alloc_node(60, name_offset.0, const_node, NodeOffset::NULL, NodeOffset::NULL);
                 if let Some(cn) = self.arena.get_mut(const_node) {
                     cn.first_child = ident_node;
                 }
@@ -1237,11 +1252,7 @@ impl Parser {
             if self.skip_punctuator("[") {
                 let size = if self.current_token().text != "]" {
                     let size_expr = self.parse_constant_expression()?;
-                    self.arena
-                        .get(size_expr)
-                        .filter(|node| node.kind == 61)
-                        .map(|node| node.data)
-                        .unwrap_or(0)
+                    self.eval_constant_u32(size_expr).unwrap_or(0)
                 } else {
                     0
                 };
@@ -2046,10 +2057,10 @@ impl Parser {
 
             self.advance();
             let right = self.parse_binary_op(op_prec - 1)?;
-            if let Some(left_node) = self.arena.get_mut(left) {
-                left_node.next_sibling = right;
-            }
-            left = self.alloc_node(64, op_code, NodeOffset::NULL, left, NodeOffset::NULL);
+            // Preserve existing node-internal sibling links (e.g. array index uses
+            // next_sibling for its index operand) by storing binop operands in a wrapper.
+            let operands = self.alloc_node(0, 0, NodeOffset::NULL, left, right);
+            left = self.alloc_node(64, op_code, NodeOffset::NULL, operands, NodeOffset::NULL);
         }
 
         Ok(left)
@@ -2477,6 +2488,109 @@ impl Parser {
         self.parse_conditional_expression()
     }
 
+    fn eval_constant_u32(&self, offset: NodeOffset) -> Option<u32> {
+        self.eval_constant_i64(offset).and_then(|v| u32::try_from(v).ok())
+    }
+
+    fn eval_constant_i64(&self, offset: NodeOffset) -> Option<i64> {
+        let node = self.arena.get(offset)?;
+        match node.kind {
+            60 => {
+                let name = self.arena.get_string(NodeOffset(node.data))?;
+                self.constant_ints.get(name).copied()
+            }
+            61 | 80 => Some(node.data as i64),
+            65 => {
+                let child = node.first_child;
+                let v = self.eval_constant_i64(child)?;
+                match node.data {
+                    1 => Some(v),
+                    2 => Some(if v == 0 { 1 } else { 0 }),
+                    3 => Some(!v),
+                    _ => Some(v),
+                }
+            }
+            64 => {
+                let (lhs_off, rhs_off) = if let Some(wrapper) = self.arena.get(node.first_child) {
+                    if wrapper.kind == 0
+                        && wrapper.first_child != NodeOffset::NULL
+                        && wrapper.next_sibling != NodeOffset::NULL
+                    {
+                        (wrapper.first_child, wrapper.next_sibling)
+                    } else {
+                        let lhs_off = node.first_child;
+                        let rhs_off = if node.next_sibling != NodeOffset::NULL {
+                            node.next_sibling
+                        } else {
+                            self.arena
+                                .get(lhs_off)
+                                .map(|lhs| lhs.next_sibling)
+                                .unwrap_or(NodeOffset::NULL)
+                        };
+                        (lhs_off, rhs_off)
+                    }
+                } else {
+                    (node.first_child, NodeOffset::NULL)
+                };
+                let lhs = self.eval_constant_i64(lhs_off)?;
+                let rhs = self.eval_constant_i64(rhs_off)?;
+                match node.data {
+                    1 => Some(lhs.wrapping_add(rhs)),
+                    2 => Some(lhs.wrapping_sub(rhs)),
+                    3 => Some(lhs.wrapping_mul(rhs)),
+                    4 => Some(if rhs == 0 { 0 } else { lhs / rhs }),
+                    5 => Some(if rhs == 0 { 0 } else { lhs % rhs }),
+                    6 => Some((lhs == rhs) as i64),
+                    7 => Some((lhs != rhs) as i64),
+                    8 => Some((lhs < rhs) as i64),
+                    9 => Some((lhs > rhs) as i64),
+                    10 => Some((lhs <= rhs) as i64),
+                    11 => Some((lhs >= rhs) as i64),
+                    12 => Some(((lhs != 0) && (rhs != 0)) as i64),
+                    13 => Some(((lhs != 0) || (rhs != 0)) as i64),
+                    14 => Some(lhs & rhs),
+                    15 => Some(lhs | rhs),
+                    16 => Some(lhs ^ rhs),
+                    17 => Some(lhs.wrapping_shl(rhs.max(0) as u32)),
+                    18 => Some(lhs.wrapping_shr(rhs.max(0) as u32)),
+                    _ => None,
+                }
+            }
+            66 => {
+                let cond = self.eval_constant_i64(node.first_child)?;
+                let wrapper = self.arena.get(node.next_sibling)?;
+                if cond != 0 {
+                    self.eval_constant_i64(wrapper.first_child)
+                } else {
+                    self.eval_constant_i64(wrapper.next_sibling)
+                }
+            }
+            70 => {
+                let mut tail = node.first_child;
+                loop {
+                    let Some(child) = self.arena.get(tail) else {
+                        break;
+                    };
+                    let next = child.next_sibling;
+                    if next == NodeOffset::NULL {
+                        break;
+                    }
+                    let Some(next_node) = self.arena.get(next) else {
+                        break;
+                    };
+                    if matches!(next_node.kind, 1..=16 | 83 | 84 | 101..=106 | 200) {
+                        tail = next;
+                    } else {
+                        return self.eval_constant_i64(next);
+                    }
+                }
+                self.eval_constant_i64(node.first_child)
+            }
+            72 => self.eval_constant_i64(node.next_sibling),
+            _ => None,
+        }
+    }
+
     pub fn link_siblings(
         &mut self,
         first: &mut NodeOffset,
@@ -2579,6 +2693,18 @@ mod tests {
     use super::*;
     use tempfile::NamedTempFile;
 
+    fn find_first_kind_data(arena: &Arena, offset: NodeOffset, kind: u16) -> Option<u32> {
+        if offset == NodeOffset::NULL {
+            return None;
+        }
+        let node = arena.get(offset)?;
+        if node.kind == kind {
+            return Some(node.data);
+        }
+        find_first_kind_data(arena, node.first_child, kind)
+            .or_else(|| find_first_kind_data(arena, node.next_sibling, kind))
+    }
+
     #[test]
     fn test_parse_simple_function() {
         let temp_file = NamedTempFile::new().unwrap();
@@ -2610,6 +2736,24 @@ mod tests {
         let source = "int x = 5 + 3 * 2;";
         let result = parser.parse(source);
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_enum_constant_used_in_array_bound() {
+        let temp_file = NamedTempFile::new().unwrap();
+        let arena = Arena::new(temp_file.path(), 4096).unwrap();
+        let mut parser = Parser::new(arena);
+
+        let source = "enum { SQLITE_N_LIMIT = 11 + 1 }; struct Db { int aLimit[SQLITE_N_LIMIT]; };";
+        let root = parser.parse(source).expect("parse should succeed");
+        assert_eq!(
+            parser.constant_ints.get("SQLITE_N_LIMIT").copied(),
+            Some(12),
+            "enum constant table should capture SQLITE_N_LIMIT"
+        );
+        let array_size = find_first_kind_data(&parser.arena, root, 8)
+            .expect("array declarator should exist");
+        assert_eq!(array_size, 12, "enum-backed array bound should evaluate to 12");
     }
 }
 

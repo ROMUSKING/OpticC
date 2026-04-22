@@ -290,6 +290,11 @@ impl Preprocessor {
         self.user_include_count += 1;
     }
 
+    pub fn disable_default_include_paths(&mut self) {
+        self.include_paths.clear();
+        self.user_include_count = 0;
+    }
+
     pub fn define_macro(&mut self, name: &str, value: &str) {
         let tokens = self.tokenize_replacement(value);
         self.macros.insert(
@@ -3682,6 +3687,46 @@ const char *s = STR(hello world);"#;
             has_usr_include,
             "Expected /usr/include among default paths; got: {:?}",
             paths
+        );
+    }
+
+    #[test]
+    fn test_disable_default_include_paths_prevents_system_fallback() {
+        let (mut pp, _db_dir) = create_test_preprocessor();
+
+        let inc_dir = TempDir::new().unwrap();
+        fs::create_dir_all(inc_dir.path().join("linux")).unwrap();
+        fs::write(
+            inc_dir.path().join("linux/module.h"),
+            "#define MODULE_LICENSE(x) int optic_module_license = 1;\n",
+        )
+        .unwrap();
+
+        pp.disable_default_include_paths();
+        pp.add_include_path(inc_dir.path().to_str().unwrap());
+
+        let tokens = pp
+            .process_source(
+                "#include <linux/module.h>\nMODULE_LICENSE(\"GPL\")\n",
+                "test.c",
+            )
+            .unwrap();
+        let joined = tokens
+            .iter()
+            .filter(|t| !t.is_whitespace())
+            .map(|t| t.text.as_str())
+            .collect::<Vec<_>>()
+            .join(" ");
+
+        assert!(
+            joined.contains("optic_module_license"),
+            "Expected user include path macro expansion; got: {}",
+            joined
+        );
+        assert!(
+            !joined.contains("MODULE_LICENSE"),
+            "Expected MODULE_LICENSE to be expanded; got: {}",
+            joined
         );
     }
 

@@ -500,6 +500,7 @@ fn execute_direct_driver(invocation: DirectDriverInvocation) -> Result<(), Box<d
         .with_force_includes(invocation.force_includes.clone())
         .with_defines(invocation.defines.clone())
         .with_link_libs(invocation.link_libs.clone())
+        .with_nostdinc(invocation.nostdinc)
         .with_return_thunk_extern(invocation.return_thunk_extern);
 
     let mut builder = Builder::new(config);
