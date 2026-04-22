@@ -861,4 +861,21 @@ mod tests {
         assert!(!invocation.defines.contains_key("DEBUG"));
         assert_eq!(invocation.output, PathBuf::from("module.o"));
     }
+
+    #[test]
+    fn test_is_direct_driver_invocation() {
+        // No arguments
+        assert!(!is_direct_driver_invocation(&[]));
+        assert!(!is_direct_driver_invocation(&["optic_c".to_string()]));
+
+        // Subcommands
+        for cmd in &["compile", "build", "benchmark", "integration-test", "help", "--help", "-h"] {
+            assert!(!is_direct_driver_invocation(&["optic_c".to_string(), cmd.to_string()]));
+        }
+
+        // Direct driver arguments
+        assert!(is_direct_driver_invocation(&["optic_c".to_string(), "test.c".to_string()]));
+        assert!(is_direct_driver_invocation(&["optic_c".to_string(), "-c".to_string(), "test.c".to_string()]));
+        assert!(is_direct_driver_invocation(&["optic_c".to_string(), "--version".to_string()]));
+    }
 }
