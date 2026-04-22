@@ -419,7 +419,8 @@ impl Parser {
         if self.current_token().kind != TokenKind::Punctuator || self.current_token().text != ")" {
             let mut arg_index = 0usize;
             loop {
-                let arg = if (matches!(builtin_kind, BuiltinKind::TypesCompatibleP) && arg_index < 2)
+                let arg = if (matches!(builtin_kind, BuiltinKind::TypesCompatibleP)
+                    && arg_index < 2)
                     || (matches!(builtin_kind, BuiltinKind::OffsetOf) && arg_index == 0)
                     || (matches!(builtin_kind, BuiltinKind::VaArg) && arg_index == 1)
                 {
@@ -453,10 +454,15 @@ impl Parser {
                             // Skip cv-qualifiers that may appear after `*` (e.g. `int * const`)
                             while matches!(
                                 self.current_token().text.as_str(),
-                                "const" | "volatile" | "restrict"
-                                    | "__const" | "__const__"
-                                    | "__restrict" | "__restrict__"
-                                    | "__volatile" | "__volatile__"
+                                "const"
+                                    | "volatile"
+                                    | "restrict"
+                                    | "__const"
+                                    | "__const__"
+                                    | "__restrict"
+                                    | "__restrict__"
+                                    | "__volatile"
+                                    | "__volatile__"
                                     | "_Atomic"
                             ) {
                                 self.advance();
@@ -909,8 +915,14 @@ mod tests {
             AttrKind::Noreturn
         ));
         assert!(matches!(AttrKind::from_name("unused"), AttrKind::Unused));
-        assert!(matches!(AttrKind::from_name("noinline"), AttrKind::Noinline));
-        assert!(matches!(AttrKind::from_name("always_inline"), AttrKind::AlwaysInline));
+        assert!(matches!(
+            AttrKind::from_name("noinline"),
+            AttrKind::Noinline
+        ));
+        assert!(matches!(
+            AttrKind::from_name("always_inline"),
+            AttrKind::AlwaysInline
+        ));
         assert!(matches!(AttrKind::from_name("packed"), AttrKind::Packed));
         assert!(matches!(AttrKind::from_name("weak"), AttrKind::Weak));
         assert!(matches!(

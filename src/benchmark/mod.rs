@@ -471,7 +471,8 @@ impl BenchmarkRunner {
             if primary.is_file() {
                 for compiler in &self.compilers {
                     for opt in &self.optimization_levels {
-                        let result = self.run_path_benchmark("sqlite_rebuild", &primary, compiler, opt)?;
+                        let result =
+                            self.run_path_benchmark("sqlite_rebuild", &primary, compiler, opt)?;
                         results.push(result);
                     }
                 }
@@ -529,21 +530,22 @@ impl BenchmarkRunner {
             clear_compile_cache().map_err(|e| BenchmarkError::RuntimeError(e.to_string()))?;
         }
 
-        let cold_measurement = match self.measure_compile_time(compiler, src_path, &out_path, &opt_flag) {
-            Ok(measurement) => measurement,
-            Err(_) => {
-                return Ok(BenchmarkResult {
-                    name: name.to_string(),
-                    compiler: compiler.name.clone(),
-                    version: compiler.get_version(),
-                    optimization: optimization.to_string(),
-                    metrics: BenchmarkMetrics {
-                        correctness: "error".to_string(),
-                        ..BenchmarkMetrics::new()
-                    },
-                })
-            }
-        };
+        let cold_measurement =
+            match self.measure_compile_time(compiler, src_path, &out_path, &opt_flag) {
+                Ok(measurement) => measurement,
+                Err(_) => {
+                    return Ok(BenchmarkResult {
+                        name: name.to_string(),
+                        compiler: compiler.name.clone(),
+                        version: compiler.get_version(),
+                        optimization: optimization.to_string(),
+                        metrics: BenchmarkMetrics {
+                            correctness: "error".to_string(),
+                            ..BenchmarkMetrics::new()
+                        },
+                    })
+                }
+            };
 
         let mut all_measurements = vec![cold_measurement];
         let mut warm_measurements = Vec::new();
@@ -829,7 +831,10 @@ pub fn generate_markdown_report(results: &[BenchmarkResult]) -> String {
         .iter()
         .filter(|r| r.metrics.warm_compile_time_ms > 0)
         .count();
-    md.push_str(&format!("- Rebuild measurements captured: {}\n", rebuild_measured));
+    md.push_str(&format!(
+        "- Rebuild measurements captured: {}\n",
+        rebuild_measured
+    ));
 
     let opticc_results: Vec<&BenchmarkResult> =
         results.iter().filter(|r| r.compiler == "opticc").collect();

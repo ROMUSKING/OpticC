@@ -1,11 +1,11 @@
 use crate::arena::{Arena, CAstNode, NodeFlags, NodeOffset};
 use crate::types::{CType, TypeId, TypeSystem};
+use inkwell::basic_block::BasicBlock;
 use inkwell::builder::Builder;
 use inkwell::context::Context;
 use inkwell::module::Module;
 use inkwell::types::{BasicMetadataTypeEnum, BasicType, BasicTypeEnum, FunctionType, StructType};
 use inkwell::values::{BasicValue, BasicValueEnum, FunctionValue, PointerValue};
-use inkwell::basic_block::BasicBlock;
 use inkwell::{AddressSpace, ThreadLocalMode};
 use std::collections::{HashMap, HashSet};
 
@@ -191,7 +191,9 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                             if let Some(func_decl) = arena.get(func_decl_offset) {
                                 if let Some(ident) = arena.get(func_decl.first_child) {
                                     if ident.kind == 60 {
-                                        if let Some(found) = arena.get_string(NodeOffset(ident.data)) {
+                                        if let Some(found) =
+                                            arena.get_string(NodeOffset(ident.data))
+                                        {
                                             name = found.to_string();
                                         }
                                     }
@@ -211,12 +213,7 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
         (name, is_static, is_inline, body_offset)
     }
 
-    fn collect_direct_callees(
-        &self,
-        arena: &Arena,
-        offset: NodeOffset,
-        out: &mut HashSet<String>,
-    ) {
+    fn collect_direct_callees(&self, arena: &Arena, offset: NodeOffset, out: &mut HashSet<String>) {
         let mut current = offset;
         while current != NodeOffset::NULL {
             let Some(node) = arena.get(current) else {
@@ -450,7 +447,8 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                 _ => {}
             }
 
-            if node.first_child != NodeOffset::NULL && !matches!(node.kind, 4 | 5 | 1..=3 | 6 | 83) {
+            if node.first_child != NodeOffset::NULL && !matches!(node.kind, 4 | 5 | 1..=3 | 6 | 83)
+            {
                 self.scan_global_var_shape(
                     arena,
                     node.first_child,
@@ -536,12 +534,9 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
         priority: u32,
     ) {
         let name = function.get_name().to_bytes().to_vec();
-        if entries
-            .iter()
-            .any(|(existing, existing_priority)| {
-                existing.get_name().to_bytes() == name.as_slice() && *existing_priority == priority
-            })
-        {
+        if entries.iter().any(|(existing, existing_priority)| {
+            existing.get_name().to_bytes() == name.as_slice() && *existing_priority == priority
+        }) {
             return;
         }
         entries.push((function, priority));
@@ -619,7 +614,10 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
         value: PointerValue<'ctx>,
         attrs: &[(String, Option<String>, Option<u32>)],
     ) {
-        if attrs.iter().any(|(name, _, _)| matches!(name.as_str(), "used" | "__used__")) {
+        if attrs
+            .iter()
+            .any(|(name, _, _)| matches!(name.as_str(), "used" | "__used__"))
+        {
             self.record_used_symbol(value);
         }
     }
@@ -662,9 +660,9 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
     fn insert_scoped_variable(&mut self, name: String, binding: VariableBinding<'ctx>) {
         if let Some(scope) = self.scope_stack.last_mut() {
             // Only save the first overwrite within this scope
-            scope.entry(name.clone()).or_insert_with(|| {
-                self.variables.get(&name).copied()
-            });
+            scope
+                .entry(name.clone())
+                .or_insert_with(|| self.variables.get(&name).copied());
         }
         self.variables.insert(name, binding);
     }
@@ -838,10 +836,18 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
             if let Some(node) = arena.get(child_offset) {
                 match node.kind {
                     1..=9 | 83 => {}
-                    20 => { let _ = self.lower_global_decl(arena, node); }
-                    21 => { let _ = self.lower_global_var(arena, node, node.kind); }
-                    22 => { let _ = self.lower_func_decl(arena, node); }
-                    23 => { let _ = self.lower_func_def(arena, node); }
+                    20 => {
+                        let _ = self.lower_global_decl(arena, node);
+                    }
+                    21 => {
+                        let _ = self.lower_global_var(arena, node, node.kind);
+                    }
+                    22 => {
+                        let _ = self.lower_func_decl(arena, node);
+                    }
+                    23 => {
+                        let _ = self.lower_func_def(arena, node);
+                    }
                     101..=105 => {}
                     _ => {}
                 }
@@ -860,7 +866,8 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
             }
         }
 
-        let static_functions: Vec<String> = self.static_declared_functions.iter().cloned().collect();
+        let static_functions: Vec<String> =
+            self.static_declared_functions.iter().cloned().collect();
         for name in static_functions {
             if let Some(function) = self.module.get_function(&name) {
                 if function.get_first_basic_block().is_none() {
@@ -883,7 +890,9 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
     fn lower_global_decl(&mut self, arena: &Arena, node: &CAstNode) -> Result<(), BackendError> {
         let mut scan_typedef = node.first_child;
         while scan_typedef != NodeOffset::NULL {
-            let Some(child) = arena.get(scan_typedef) else { break };
+            let Some(child) = arena.get(scan_typedef) else {
+                break;
+            };
             if child.kind == 101 {
                 let mut decl_offset = child.next_sibling;
                 while decl_offset != NodeOffset::NULL {
@@ -913,7 +922,7 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
         let mut spec_kind: u16 = 2; // default int
         let mut _is_const = false;
         let mut first_spec = NodeOffset::NULL;
-        
+
         // First pass: find type info
         let mut scan_off = node.first_child;
         while scan_off != NodeOffset::NULL {
@@ -926,7 +935,9 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                         }
                     }
                     101..=105 => {
-                        if child.kind == 104 { _is_const = true; } // const qualifier
+                        if child.kind == 104 {
+                            _is_const = true;
+                        } // const qualifier
                     }
                     _ => break,
                 }
@@ -945,21 +956,34 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
         while child_offset != NodeOffset::NULL {
             if let Some(child) = arena.get(child_offset) {
                 match child.kind {
-                    1..=6 | 16 | 83 => { found_type_spec = true; }
+                    1..=6 | 16 | 83 => {
+                        found_type_spec = true;
+                    }
                     101..=106 => {
-                        if child.kind == 103 { is_static_decl = true; }
-                        if child.kind == 106 { is_thread_local_decl = true; }
+                        if child.kind == 103 {
+                            is_static_decl = true;
+                        }
+                        if child.kind == 106 {
+                            is_thread_local_decl = true;
+                        }
                     }
                     21 => {
                         // Try to handle as a global variable
                         let _ = self.lower_global_var(arena, child, spec_kind);
                     }
-                    22 => { let _ = self.lower_func_decl(arena, child); }
-                    23 => { let _ = self.lower_func_def(arena, child); }
+                    22 => {
+                        let _ = self.lower_func_decl(arena, child);
+                    }
+                    23 => {
+                        let _ = self.lower_func_def(arena, child);
+                    }
                     // Bare identifier after a type specifier = global variable declaration
                     // e.g. `struct Foo g;` produces kind=20 with [kind=4, kind=60]
                     60 if found_type_spec => {
-                        if let Some(var_name) = arena.get_string(NodeOffset(child.data)).map(|s| s.to_string()) {
+                        if let Some(var_name) = arena
+                            .get_string(NodeOffset(child.data))
+                            .map(|s| s.to_string())
+                        {
                             if !var_name.is_empty() {
                                 // Determine LLVM type from spec node
                                 let llvm_type = if let Some(spec_node) = arena.get(first_spec) {
@@ -969,14 +993,25 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                                 };
                                 // Extract struct tag for GEP tracking
                                 let struct_tag: Option<String> = if matches!(spec_kind, 4 | 5) {
-                                    arena.get(first_spec)
-                                        .and_then(|sn| if sn.data != 0 { arena.get_string(NodeOffset(sn.data)) } else { None })
+                                    arena
+                                        .get(first_spec)
+                                        .and_then(|sn| {
+                                            if sn.data != 0 {
+                                                arena.get_string(NodeOffset(sn.data))
+                                            } else {
+                                                None
+                                            }
+                                        })
                                         .map(|s| s.to_string())
                                 } else {
                                     None
                                 };
                                 // Create zero-initialized global
-                                let global = self.module.add_global(llvm_type, Some(AddressSpace::default()), &var_name);
+                                let global = self.module.add_global(
+                                    llvm_type,
+                                    Some(AddressSpace::default()),
+                                    &var_name,
+                                );
                                 let zero: BasicValueEnum = match llvm_type {
                                     BasicTypeEnum::IntType(it) => it.const_zero().into(),
                                     BasicTypeEnum::FloatType(ft) => ft.const_zero().into(),
@@ -1001,7 +1036,8 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                                     function_type: None,
                                 };
                                 if let Some(ref tag) = struct_tag {
-                                    self.global_struct_tags.insert(var_name.clone(), tag.clone());
+                                    self.global_struct_tags
+                                        .insert(var_name.clone(), tag.clone());
                                 }
                                 self.global_variables.insert(var_name.clone(), binding);
                                 self.variables.insert(var_name, binding);
@@ -1014,7 +1050,10 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                         // kind=20 declaration node (e.g. `extern void foo(int);`).
                         // Delegate to lower_func_decl using the innermost wrapper
                         // that still carries the declaration specifier chain.
-                        if self.find_function_declarator_offset(arena, child_offset).is_some() {
+                        if self
+                            .find_function_declarator_offset(arena, child_offset)
+                            .is_some()
+                        {
                             let _ = if matches!(child.kind, 21 | 22) {
                                 self.lower_func_decl(arena, child)
                             } else {
@@ -1033,7 +1072,12 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
     }
 
     /// Lower a global variable declaration with optional initializer.
-    fn lower_global_var(&mut self, arena: &Arena, node: &CAstNode, _outer_spec_kind: u16) -> Result<(), BackendError> {
+    fn lower_global_var(
+        &mut self,
+        arena: &Arena,
+        node: &CAstNode,
+        _outer_spec_kind: u16,
+    ) -> Result<(), BackendError> {
         // Find the actual type specifier from children (kind 1..=6, 4, 5, 83)
         let mut spec_kind: u16 = 2;
         let mut spec_node_offset = NodeOffset::NULL;
@@ -1047,7 +1091,9 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                         break;
                     }
                     ch = c.next_sibling;
-                } else { break; }
+                } else {
+                    break;
+                }
             }
         }
         let llvm_type = if let Some(sn) = arena.get(spec_node_offset) {
@@ -1057,15 +1103,22 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
         };
         // Extract struct tag for global struct tracking (so GEP works in member access)
         let global_struct_tag: Option<String> = if matches!(spec_kind, 4 | 5) {
-            arena.get(spec_node_offset)
-                .and_then(|sn| if sn.data != 0 { arena.get_string(NodeOffset(sn.data)) } else { None })
+            arena
+                .get(spec_node_offset)
+                .and_then(|sn| {
+                    if sn.data != 0 {
+                        arena.get_string(NodeOffset(sn.data))
+                    } else {
+                        None
+                    }
+                })
                 .map(|s| s.to_string())
         } else {
             None
         };
         // Extract attributes early so we can apply them to any globals we create
         let attrs = self.extract_attributes(arena, node);
-        
+
         // Find the variable name and initializer
         let mut name_opt: Option<String> = None;
         let mut is_pointer = false;
@@ -1104,7 +1157,9 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
 
         if let Some(var_name) = name_opt {
             let global_type = if is_pointer {
-                self.context.ptr_type(AddressSpace::default()).as_basic_type_enum()
+                self.context
+                    .ptr_type(AddressSpace::default())
+                    .as_basic_type_enum()
             } else if is_array {
                 let inferred = if array_len == 0 && init_offset != NodeOffset::NULL {
                     infer_array_len_from_init(init_offset)
@@ -1159,9 +1214,9 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                         self.register_used_attributes(global.as_pointer_value(), &attrs);
                         // Store in variables for later reference
                         let binding = VariableBinding {
-                                ptr: global.as_pointer_value(),
-                                pointee_type: string_val.get_type().as_basic_type_enum(),
-                                function_type: None,
+                            ptr: global.as_pointer_value(),
+                            pointee_type: string_val.get_type().as_basic_type_enum(),
+                            function_type: None,
                         };
                         self.global_variables.insert(var_name.clone(), binding);
                         self.variables.insert(var_name, binding);
@@ -1249,7 +1304,8 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                         );
                         // For pointer types, use null instead of integer 0
                         if global_type.is_pointer_type() {
-                            let null_val = self.context.ptr_type(AddressSpace::default()).const_null();
+                            let null_val =
+                                self.context.ptr_type(AddressSpace::default()).const_null();
                             global.set_initializer(&null_val);
                         } else {
                             let const_val: inkwell::values::BasicValueEnum = match global_type {
@@ -1261,9 +1317,9 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                             global.set_initializer(&const_val);
                         }
                         let binding = VariableBinding {
-                                ptr: global.as_pointer_value(),
-                                pointee_type: global_type,
-                                function_type: None,
+                            ptr: global.as_pointer_value(),
+                            pointee_type: global_type,
+                            function_type: None,
                         };
                         if is_static {
                             global.set_linkage(inkwell::module::Linkage::Internal);
@@ -1277,7 +1333,8 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                         self.apply_global_attributes(global, &attrs);
                         self.register_used_attributes(global.as_pointer_value(), &attrs);
                         if let Some(ref tag) = global_struct_tag {
-                            self.global_struct_tags.insert(var_name.clone(), tag.clone());
+                            self.global_struct_tags
+                                .insert(var_name.clone(), tag.clone());
                         }
                         self.global_variables.insert(var_name.clone(), binding);
                         self.variables.insert(var_name, binding);
@@ -1287,11 +1344,9 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
             }
 
             // Default: create zero-initialized global
-            let global = self.module.add_global(
-                global_type,
-                Some(AddressSpace::default()),
-                &var_name,
-            );
+            let global =
+                self.module
+                    .add_global(global_type, Some(AddressSpace::default()), &var_name);
             let zero: BasicValueEnum = match global_type {
                 BasicTypeEnum::IntType(it) => it.const_zero().into(),
                 BasicTypeEnum::FloatType(ft) => ft.const_zero().into(),
@@ -1311,12 +1366,13 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
             self.apply_global_attributes(global, &attrs);
             self.register_used_attributes(global.as_pointer_value(), &attrs);
             let binding = VariableBinding {
-                    ptr: global.as_pointer_value(),
-                    pointee_type: global_type,
-                    function_type: None,
+                ptr: global.as_pointer_value(),
+                pointee_type: global_type,
+                function_type: None,
             };
             if let Some(ref tag) = global_struct_tag {
-                self.global_struct_tags.insert(var_name.clone(), tag.clone());
+                self.global_struct_tags
+                    .insert(var_name.clone(), tag.clone());
             }
             self.global_variables.insert(var_name.clone(), binding);
             self.variables.insert(var_name, binding);
@@ -1329,9 +1385,15 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
         while child_offset != NodeOffset::NULL {
             if let Some(child) = arena.get(child_offset) {
                 match child.kind {
-                    21 => { let _ = self.lower_var_decl(arena, &child); }
-                    22 => { let _ = self.lower_func_decl(arena, &child); }
-                    23 => { let _ = self.lower_func_def(arena, &child); }
+                    21 => {
+                        let _ = self.lower_var_decl(arena, &child);
+                    }
+                    22 => {
+                        let _ = self.lower_func_decl(arena, &child);
+                    }
+                    23 => {
+                        let _ = self.lower_func_def(arena, &child);
+                    }
                     _ => {}
                 }
                 child_offset = child.next_sibling;
@@ -1355,9 +1417,11 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                         if !self.struct_tag_types.contains_key(&tag_name) {
                             let field_names = Self::collect_struct_field_names(arena, child);
                             let mut field_types: Vec<BasicTypeEnum<'ctx>> = Vec::new();
-                            let mut fn_field_types: HashMap<String, FunctionType<'ctx>> = HashMap::new();
+                            let mut fn_field_types: HashMap<String, FunctionType<'ctx>> =
+                                HashMap::new();
                             // Track bitfield info: field_name → (gep_idx, Option<(bit_offset, bit_width)>)
-                            let mut gep_info: HashMap<String, (u32, Option<(u32, u32)>)> = HashMap::new();
+                            let mut gep_info: HashMap<String, (u32, Option<(u32, u32)>)> =
+                                HashMap::new();
                             let mut gep_idx: u32 = 0;
                             let mut field_name_idx: usize = 0;
                             // Track current bitfield group: (base_kind, bits_used, storage_bit_capacity)
@@ -1373,14 +1437,21 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                                     let mut scan = m.first_child;
                                     while scan != NodeOffset::NULL {
                                         if let Some(sn) = arena.get(scan) {
-                                            if (sn.kind == 4 || sn.kind == 5) && sn.data != 0 && sn.first_child != NodeOffset::NULL {
+                                            if (sn.kind == 4 || sn.kind == 5)
+                                                && sn.data != 0
+                                                && sn.first_child != NodeOffset::NULL
+                                            {
                                                 self.register_struct_types_in_node(arena, m);
                                             }
                                             scan = sn.next_sibling;
-                                        } else { break; }
+                                        } else {
+                                            break;
+                                        }
                                     }
                                     member_off = m.next_sibling;
-                                } else { break; }
+                                } else {
+                                    break;
+                                }
                             }
                             member_off = child.first_child;
                             while member_off != NodeOffset::NULL {
@@ -1406,7 +1477,9 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                                     {
                                         let mut direct = m.first_child;
                                         while direct != NodeOffset::NULL {
-                                            let Some(dn) = arena.get(direct) else { break; };
+                                            let Some(dn) = arena.get(direct) else {
+                                                break;
+                                            };
                                             match dn.kind {
                                                 1..=6 | 10..=13 | 16 | 83 | 84 => {
                                                     declared_base_kind = dn.kind;
@@ -1422,7 +1495,9 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                                     let mut stack: Vec<NodeOffset> = vec![m.first_child];
                                     while let Some(mut check_off) = stack.pop() {
                                         while check_off != NodeOffset::NULL {
-                                            let Some(cn) = arena.get(check_off) else { break; };
+                                            let Some(cn) = arena.get(check_off) else {
+                                                break;
+                                            };
                                             match cn.kind {
                                                 1..=6 | 10..=13 | 16 | 83 | 84 => {
                                                     base_kind = cn.kind;
@@ -1448,7 +1523,9 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                                                     fn_declarator_off = check_off;
                                                 }
                                                 8 => {
-                                                    if let Some(len) = self.infer_array_declarator_len(arena, cn) {
+                                                    if let Some(len) =
+                                                        self.infer_array_declarator_len(arena, cn)
+                                                    {
                                                         array_len = Some(len);
                                                     }
                                                 }
@@ -1468,7 +1545,9 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                                         }
                                     }
 
-                                    let current_name = field_names.get(field_name_idx).cloned()
+                                    let current_name = field_names
+                                        .get(field_name_idx)
+                                        .cloned()
                                         .unwrap_or_else(|| format!("_field{}", field_name_idx));
                                     field_name_idx += 1;
                                     let member_base_type = if matches!(base_kind, 4 | 5)
@@ -1477,13 +1556,16 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                                         arena
                                             .get(nested_spec_off)
                                             .map(|sn| self.specifier_to_llvm_type(arena, sn))
-                                            .unwrap_or_else(|| self.node_kind_to_llvm_type(base_kind))
+                                            .unwrap_or_else(|| {
+                                                self.node_kind_to_llvm_type(base_kind)
+                                            })
                                     } else {
                                         self.node_kind_to_llvm_type(base_kind)
                                     };
                                     if fn_declarator_off != NodeOffset::NULL {
                                         let fn_base_kind = declared_base_kind;
-                                        let fn_base_type = self.node_kind_to_llvm_type(fn_base_kind);
+                                        let fn_base_type =
+                                            self.node_kind_to_llvm_type(fn_base_kind);
                                         // When the function returns a pointer, use ptr as the
                                         // return type for the registered FunctionType instead of
                                         // the raw base struct/int type. This prevents the backend
@@ -1498,7 +1580,11 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                                         };
                                         // Use a non-void kind so function_type_from_declarator
                                         // falls into the base_type match rather than void_type.
-                                        let fn_ret_kind = if return_has_pointer { 7u16 } else { fn_base_kind };
+                                        let fn_ret_kind = if return_has_pointer {
+                                            7u16
+                                        } else {
+                                            fn_base_kind
+                                        };
                                         if let Some(fn_type) = self.function_type_from_declarator(
                                             arena,
                                             arena.get(fn_declarator_off),
@@ -1512,21 +1598,31 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                                     if let Some(bw) = bitfield_width {
                                         // This is a bitfield member
                                         let storage_bits = self.node_kind_bit_width(base_kind);
-                                        if let Some((grp_kind, ref mut bits_used, capacity)) = bitfield_group {
-                                            if grp_kind == base_kind && *bits_used + bw <= capacity {
+                                        if let Some((grp_kind, ref mut bits_used, capacity)) =
+                                            bitfield_group
+                                        {
+                                            if grp_kind == base_kind && *bits_used + bw <= capacity
+                                            {
                                                 // Fits in current group
-                                                gep_info.insert(current_name, (gep_idx - 1, Some((*bits_used, bw))));
+                                                gep_info.insert(
+                                                    current_name,
+                                                    (gep_idx - 1, Some((*bits_used, bw))),
+                                                );
                                                 *bits_used += bw;
                                             } else {
                                                 // Start new storage unit
-                                                field_types.push(self.node_kind_to_llvm_type(base_kind));
-                                                gep_info.insert(current_name, (gep_idx, Some((0, bw))));
-                                                bitfield_group = Some((base_kind, bw, storage_bits));
+                                                field_types
+                                                    .push(self.node_kind_to_llvm_type(base_kind));
+                                                gep_info
+                                                    .insert(current_name, (gep_idx, Some((0, bw))));
+                                                bitfield_group =
+                                                    Some((base_kind, bw, storage_bits));
                                                 gep_idx += 1;
                                             }
                                         } else {
                                             // Start first bitfield group
-                                            field_types.push(self.node_kind_to_llvm_type(base_kind));
+                                            field_types
+                                                .push(self.node_kind_to_llvm_type(base_kind));
                                             gep_info.insert(current_name, (gep_idx, Some((0, bw))));
                                             bitfield_group = Some((base_kind, bw, storage_bits));
                                             gep_idx += 1;
@@ -1539,23 +1635,42 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                                                 self.context
                                                     .ptr_type(AddressSpace::default())
                                                     .as_basic_type_enum()
-                                            } else if matches!(base_kind, 4 | 5) && nested_spec_off != NodeOffset::NULL {
-                                                arena.get(nested_spec_off).map(|sn| self.specifier_to_llvm_type(arena, sn))
-                                                    .unwrap_or_else(|| self.node_kind_to_llvm_type(base_kind))
+                                            } else if matches!(base_kind, 4 | 5)
+                                                && nested_spec_off != NodeOffset::NULL
+                                            {
+                                                arena
+                                                    .get(nested_spec_off)
+                                                    .map(|sn| {
+                                                        self.specifier_to_llvm_type(arena, sn)
+                                                    })
+                                                    .unwrap_or_else(|| {
+                                                        self.node_kind_to_llvm_type(base_kind)
+                                                    })
                                             } else {
                                                 self.node_kind_to_llvm_type(base_kind)
                                             };
-                                            field_types.push(elem.array_type(len).as_basic_type_enum());
+                                            field_types
+                                                .push(elem.array_type(len).as_basic_type_enum());
                                         } else if has_pointer {
-                                            field_types.push(self.context.ptr_type(AddressSpace::default()).as_basic_type_enum());
-                                        } else if matches!(base_kind, 4 | 5) && nested_spec_off != NodeOffset::NULL {
+                                            field_types.push(
+                                                self.context
+                                                    .ptr_type(AddressSpace::default())
+                                                    .as_basic_type_enum(),
+                                            );
+                                        } else if matches!(base_kind, 4 | 5)
+                                            && nested_spec_off != NodeOffset::NULL
+                                        {
                                             // Nested struct/union: resolve recursively
-                                            let nested = arena.get(nested_spec_off)
+                                            let nested = arena
+                                                .get(nested_spec_off)
                                                 .map(|sn| self.specifier_to_llvm_type(arena, sn))
-                                                .unwrap_or_else(|| self.node_kind_to_llvm_type(base_kind));
+                                                .unwrap_or_else(|| {
+                                                    self.node_kind_to_llvm_type(base_kind)
+                                                });
                                             field_types.push(nested);
                                         } else {
-                                            field_types.push(self.node_kind_to_llvm_type(base_kind));
+                                            field_types
+                                                .push(self.node_kind_to_llvm_type(base_kind));
                                         }
                                         gep_info.insert(current_name, (gep_idx, None));
                                         gep_idx += 1;
@@ -1567,7 +1682,10 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                                 }
                             }
                             if !field_types.is_empty() {
-                                let st = self.context.struct_type(&field_types, self.node_has_attr(arena, child, &["packed", "__packed__"]));
+                                let st = self.context.struct_type(
+                                    &field_types,
+                                    self.node_has_attr(arena, child, &["packed", "__packed__"]),
+                                );
                                 self.struct_tag_types.insert(tag_name.clone(), st);
                                 self.struct_tag_fields.insert(tag_name.clone(), field_names);
                                 if !fn_field_types.is_empty() {
@@ -1594,14 +1712,20 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
             1 => self.context.i8_type().as_basic_type_enum(),
             2 => self.context.i32_type().as_basic_type_enum(),
             3 => self.context.i8_type().as_basic_type_enum(),
-            7 => self.context.ptr_type(AddressSpace::default()).as_basic_type_enum(),
+            7 => self
+                .context
+                .ptr_type(AddressSpace::default())
+                .as_basic_type_enum(),
             6 => self.context.i32_type().as_basic_type_enum(),
             10 => self.context.i16_type().as_basic_type_enum(),
             11 => self.context.i64_type().as_basic_type_enum(),
             12 | 13 => self.context.i32_type().as_basic_type_enum(),
             // kind 16 = va_list / __builtin_va_list / __gnuc_va_list.
             // Lower as an opaque pointer so LLVM va_arg/variadic flows remain compatible.
-            16 => self.context.ptr_type(AddressSpace::default()).as_basic_type_enum(),
+            16 => self
+                .context
+                .ptr_type(AddressSpace::default())
+                .as_basic_type_enum(),
             83 => self.context.f32_type().as_basic_type_enum(),
             84 => self.context.f64_type().as_basic_type_enum(),
             _ => self.context.i32_type().as_basic_type_enum(),
@@ -1611,10 +1735,10 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
     /// Return the bit width of a storage unit for a given AST type-specifier kind.
     fn node_kind_bit_width(&self, kind: u16) -> u32 {
         match kind {
-            1 | 3 => 8,          // void (treated as i8), char
-            10 => 16,            // short
+            1 | 3 => 8,            // void (treated as i8), char
+            10 => 16,              // short
             2 | 6 | 12 | 13 => 32, // int, enum, signed, unsigned
-            11 => 64,            // long
+            11 => 64,              // long
             _ => 32,
         }
     }
@@ -1674,11 +1798,14 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                                         (sz, sz)
                                     }
                                     BasicTypeEnum::FloatType(ft) => {
-                                        let sz = ft.size_of().get_zero_extended_constant().unwrap_or(4);
+                                        let sz =
+                                            ft.size_of().get_zero_extended_constant().unwrap_or(4);
                                         (sz, sz)
                                     }
                                     BasicTypeEnum::PointerType(_) => (8, 8),
-                                    BasicTypeEnum::StructType(st) => self.ast_record_size_align_from_llvm(st),
+                                    BasicTypeEnum::StructType(st) => {
+                                        self.ast_record_size_align_from_llvm(st)
+                                    }
                                     _ => (4, 4),
                                 };
                                 (elem_size * at.len() as u64, elem_align)
@@ -1692,7 +1819,9 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                                 (sz, sz)
                             }
                             BasicTypeEnum::PointerType(_) => (8, 8),
-                            BasicTypeEnum::StructType(st) => self.ast_record_size_align_from_llvm(st),
+                            BasicTypeEnum::StructType(st) => {
+                                self.ast_record_size_align_from_llvm(st)
+                            }
                             _ => (4, 4),
                         };
                         let align = if packed { 1 } else { field_align.max(1) };
@@ -1705,7 +1834,11 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                         }
                     }
                     let size = if spec_node.kind == 5 {
-                        if packed { max_size } else { Self::align_up(max_size, max_align) }
+                        if packed {
+                            max_size
+                        } else {
+                            Self::align_up(max_size, max_align)
+                        }
                     } else if packed {
                         offset
                     } else {
@@ -1723,7 +1856,9 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
         let mut member_off = spec_node.first_child;
 
         while member_off != NodeOffset::NULL {
-            let Some(member) = arena.get(member_off) else { break; };
+            let Some(member) = arena.get(member_off) else {
+                break;
+            };
             member_off = member.next_sibling;
 
             if member.kind == 200 {
@@ -1738,7 +1873,9 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
 
             let mut check_off = member.first_child;
             while check_off != NodeOffset::NULL {
-                let Some(child) = arena.get(check_off) else { break; };
+                let Some(child) = arena.get(check_off) else {
+                    break;
+                };
                 match child.kind {
                     1 | 2 | 3 | 10..=14 | 83 | 84 => {
                         if let Some((sz, al)) = self.ast_type_size_align(arena, child) {
@@ -1787,7 +1924,11 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
         }
 
         let size = if spec_node.kind == 5 {
-            if packed { max_size } else { Self::align_up(max_size, max_align) }
+            if packed {
+                max_size
+            } else {
+                Self::align_up(max_size, max_align)
+            }
         } else if packed {
             offset
         } else {
@@ -1824,7 +1965,9 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                             (sz, sz)
                         }
                         BasicTypeEnum::PointerType(_) => (8, 8),
-                        BasicTypeEnum::StructType(inner) => self.ast_record_size_align_from_llvm(inner),
+                        BasicTypeEnum::StructType(inner) => {
+                            self.ast_record_size_align_from_llvm(inner)
+                        }
                         _ => (4, 4),
                     };
                     (elem_size * at.len() as u64, elem_align)
@@ -1837,7 +1980,11 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
             offset = Self::align_up(offset, align);
             offset += field_size;
         }
-        let size = if packed { offset } else { Self::align_up(offset, max_align) };
+        let size = if packed {
+            offset
+        } else {
+            Self::align_up(offset, max_align)
+        };
         (size, if packed { 1 } else { max_align })
     }
 
@@ -1894,7 +2041,9 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
         }
 
         Some(if base_kind == 1 {
-            self.context.void_type().fn_type(&param_types, decl.data == 1)
+            self.context
+                .void_type()
+                .fn_type(&param_types, decl.data == 1)
         } else {
             match base_type {
                 BasicTypeEnum::IntType(int_ty) => int_ty.fn_type(&param_types, decl.data == 1),
@@ -1905,7 +2054,9 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                 BasicTypeEnum::StructType(struct_ty) => {
                     struct_ty.fn_type(&param_types, decl.data == 1)
                 }
-                BasicTypeEnum::ArrayType(array_ty) => array_ty.fn_type(&param_types, decl.data == 1),
+                BasicTypeEnum::ArrayType(array_ty) => {
+                    array_ty.fn_type(&param_types, decl.data == 1)
+                }
                 BasicTypeEnum::VectorType(vector_ty) => {
                     vector_ty.fn_type(&param_types, decl.data == 1)
                 }
@@ -2024,9 +2175,7 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
         self.builder.position_at_end(entry);
 
         if return_first_arg && function.count_params() > 0 {
-            let arg = function
-                .get_nth_param(0)
-                .ok_or(BackendError::InvalidNode)?;
+            let arg = function.get_nth_param(0).ok_or(BackendError::InvalidNode)?;
             match function.get_type().get_return_type() {
                 None => {
                     self.builder
@@ -2084,7 +2233,10 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                     } else if ret_ty.is_float_type() {
                         ret_ty.into_float_type().const_zero().into()
                     } else if ret_ty.is_pointer_type() {
-                        self.context.ptr_type(AddressSpace::default()).const_null().into()
+                        self.context
+                            .ptr_type(AddressSpace::default())
+                            .const_null()
+                            .into()
                     } else if ret_ty.is_array_type() {
                         ret_ty.into_array_type().const_zero().into()
                     } else if ret_ty.is_vector_type() {
@@ -2387,7 +2539,9 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                         }
                     }
                     if has_ptr {
-                        self.context.ptr_type(AddressSpace::default()).as_basic_type_enum()
+                        self.context
+                            .ptr_type(AddressSpace::default())
+                            .as_basic_type_enum()
                     } else {
                         self.declarator_llvm_type(arena, Some(decl_node), base_type)
                     }
@@ -2400,13 +2554,12 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
         } else {
             base_type
         };
-        let function_type =
-            self.function_type_from_declarator(
-                arena,
-                arena.get(declarator_offset),
-                base_type,
-                type_kind,
-            );
+        let function_type = self.function_type_from_declarator(
+            arena,
+            arena.get(declarator_offset),
+            base_type,
+            type_kind,
+        );
         (
             llvm_type,
             name,
@@ -2497,7 +2650,10 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                 while scan != NodeOffset::NULL {
                     let Some(node) = _arena.get(scan) else { break };
                     if node.kind == 7 {
-                        return self.context.ptr_type(AddressSpace::default()).as_basic_type_enum();
+                        return self
+                            .context
+                            .ptr_type(AddressSpace::default())
+                            .as_basic_type_enum();
                     }
                     scan = node.next_sibling;
                 }
@@ -2543,11 +2699,19 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
         let mut is_static_local = false;
         let mut spec_offset = node.first_child;
         loop {
-            let Some(sn) = arena.get(spec_offset) else { break };
+            let Some(sn) = arena.get(spec_offset) else {
+                break;
+            };
             match sn.kind {
                 101 => return Ok(()),
-                102 => { /* extern */ spec_offset = sn.next_sibling; }
-                103 => { is_static_local = true; spec_offset = sn.next_sibling; }
+                102 => {
+                    /* extern */
+                    spec_offset = sn.next_sibling;
+                }
+                103 => {
+                    is_static_local = true;
+                    spec_offset = sn.next_sibling;
+                }
                 90 | 91 | 92 | 104 | 105 | 106 => {
                     /* const/restrict/volatile/auto/register/_Thread_local(kind=106) */
                     spec_offset = sn.next_sibling;
@@ -2597,13 +2761,12 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
 
                         let actual_alloca_type =
                             self.declarator_llvm_type(arena, declarator_node, alloca_type);
-                        let function_type =
-                            self.function_type_from_declarator(
-                                arena,
-                                declarator_node,
-                                alloca_type,
-                                spec_kind,
-                            );
+                        let function_type = self.function_type_from_declarator(
+                            arena,
+                            declarator_node,
+                            alloca_type,
+                            spec_kind,
+                        );
                         let is_array = declarator_node.map(|dn| dn.kind == 8).unwrap_or(false);
 
                         let var_name_opt: Option<String> = declarator_node.and_then(|n| {
@@ -2625,23 +2788,43 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                             if is_static_local {
                                 // For unsized static local arrays (declarator data=0), determine the
                                 // true element count from the flat initializer list.
-                                let actual_alloca_type = if let BasicTypeEnum::ArrayType(at) = actual_alloca_type {
-                                    if at.len() == 0 && init_offset != NodeOffset::NULL {
-                                        if let BasicTypeEnum::StructType(elem_st) = at.get_element_type() {
-                                            let nf = elem_st.count_fields() as usize;
-                                            if nf > 0 {
-                                                let mut cnt = 0usize;
-                                                let mut off = init_offset;
-                                                while off != NodeOffset::NULL {
-                                                    cnt += 1;
-                                                    off = arena.get(off).map(|n| n.next_sibling).unwrap_or(NodeOffset::NULL);
+                                let actual_alloca_type =
+                                    if let BasicTypeEnum::ArrayType(at) = actual_alloca_type {
+                                        if at.len() == 0 && init_offset != NodeOffset::NULL {
+                                            if let BasicTypeEnum::StructType(elem_st) =
+                                                at.get_element_type()
+                                            {
+                                                let nf = elem_st.count_fields() as usize;
+                                                if nf > 0 {
+                                                    let mut cnt = 0usize;
+                                                    let mut off = init_offset;
+                                                    while off != NodeOffset::NULL {
+                                                        cnt += 1;
+                                                        off = arena
+                                                            .get(off)
+                                                            .map(|n| n.next_sibling)
+                                                            .unwrap_or(NodeOffset::NULL);
+                                                    }
+                                                    let ne = cnt / nf;
+                                                    if ne > 0 {
+                                                        elem_st
+                                                            .array_type(ne as u32)
+                                                            .as_basic_type_enum()
+                                                    } else {
+                                                        actual_alloca_type
+                                                    }
+                                                } else {
+                                                    actual_alloca_type
                                                 }
-                                                let ne = cnt / nf;
-                                                if ne > 0 { elem_st.array_type(ne as u32).as_basic_type_enum() } else { actual_alloca_type }
-                                            } else { actual_alloca_type }
-                                        } else { actual_alloca_type }
-                                    } else { actual_alloca_type }
-                                } else { actual_alloca_type };
+                                            } else {
+                                                actual_alloca_type
+                                            }
+                                        } else {
+                                            actual_alloca_type
+                                        }
+                                    } else {
+                                        actual_alloca_type
+                                    };
                                 let zero: BasicValueEnum = match actual_alloca_type {
                                     BasicTypeEnum::IntType(it) => it.const_zero().into(),
                                     BasicTypeEnum::FloatType(ft) => ft.const_zero().into(),
@@ -2658,7 +2841,11 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                                     format!("{}.static.{}", var_name, n)
                                 };
                                 let global = {
-                                    let g = self.module.add_global(actual_alloca_type, Some(AddressSpace::default()), &static_name);
+                                    let g = self.module.add_global(
+                                        actual_alloca_type,
+                                        Some(AddressSpace::default()),
+                                        &static_name,
+                                    );
                                     g.set_initializer(&zero);
                                     g.set_linkage(inkwell::module::Linkage::Internal);
                                     g
@@ -2673,39 +2860,134 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                                         if std::env::var("OPTICC_DEBUG_STATIC").is_ok() {
                                             eprintln!("DEBUG static-init: var={} st.count_fields()={} item_off={:?}", var_name, st.count_fields(), item_off);
                                         }
-                                        while item_off != NodeOffset::NULL && field_idx < st.count_fields() {
+                                        while item_off != NodeOffset::NULL
+                                            && field_idx < st.count_fields()
+                                        {
                                             if let Some(item) = arena.get(item_off) {
-                                                let field_ty = st.get_field_type_at_index(field_idx).unwrap_or_else(|| self.context.i32_type().as_basic_type_enum());
+                                                let field_ty = st
+                                                    .get_field_type_at_index(field_idx)
+                                                    .unwrap_or_else(|| {
+                                                        self.context.i32_type().as_basic_type_enum()
+                                                    });
                                                 let val: BasicValueEnum = match item.kind {
                                                     60 => {
                                                         // function pointer by name
-                                                        let fname = arena.get_string(NodeOffset(item.data)).unwrap_or("").to_string();
-                                                        if std::env::var("OPTICC_DEBUG_STATIC").is_ok() {
+                                                        let fname = arena
+                                                            .get_string(NodeOffset(item.data))
+                                                            .unwrap_or("")
+                                                            .to_string();
+                                                        if std::env::var("OPTICC_DEBUG_STATIC")
+                                                            .is_ok()
+                                                        {
                                                             eprintln!("DEBUG static-init field[{}]: fname={:?} found={}", field_idx, fname, self.module.get_function(&fname).is_some());
                                                         }
                                                         if fname.is_empty() {
-                                                            match field_ty { BasicTypeEnum::PointerType(pt) => pt.const_null().into(), BasicTypeEnum::IntType(it) => it.const_zero().into(), BasicTypeEnum::StructType(st2) => st2.const_zero().into(), BasicTypeEnum::ArrayType(at) => at.const_zero().into(), _ => self.context.i32_type().const_zero().into() }
-                                                        } else if let Some(f) = self.module.get_function(&fname) {
-                                                            f.as_global_value().as_pointer_value().into()
+                                                            match field_ty {
+                                                                BasicTypeEnum::PointerType(pt) => {
+                                                                    pt.const_null().into()
+                                                                }
+                                                                BasicTypeEnum::IntType(it) => {
+                                                                    it.const_zero().into()
+                                                                }
+                                                                BasicTypeEnum::StructType(st2) => {
+                                                                    st2.const_zero().into()
+                                                                }
+                                                                BasicTypeEnum::ArrayType(at) => {
+                                                                    at.const_zero().into()
+                                                                }
+                                                                _ => self
+                                                                    .context
+                                                                    .i32_type()
+                                                                    .const_zero()
+                                                                    .into(),
+                                                            }
+                                                        } else if let Some(f) =
+                                                            self.module.get_function(&fname)
+                                                        {
+                                                            f.as_global_value()
+                                                                .as_pointer_value()
+                                                                .into()
                                                         } else {
-                                                            match field_ty { BasicTypeEnum::PointerType(pt) => pt.const_null().into(), BasicTypeEnum::StructType(st2) => st2.const_zero().into(), BasicTypeEnum::ArrayType(at) => at.const_zero().into(), _ => self.context.i32_type().const_zero().into() }
+                                                            match field_ty {
+                                                                BasicTypeEnum::PointerType(pt) => {
+                                                                    pt.const_null().into()
+                                                                }
+                                                                BasicTypeEnum::StructType(st2) => {
+                                                                    st2.const_zero().into()
+                                                                }
+                                                                BasicTypeEnum::ArrayType(at) => {
+                                                                    at.const_zero().into()
+                                                                }
+                                                                _ => self
+                                                                    .context
+                                                                    .i32_type()
+                                                                    .const_zero()
+                                                                    .into(),
+                                                            }
                                                         }
                                                     }
-                                                    61 | 80 => { // integer literal
-                                                        match field_ty { BasicTypeEnum::IntType(it) => it.const_int(item.data as u64, false).into(), BasicTypeEnum::PointerType(pt) => pt.const_null().into(), BasicTypeEnum::StructType(st2) => st2.const_zero().into(), BasicTypeEnum::ArrayType(at) => at.const_zero().into(), _ => self.context.i32_type().const_zero().into() }
+                                                    61 | 80 => {
+                                                        // integer literal
+                                                        match field_ty {
+                                                            BasicTypeEnum::IntType(it) => it
+                                                                .const_int(item.data as u64, false)
+                                                                .into(),
+                                                            BasicTypeEnum::PointerType(pt) => {
+                                                                pt.const_null().into()
+                                                            }
+                                                            BasicTypeEnum::StructType(st2) => {
+                                                                st2.const_zero().into()
+                                                            }
+                                                            BasicTypeEnum::ArrayType(at) => {
+                                                                at.const_zero().into()
+                                                            }
+                                                            _ => self
+                                                                .context
+                                                                .i32_type()
+                                                                .const_zero()
+                                                                .into(),
+                                                        }
                                                     }
                                                     63 | 81 | 82 => {
                                                         // String literal → create a const global string and return its pointer
-                                                        let s = arena.get_string(NodeOffset(item.data)).unwrap_or("");
-                                                        let sv = self.context.const_string(s.as_bytes(), true);
-                                                        let sg = self.module.add_global(sv.get_type(), Some(AddressSpace::default()), ".str");
+                                                        let s = arena
+                                                            .get_string(NodeOffset(item.data))
+                                                            .unwrap_or("");
+                                                        let sv = self
+                                                            .context
+                                                            .const_string(s.as_bytes(), true);
+                                                        let sg = self.module.add_global(
+                                                            sv.get_type(),
+                                                            Some(AddressSpace::default()),
+                                                            ".str",
+                                                        );
                                                         sg.set_initializer(&sv);
                                                         sg.set_constant(true);
-                                                        sg.set_linkage(inkwell::module::Linkage::Private);
+                                                        sg.set_linkage(
+                                                            inkwell::module::Linkage::Private,
+                                                        );
                                                         sg.set_unnamed_addr(true);
                                                         sg.as_pointer_value().into()
                                                     }
-                                                    _ => { match field_ty { BasicTypeEnum::PointerType(pt) => pt.const_null().into(), BasicTypeEnum::IntType(it) => it.const_zero().into(), BasicTypeEnum::StructType(st2) => st2.const_zero().into(), BasicTypeEnum::ArrayType(at) => at.const_zero().into(), _ => self.context.i32_type().const_zero().into() } }
+                                                    _ => match field_ty {
+                                                        BasicTypeEnum::PointerType(pt) => {
+                                                            pt.const_null().into()
+                                                        }
+                                                        BasicTypeEnum::IntType(it) => {
+                                                            it.const_zero().into()
+                                                        }
+                                                        BasicTypeEnum::StructType(st2) => {
+                                                            st2.const_zero().into()
+                                                        }
+                                                        BasicTypeEnum::ArrayType(at) => {
+                                                            at.const_zero().into()
+                                                        }
+                                                        _ => self
+                                                            .context
+                                                            .i32_type()
+                                                            .const_zero()
+                                                            .into(),
+                                                    },
                                                 };
                                                 if std::env::var("OPTICC_DEBUG_STATIC").is_ok() {
                                                     eprintln!("DEBUG static-init field[{}]: item.kind={} val={:?}", field_idx, item.kind, val);
@@ -2713,54 +2995,178 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                                                 field_vals.push(val);
                                                 field_idx += 1;
                                                 item_off = item.next_sibling;
-                                            } else { break; }
+                                            } else {
+                                                break;
+                                            }
                                         }
                                         // Pad remaining fields with zeros
                                         while field_idx < st.count_fields() {
-                                            let field_ty = st.get_field_type_at_index(field_idx).unwrap_or_else(|| self.context.i32_type().as_basic_type_enum());
-                                            let z: BasicValueEnum = match field_ty { BasicTypeEnum::IntType(it) => it.const_zero().into(), BasicTypeEnum::FloatType(ft) => ft.const_zero().into(), BasicTypeEnum::PointerType(pt) => pt.const_null().into(), BasicTypeEnum::StructType(st2) => st2.const_zero().into(), BasicTypeEnum::ArrayType(at) => at.const_zero().into(), _ => self.context.i32_type().const_zero().into() };
+                                            let field_ty = st
+                                                .get_field_type_at_index(field_idx)
+                                                .unwrap_or_else(|| {
+                                                    self.context.i32_type().as_basic_type_enum()
+                                                });
+                                            let z: BasicValueEnum = match field_ty {
+                                                BasicTypeEnum::IntType(it) => {
+                                                    it.const_zero().into()
+                                                }
+                                                BasicTypeEnum::FloatType(ft) => {
+                                                    ft.const_zero().into()
+                                                }
+                                                BasicTypeEnum::PointerType(pt) => {
+                                                    pt.const_null().into()
+                                                }
+                                                BasicTypeEnum::StructType(st2) => {
+                                                    st2.const_zero().into()
+                                                }
+                                                BasicTypeEnum::ArrayType(at) => {
+                                                    at.const_zero().into()
+                                                }
+                                                _ => self.context.i32_type().const_zero().into(),
+                                            };
                                             field_vals.push(z);
                                             field_idx += 1;
                                         }
                                         if !field_vals.is_empty() {
-                                            let const_struct = self.context.const_struct(&field_vals.iter().map(|v| *v).collect::<Vec<_>>(), false);
+                                            let const_struct = self.context.const_struct(
+                                                &field_vals.iter().map(|v| *v).collect::<Vec<_>>(),
+                                                false,
+                                            );
                                             global.set_initializer(&const_struct);
                                         }
-                                    } else if let BasicTypeEnum::ArrayType(at) = actual_alloca_type {
+                                    } else if let BasicTypeEnum::ArrayType(at) = actual_alloca_type
+                                    {
                                         // Array of structs (e.g. static FuncDef arr[] = { {...}, {...} })
-                                        if let BasicTypeEnum::StructType(elem_st) = at.get_element_type() {
+                                        if let BasicTypeEnum::StructType(elem_st) =
+                                            at.get_element_type()
+                                        {
                                             let n_elems = at.len() as usize;
                                             let n_fields = elem_st.count_fields();
                                             let mut item_off = init_offset;
-                                            let mut struct_vals: Vec<inkwell::values::StructValue<'ctx>> = Vec::new();
+                                            let mut struct_vals: Vec<
+                                                inkwell::values::StructValue<'ctx>,
+                                            > = Vec::new();
                                             for _ in 0..n_elems {
-                                                let mut fvals: Vec<BasicValueEnum<'ctx>> = Vec::new();
+                                                let mut fvals: Vec<BasicValueEnum<'ctx>> =
+                                                    Vec::new();
                                                 let mut fi = 0u32;
-                                                while fi < n_fields && item_off != NodeOffset::NULL {
-                                                    let Some(item) = arena.get(item_off) else { break; };
-                                                    let ft = elem_st.get_field_type_at_index(fi).unwrap_or_else(|| self.context.i32_type().as_basic_type_enum());
+                                                while fi < n_fields && item_off != NodeOffset::NULL
+                                                {
+                                                    let Some(item) = arena.get(item_off) else {
+                                                        break;
+                                                    };
+                                                    let ft = elem_st
+                                                        .get_field_type_at_index(fi)
+                                                        .unwrap_or_else(|| {
+                                                            self.context
+                                                                .i32_type()
+                                                                .as_basic_type_enum()
+                                                        });
                                                     let val: BasicValueEnum = match item.kind {
                                                         60 => {
-                                                            let fname = arena.get_string(NodeOffset(item.data)).unwrap_or("").to_string();
-                                                            if fname.is_empty() { match ft { BasicTypeEnum::PointerType(pt) => pt.const_null().into(), BasicTypeEnum::IntType(it) => it.const_zero().into(), _ => self.context.i32_type().const_zero().into() } }
-                                                            else if let Some(f) = self.module.get_function(&fname) { f.as_global_value().as_pointer_value().into() }
-                                                            else if let Some(g) = self.module.get_global(&fname) { g.as_pointer_value().into() }
-                                                            else { match ft { BasicTypeEnum::PointerType(pt) => pt.const_null().into(), _ => self.context.i32_type().const_zero().into() } }
+                                                            let fname = arena
+                                                                .get_string(NodeOffset(item.data))
+                                                                .unwrap_or("")
+                                                                .to_string();
+                                                            if fname.is_empty() {
+                                                                match ft {
+                                                                    BasicTypeEnum::PointerType(
+                                                                        pt,
+                                                                    ) => pt.const_null().into(),
+                                                                    BasicTypeEnum::IntType(it) => {
+                                                                        it.const_zero().into()
+                                                                    }
+                                                                    _ => self
+                                                                        .context
+                                                                        .i32_type()
+                                                                        .const_zero()
+                                                                        .into(),
+                                                                }
+                                                            } else if let Some(f) =
+                                                                self.module.get_function(&fname)
+                                                            {
+                                                                f.as_global_value()
+                                                                    .as_pointer_value()
+                                                                    .into()
+                                                            } else if let Some(g) =
+                                                                self.module.get_global(&fname)
+                                                            {
+                                                                g.as_pointer_value().into()
+                                                            } else {
+                                                                match ft {
+                                                                    BasicTypeEnum::PointerType(
+                                                                        pt,
+                                                                    ) => pt.const_null().into(),
+                                                                    _ => self
+                                                                        .context
+                                                                        .i32_type()
+                                                                        .const_zero()
+                                                                        .into(),
+                                                                }
+                                                            }
                                                         }
-                                                        61 | 80 => { match ft { BasicTypeEnum::IntType(it) => it.const_int(item.data as u64, false).into(), BasicTypeEnum::PointerType(pt) => pt.const_null().into(), BasicTypeEnum::StructType(st2) => st2.const_zero().into(), BasicTypeEnum::ArrayType(at) => at.const_zero().into(), _ => self.context.i32_type().const_zero().into() } }
+                                                        61 | 80 => match ft {
+                                                            BasicTypeEnum::IntType(it) => it
+                                                                .const_int(item.data as u64, false)
+                                                                .into(),
+                                                            BasicTypeEnum::PointerType(pt) => {
+                                                                pt.const_null().into()
+                                                            }
+                                                            BasicTypeEnum::StructType(st2) => {
+                                                                st2.const_zero().into()
+                                                            }
+                                                            BasicTypeEnum::ArrayType(at) => {
+                                                                at.const_zero().into()
+                                                            }
+                                                            _ => self
+                                                                .context
+                                                                .i32_type()
+                                                                .const_zero()
+                                                                .into(),
+                                                        },
                                                         63 | 81 | 82 => {
-                                                            let s = arena.get_string(NodeOffset(item.data)).unwrap_or("");
-                                                            let sv = self.context.const_string(s.as_bytes(), true);
-                                                            let sg = self.module.add_global(sv.get_type(), Some(AddressSpace::default()), ".str");
+                                                            let s = arena
+                                                                .get_string(NodeOffset(item.data))
+                                                                .unwrap_or("");
+                                                            let sv = self
+                                                                .context
+                                                                .const_string(s.as_bytes(), true);
+                                                            let sg = self.module.add_global(
+                                                                sv.get_type(),
+                                                                Some(AddressSpace::default()),
+                                                                ".str",
+                                                            );
                                                             sg.set_initializer(&sv);
                                                             sg.set_constant(true);
-                                                            sg.set_linkage(inkwell::module::Linkage::Private);
+                                                            sg.set_linkage(
+                                                                inkwell::module::Linkage::Private,
+                                                            );
                                                             sg.set_unnamed_addr(true);
                                                             sg.as_pointer_value().into()
                                                         }
-                                                        _ => { match ft { BasicTypeEnum::PointerType(pt) => pt.const_null().into(), BasicTypeEnum::IntType(it) => it.const_zero().into(), BasicTypeEnum::StructType(st2) => st2.const_zero().into(), BasicTypeEnum::ArrayType(at2) => at2.const_zero().into(), _ => self.context.i32_type().const_zero().into() } }
+                                                        _ => match ft {
+                                                            BasicTypeEnum::PointerType(pt) => {
+                                                                pt.const_null().into()
+                                                            }
+                                                            BasicTypeEnum::IntType(it) => {
+                                                                it.const_zero().into()
+                                                            }
+                                                            BasicTypeEnum::StructType(st2) => {
+                                                                st2.const_zero().into()
+                                                            }
+                                                            BasicTypeEnum::ArrayType(at2) => {
+                                                                at2.const_zero().into()
+                                                            }
+                                                            _ => self
+                                                                .context
+                                                                .i32_type()
+                                                                .const_zero()
+                                                                .into(),
+                                                        },
                                                     };
-                                                    if std::env::var("OPTICC_DEBUG_ARRAY_INIT").is_ok() {
+                                                    if std::env::var("OPTICC_DEBUG_ARRAY_INIT")
+                                                        .is_ok()
+                                                    {
                                                         eprintln!("DEBUG ARRAY field[{}]: item.kind={} val={:?}", fi, item.kind, val);
                                                     }
                                                     fvals.push(val);
@@ -2769,11 +3175,39 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                                                 }
                                                 // Pad remaining fields
                                                 while fi < n_fields {
-                                                    let ft = elem_st.get_field_type_at_index(fi).unwrap_or_else(|| self.context.i32_type().as_basic_type_enum());
-                                                    fvals.push(match ft { BasicTypeEnum::IntType(it) => it.const_zero().into(), BasicTypeEnum::FloatType(flt) => flt.const_zero().into(), BasicTypeEnum::PointerType(pt) => pt.const_null().into(), BasicTypeEnum::StructType(st2) => st2.const_zero().into(), BasicTypeEnum::ArrayType(at2) => at2.const_zero().into(), _ => self.context.i32_type().const_zero().into() });
+                                                    let ft = elem_st
+                                                        .get_field_type_at_index(fi)
+                                                        .unwrap_or_else(|| {
+                                                            self.context
+                                                                .i32_type()
+                                                                .as_basic_type_enum()
+                                                        });
+                                                    fvals.push(match ft {
+                                                        BasicTypeEnum::IntType(it) => {
+                                                            it.const_zero().into()
+                                                        }
+                                                        BasicTypeEnum::FloatType(flt) => {
+                                                            flt.const_zero().into()
+                                                        }
+                                                        BasicTypeEnum::PointerType(pt) => {
+                                                            pt.const_null().into()
+                                                        }
+                                                        BasicTypeEnum::StructType(st2) => {
+                                                            st2.const_zero().into()
+                                                        }
+                                                        BasicTypeEnum::ArrayType(at2) => {
+                                                            at2.const_zero().into()
+                                                        }
+                                                        _ => self
+                                                            .context
+                                                            .i32_type()
+                                                            .const_zero()
+                                                            .into(),
+                                                    });
                                                     fi += 1;
                                                 }
-                                                struct_vals.push(self.context.const_struct(&fvals, false));
+                                                struct_vals
+                                                    .push(self.context.const_struct(&fvals, false));
                                             }
                                             if !struct_vals.is_empty() {
                                                 let arr_const = elem_st.const_array(&struct_vals);
@@ -2784,118 +3218,147 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                                 }
                                 let var_ptr = global.as_pointer_value();
                                 if let Some((struct_type, field_names)) = struct_info.clone() {
-                                    self.struct_fields.insert(var_name.clone(), field_names.clone());
+                                    self.struct_fields
+                                        .insert(var_name.clone(), field_names.clone());
                                     if actual_alloca_type.is_pointer_type() {
-                                        self.pointer_struct_types.insert(var_name.clone(), struct_type);
+                                        self.pointer_struct_types
+                                            .insert(var_name.clone(), struct_type);
                                     }
                                 }
                                 if matches!(spec_kind, 4 | 5) {
                                     if let Some(sn) = spec_node {
                                         if sn.data != 0 {
-                                            if let Some(tag) = arena.get_string(NodeOffset(sn.data)) {
-                                                self.var_struct_tag.insert(var_name.clone(), tag.to_string());
-                                                self.global_struct_tags.insert(var_name.clone(), tag.to_string());
+                                            if let Some(tag) = arena.get_string(NodeOffset(sn.data))
+                                            {
+                                                self.var_struct_tag
+                                                    .insert(var_name.clone(), tag.to_string());
+                                                self.global_struct_tags
+                                                    .insert(var_name.clone(), tag.to_string());
                                             }
                                         }
                                     }
                                 }
-                                self.insert_scoped_variable(var_name.clone(), VariableBinding {
-                                    ptr: var_ptr,
-                                    pointee_type: actual_alloca_type,
-                                    function_type,
-                                });
-                                self.global_variables.insert(var_name.clone(), VariableBinding {
-                                    ptr: var_ptr,
-                                    pointee_type: actual_alloca_type,
-                                    function_type,
-                                });
-                                if matches!(spec_kind, 3 | 14) && actual_alloca_type.is_pointer_type() {
+                                self.insert_scoped_variable(
+                                    var_name.clone(),
+                                    VariableBinding {
+                                        ptr: var_ptr,
+                                        pointee_type: actual_alloca_type,
+                                        function_type,
+                                    },
+                                );
+                                self.global_variables.insert(
+                                    var_name.clone(),
+                                    VariableBinding {
+                                        ptr: var_ptr,
+                                        pointee_type: actual_alloca_type,
+                                        function_type,
+                                    },
+                                );
+                                if matches!(spec_kind, 3 | 14)
+                                    && actual_alloca_type.is_pointer_type()
+                                {
                                     self.byte_pointer_vars.insert(var_name.clone());
                                 }
                             } else {
-                            let var_ptr = self
-                                .build_entry_alloca(actual_alloca_type, &var_name)
-                                .or_else(|_| self.builder.build_alloca(actual_alloca_type, &var_name).map_err(|_| BackendError::InvalidNode))?;
-                            if let Some((struct_type, field_names)) = struct_info.clone() {
-                                self.struct_fields
-                                    .insert(var_name.clone(), field_names.clone());
-                                if actual_alloca_type.is_pointer_type() {
-                                    self.pointer_struct_types
-                                        .insert(var_name.clone(), struct_type);
+                                let var_ptr = self
+                                    .build_entry_alloca(actual_alloca_type, &var_name)
+                                    .or_else(|_| {
+                                        self.builder
+                                            .build_alloca(actual_alloca_type, &var_name)
+                                            .map_err(|_| BackendError::InvalidNode)
+                                    })?;
+                                if let Some((struct_type, field_names)) = struct_info.clone() {
+                                    self.struct_fields
+                                        .insert(var_name.clone(), field_names.clone());
+                                    if actual_alloca_type.is_pointer_type() {
+                                        self.pointer_struct_types
+                                            .insert(var_name.clone(), struct_type);
+                                    }
                                 }
-                            }
-                            // Record struct tag for bitfield lookups
-                            if matches!(spec_kind, 4 | 5) {
-                                if let Some(sn) = spec_node {
-                                    if sn.data != 0 {
-                                        if let Some(tag) = arena.get_string(NodeOffset(sn.data)) {
-                                            self.var_struct_tag.insert(var_name.clone(), tag.to_string());
+                                // Record struct tag for bitfield lookups
+                                if matches!(spec_kind, 4 | 5) {
+                                    if let Some(sn) = spec_node {
+                                        if sn.data != 0 {
+                                            if let Some(tag) = arena.get_string(NodeOffset(sn.data))
+                                            {
+                                                self.var_struct_tag
+                                                    .insert(var_name.clone(), tag.to_string());
+                                            }
                                         }
                                     }
                                 }
-                            }
-                            self.insert_scoped_variable(
-                                var_name.clone(),
-                                VariableBinding {
-                                    ptr: var_ptr,
-                                    pointee_type: actual_alloca_type,
-                                    function_type,
-                                },
-                            );
-                            if actual_alloca_type.is_pointer_type()
-                                && (matches!(spec_kind, 3 | 14)
-                                    || (init_offset != NodeOffset::NULL
-                                        && self.subtree_has_byte_pointer_ident(arena, init_offset)))
-                            {
-                                self.byte_pointer_vars.insert(var_name.clone());
-                            }
-                            // Process initializer only for non-array types
-                            // (array initializers require separate aggregate handling)
-                            if !is_array {
-                                if init_offset != NodeOffset::NULL {
-                                    let is_designated_init = arena
-                                        .get(init_offset)
-                                        .map(|n| n.kind == 205)
-                                        .unwrap_or(false);
-                                    if is_designated_init {
-                                        if let BasicTypeEnum::StructType(struct_type) =
-                                            actual_alloca_type
-                                        {
-                                            self.lower_designated_init_into_struct(
+                                self.insert_scoped_variable(
+                                    var_name.clone(),
+                                    VariableBinding {
+                                        ptr: var_ptr,
+                                        pointee_type: actual_alloca_type,
+                                        function_type,
+                                    },
+                                );
+                                if actual_alloca_type.is_pointer_type()
+                                    && (matches!(spec_kind, 3 | 14)
+                                        || (init_offset != NodeOffset::NULL
+                                            && self.subtree_has_byte_pointer_ident(
                                                 arena,
                                                 init_offset,
-                                                var_ptr,
-                                                struct_type,
-                                                &var_name,
-                                            )?;
-                                        }
-                                    } else if let Some(val) =
-                                        self.lower_expr(arena, init_offset)?
-                                    {
-                                        if Self::types_compatible(actual_alloca_type, val) {
-                                            let _ = self
-                                                .builder
-                                                .build_store(var_ptr, val)
-                                                .map_err(|_| BackendError::InvalidNode);
-                                        } else if let (BasicTypeEnum::PointerType(ptr_ty), BasicValueEnum::IntValue(iv)) =
-                                            (actual_alloca_type, val)
+                                            )))
+                                {
+                                    self.byte_pointer_vars.insert(var_name.clone());
+                                }
+                                // Process initializer only for non-array types
+                                // (array initializers require separate aggregate handling)
+                                if !is_array {
+                                    if init_offset != NodeOffset::NULL {
+                                        let is_designated_init = arena
+                                            .get(init_offset)
+                                            .map(|n| n.kind == 205)
+                                            .unwrap_or(false);
+                                        if is_designated_init {
+                                            if let BasicTypeEnum::StructType(struct_type) =
+                                                actual_alloca_type
+                                            {
+                                                self.lower_designated_init_into_struct(
+                                                    arena,
+                                                    init_offset,
+                                                    var_ptr,
+                                                    struct_type,
+                                                    &var_name,
+                                                )?;
+                                            }
+                                        } else if let Some(val) =
+                                            self.lower_expr(arena, init_offset)?
                                         {
-                                            let coerced = if iv.get_zero_extended_constant() == Some(0) {
-                                                ptr_ty.const_null().as_basic_value_enum()
-                                            } else {
-                                                self.builder
-                                                    .build_int_to_ptr(iv, ptr_ty, "init_int2ptr")
-                                                    .map_err(|_| BackendError::InvalidNode)?
-                                                    .as_basic_value_enum()
-                                            };
-                                            let _ = self
-                                                .builder
-                                                .build_store(var_ptr, coerced)
-                                                .map_err(|_| BackendError::InvalidNode);
+                                            if Self::types_compatible(actual_alloca_type, val) {
+                                                let _ = self
+                                                    .builder
+                                                    .build_store(var_ptr, val)
+                                                    .map_err(|_| BackendError::InvalidNode);
+                                            } else if let (
+                                                BasicTypeEnum::PointerType(ptr_ty),
+                                                BasicValueEnum::IntValue(iv),
+                                            ) = (actual_alloca_type, val)
+                                            {
+                                                let coerced =
+                                                    if iv.get_zero_extended_constant() == Some(0) {
+                                                        ptr_ty.const_null().as_basic_value_enum()
+                                                    } else {
+                                                        self.builder
+                                                            .build_int_to_ptr(
+                                                                iv,
+                                                                ptr_ty,
+                                                                "init_int2ptr",
+                                                            )
+                                                            .map_err(|_| BackendError::InvalidNode)?
+                                                            .as_basic_value_enum()
+                                                    };
+                                                let _ = self
+                                                    .builder
+                                                    .build_store(var_ptr, coerced)
+                                                    .map_err(|_| BackendError::InvalidNode);
+                                            }
                                         }
                                     }
                                 }
-                            }
                             } // end else (non-static)
                         }
                     }
@@ -2904,13 +3367,12 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                     60 | 7 | 8 | 9 => {
                         let actual_alloca_type =
                             self.declarator_llvm_type(arena, Some(child), alloca_type);
-                        let function_type =
-                            self.function_type_from_declarator(
-                                arena,
-                                Some(child),
-                                alloca_type,
-                                spec_kind,
-                            );
+                        let function_type = self.function_type_from_declarator(
+                            arena,
+                            Some(child),
+                            alloca_type,
+                            spec_kind,
+                        );
                         let var_name_opt = if child.kind == 60 {
                             arena
                                 .get_string(NodeOffset(child.data))
@@ -2940,7 +3402,11 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                                     format!("{}.static.{}", var_name, n)
                                 };
                                 let global = {
-                                    let g = self.module.add_global(actual_alloca_type, Some(AddressSpace::default()), &static_name);
+                                    let g = self.module.add_global(
+                                        actual_alloca_type,
+                                        Some(AddressSpace::default()),
+                                        &static_name,
+                                    );
                                     g.set_initializer(&zero);
                                     g.set_linkage(inkwell::module::Linkage::Internal);
                                     g
@@ -2951,22 +3417,105 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                                         let mut field_vals: Vec<BasicValueEnum> = Vec::new();
                                         let mut item_off = init_offset;
                                         let mut field_idx = 0u32;
-                                        while item_off != NodeOffset::NULL && field_idx < st.count_fields() {
+                                        while item_off != NodeOffset::NULL
+                                            && field_idx < st.count_fields()
+                                        {
                                             if let Some(item) = arena.get(item_off) {
-                                                let field_ty = st.get_field_type_at_index(field_idx).unwrap_or_else(|| self.context.i32_type().as_basic_type_enum());
+                                                let field_ty = st
+                                                    .get_field_type_at_index(field_idx)
+                                                    .unwrap_or_else(|| {
+                                                        self.context.i32_type().as_basic_type_enum()
+                                                    });
                                                 let val: BasicValueEnum = match item.kind {
-                                                    60 => { // ident (function pointer name)
-                                                        let fname = arena.get_string(NodeOffset(item.data)).unwrap_or("").to_string();
+                                                    60 => {
+                                                        // ident (function pointer name)
+                                                        let fname = arena
+                                                            .get_string(NodeOffset(item.data))
+                                                            .unwrap_or("")
+                                                            .to_string();
                                                         if fname.is_empty() {
-                                                            match field_ty { BasicTypeEnum::PointerType(pt) => pt.const_null().into(), BasicTypeEnum::IntType(it) => it.const_zero().into(), BasicTypeEnum::StructType(st2) => st2.const_zero().into(), BasicTypeEnum::ArrayType(at) => at.const_zero().into(), _ => self.context.i32_type().const_zero().into() }
-                                                        } else if let Some(f) = self.module.get_function(&fname) {
-                                                            f.as_global_value().as_pointer_value().into()
+                                                            match field_ty {
+                                                                BasicTypeEnum::PointerType(pt) => {
+                                                                    pt.const_null().into()
+                                                                }
+                                                                BasicTypeEnum::IntType(it) => {
+                                                                    it.const_zero().into()
+                                                                }
+                                                                BasicTypeEnum::StructType(st2) => {
+                                                                    st2.const_zero().into()
+                                                                }
+                                                                BasicTypeEnum::ArrayType(at) => {
+                                                                    at.const_zero().into()
+                                                                }
+                                                                _ => self
+                                                                    .context
+                                                                    .i32_type()
+                                                                    .const_zero()
+                                                                    .into(),
+                                                            }
+                                                        } else if let Some(f) =
+                                                            self.module.get_function(&fname)
+                                                        {
+                                                            f.as_global_value()
+                                                                .as_pointer_value()
+                                                                .into()
                                                         } else {
-                                                            match field_ty { BasicTypeEnum::PointerType(pt) => pt.const_null().into(), BasicTypeEnum::StructType(st2) => st2.const_zero().into(), BasicTypeEnum::ArrayType(at) => at.const_zero().into(), _ => self.context.i32_type().const_zero().into() }
+                                                            match field_ty {
+                                                                BasicTypeEnum::PointerType(pt) => {
+                                                                    pt.const_null().into()
+                                                                }
+                                                                BasicTypeEnum::StructType(st2) => {
+                                                                    st2.const_zero().into()
+                                                                }
+                                                                BasicTypeEnum::ArrayType(at) => {
+                                                                    at.const_zero().into()
+                                                                }
+                                                                _ => self
+                                                                    .context
+                                                                    .i32_type()
+                                                                    .const_zero()
+                                                                    .into(),
+                                                            }
                                                         }
                                                     }
-                                                    61 | 80 => { match field_ty { BasicTypeEnum::IntType(it) => it.const_int(item.data as u64, false).into(), BasicTypeEnum::PointerType(pt) => pt.const_null().into(), BasicTypeEnum::StructType(st2) => st2.const_zero().into(), BasicTypeEnum::ArrayType(at) => at.const_zero().into(), _ => self.context.i32_type().const_zero().into() } }
-                                                    _ => { match field_ty { BasicTypeEnum::PointerType(pt) => pt.const_null().into(), BasicTypeEnum::IntType(it) => it.const_zero().into(), BasicTypeEnum::StructType(st2) => st2.const_zero().into(), BasicTypeEnum::ArrayType(at) => at.const_zero().into(), _ => self.context.i32_type().const_zero().into() } }
+                                                    61 | 80 => match field_ty {
+                                                        BasicTypeEnum::IntType(it) => it
+                                                            .const_int(item.data as u64, false)
+                                                            .into(),
+                                                        BasicTypeEnum::PointerType(pt) => {
+                                                            pt.const_null().into()
+                                                        }
+                                                        BasicTypeEnum::StructType(st2) => {
+                                                            st2.const_zero().into()
+                                                        }
+                                                        BasicTypeEnum::ArrayType(at) => {
+                                                            at.const_zero().into()
+                                                        }
+                                                        _ => self
+                                                            .context
+                                                            .i32_type()
+                                                            .const_zero()
+                                                            .into(),
+                                                    },
+                                                    _ => match field_ty {
+                                                        BasicTypeEnum::PointerType(pt) => {
+                                                            pt.const_null().into()
+                                                        }
+                                                        BasicTypeEnum::IntType(it) => {
+                                                            it.const_zero().into()
+                                                        }
+                                                        BasicTypeEnum::StructType(st2) => {
+                                                            st2.const_zero().into()
+                                                        }
+                                                        BasicTypeEnum::ArrayType(at) => {
+                                                            at.const_zero().into()
+                                                        }
+                                                        _ => self
+                                                            .context
+                                                            .i32_type()
+                                                            .const_zero()
+                                                            .into(),
+                                                    },
                                                 };
                                                 if std::env::var("OPTICC_DEBUG_STATIC").is_ok() {
                                                     eprintln!("DEBUG unconditional lower_var_decl struct field[{}]: item.kind={} val={:?}", field_idx, item.kind, val);
@@ -2974,90 +3523,138 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                                                 field_vals.push(val);
                                                 field_idx += 1;
                                                 item_off = item.next_sibling;
-                                            } else { break; }
+                                            } else {
+                                                break;
+                                            }
                                         }
                                         while field_idx < st.count_fields() {
-                                            let field_ty = st.get_field_type_at_index(field_idx).unwrap_or_else(|| self.context.i32_type().as_basic_type_enum());
-                                            let z: BasicValueEnum = match field_ty { BasicTypeEnum::IntType(it) => it.const_zero().into(), BasicTypeEnum::FloatType(ft) => ft.const_zero().into(), BasicTypeEnum::PointerType(pt) => pt.const_null().into(), BasicTypeEnum::StructType(st2) => st2.const_zero().into(), BasicTypeEnum::ArrayType(at) => at.const_zero().into(), _ => self.context.i32_type().const_zero().into() };
+                                            let field_ty = st
+                                                .get_field_type_at_index(field_idx)
+                                                .unwrap_or_else(|| {
+                                                    self.context.i32_type().as_basic_type_enum()
+                                                });
+                                            let z: BasicValueEnum = match field_ty {
+                                                BasicTypeEnum::IntType(it) => {
+                                                    it.const_zero().into()
+                                                }
+                                                BasicTypeEnum::FloatType(ft) => {
+                                                    ft.const_zero().into()
+                                                }
+                                                BasicTypeEnum::PointerType(pt) => {
+                                                    pt.const_null().into()
+                                                }
+                                                BasicTypeEnum::StructType(st2) => {
+                                                    st2.const_zero().into()
+                                                }
+                                                BasicTypeEnum::ArrayType(at) => {
+                                                    at.const_zero().into()
+                                                }
+                                                _ => self.context.i32_type().const_zero().into(),
+                                            };
                                             field_vals.push(z);
                                             field_idx += 1;
                                         }
                                         if !field_vals.is_empty() {
-                                            let const_struct = self.context.const_struct(&field_vals.iter().map(|v| *v).collect::<Vec<_>>(), false);
+                                            let const_struct = self.context.const_struct(
+                                                &field_vals.iter().map(|v| *v).collect::<Vec<_>>(),
+                                                false,
+                                            );
                                             global.set_initializer(&const_struct);
                                         }
                                     }
                                 }
                                 let var_ptr = global.as_pointer_value();
                                 if let Some((struct_type, field_names)) = struct_info.clone() {
-                                    self.struct_fields.insert(var_name.clone(), field_names.clone());
+                                    self.struct_fields
+                                        .insert(var_name.clone(), field_names.clone());
                                     if actual_alloca_type.is_pointer_type() {
-                                        self.pointer_struct_types.insert(var_name.clone(), struct_type);
+                                        self.pointer_struct_types
+                                            .insert(var_name.clone(), struct_type);
                                     }
                                 }
                                 if matches!(spec_kind, 4 | 5) {
                                     if let Some(sn) = spec_node {
                                         if sn.data != 0 {
-                                            if let Some(tag) = arena.get_string(NodeOffset(sn.data)) {
-                                                self.var_struct_tag.insert(var_name.clone(), tag.to_string());
-                                                self.global_struct_tags.insert(var_name.clone(), tag.to_string());
+                                            if let Some(tag) = arena.get_string(NodeOffset(sn.data))
+                                            {
+                                                self.var_struct_tag
+                                                    .insert(var_name.clone(), tag.to_string());
+                                                self.global_struct_tags
+                                                    .insert(var_name.clone(), tag.to_string());
                                             }
                                         }
                                     }
                                 }
-                                self.insert_scoped_variable(var_name.clone(), VariableBinding {
-                                    ptr: var_ptr,
-                                    pointee_type: actual_alloca_type,
-                                    function_type,
-                                });
-                                self.global_variables.insert(var_name.clone(), VariableBinding {
-                                    ptr: var_ptr,
-                                    pointee_type: actual_alloca_type,
-                                    function_type,
-                                });
-                                if matches!(spec_kind, 3 | 14) && actual_alloca_type.is_pointer_type() {
+                                self.insert_scoped_variable(
+                                    var_name.clone(),
+                                    VariableBinding {
+                                        ptr: var_ptr,
+                                        pointee_type: actual_alloca_type,
+                                        function_type,
+                                    },
+                                );
+                                self.global_variables.insert(
+                                    var_name.clone(),
+                                    VariableBinding {
+                                        ptr: var_ptr,
+                                        pointee_type: actual_alloca_type,
+                                        function_type,
+                                    },
+                                );
+                                if matches!(spec_kind, 3 | 14)
+                                    && actual_alloca_type.is_pointer_type()
+                                {
                                     self.byte_pointer_vars.insert(var_name.clone());
                                 }
                                 // Skip the initializer elements (they are siblings of this declarator)
                                 // by breaking out — we only have one declarator in this static case
                                 break;
                             } else {
-                            let var_ptr = self
-                                .build_entry_alloca(actual_alloca_type, &var_name)
-                                .or_else(|_| self.builder.build_alloca(actual_alloca_type, &var_name).map_err(|_| BackendError::InvalidNode))?;
-                            if let Some((struct_type, field_names)) = struct_info.clone() {
-                                self.struct_fields
-                                    .insert(var_name.clone(), field_names.clone());
-                                if actual_alloca_type.is_pointer_type() {
-                                    self.pointer_struct_types
-                                        .insert(var_name.clone(), struct_type);
+                                let var_ptr = self
+                                    .build_entry_alloca(actual_alloca_type, &var_name)
+                                    .or_else(|_| {
+                                        self.builder
+                                            .build_alloca(actual_alloca_type, &var_name)
+                                            .map_err(|_| BackendError::InvalidNode)
+                                    })?;
+                                if let Some((struct_type, field_names)) = struct_info.clone() {
+                                    self.struct_fields
+                                        .insert(var_name.clone(), field_names.clone());
+                                    if actual_alloca_type.is_pointer_type() {
+                                        self.pointer_struct_types
+                                            .insert(var_name.clone(), struct_type);
+                                    }
                                 }
-                            }
-                            // Record struct tag for bitfield lookups
-                            if matches!(spec_kind, 4 | 5) {
-                                if let Some(sn) = spec_node {
-                                    if sn.data != 0 {
-                                        if let Some(tag) = arena.get_string(NodeOffset(sn.data)) {
-                                            self.var_struct_tag.insert(var_name.clone(), tag.to_string());
+                                // Record struct tag for bitfield lookups
+                                if matches!(spec_kind, 4 | 5) {
+                                    if let Some(sn) = spec_node {
+                                        if sn.data != 0 {
+                                            if let Some(tag) = arena.get_string(NodeOffset(sn.data))
+                                            {
+                                                self.var_struct_tag
+                                                    .insert(var_name.clone(), tag.to_string());
+                                            }
                                         }
                                     }
                                 }
-                            }
-                            self.insert_scoped_variable(
-                                var_name.clone(),
-                                VariableBinding {
-                                    ptr: var_ptr,
-                                    pointee_type: actual_alloca_type,
-                                    function_type,
-                                },
-                            );
-                            if actual_alloca_type.is_pointer_type()
-                                && (matches!(spec_kind, 3 | 14)
-                                    || (init_offset != NodeOffset::NULL
-                                        && self.subtree_has_byte_pointer_ident(arena, init_offset)))
-                            {
-                                self.byte_pointer_vars.insert(var_name);
-                            }
+                                self.insert_scoped_variable(
+                                    var_name.clone(),
+                                    VariableBinding {
+                                        ptr: var_ptr,
+                                        pointee_type: actual_alloca_type,
+                                        function_type,
+                                    },
+                                );
+                                if actual_alloca_type.is_pointer_type()
+                                    && (matches!(spec_kind, 3 | 14)
+                                        || (init_offset != NodeOffset::NULL
+                                            && self.subtree_has_byte_pointer_ident(
+                                                arena,
+                                                init_offset,
+                                            )))
+                                {
+                                    self.byte_pointer_vars.insert(var_name);
+                                }
                             } // end else (non-static)
                         }
                     }
@@ -3134,7 +3731,9 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                 };
                 Ok(Some((
                     ptr,
-                    self.context.ptr_type(AddressSpace::default()).as_basic_type_enum(),
+                    self.context
+                        .ptr_type(AddressSpace::default())
+                        .as_basic_type_enum(),
                 )))
             }
             68 => self.lower_array_element_ptr(arena, node),
@@ -3158,7 +3757,11 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
             Some(name) if !name.is_empty() => name,
             // Legacy: try next_sibling (old format backward compat)
             _ => match arena.get(node.next_sibling).and_then(|n| {
-                if n.kind == 60 { arena.get_string(NodeOffset(n.data)).map(|s| s.to_string()) } else { None }
+                if n.kind == 60 {
+                    arena.get_string(NodeOffset(n.data)).map(|s| s.to_string())
+                } else {
+                    None
+                }
             }) {
                 Some(name) => name,
                 None => return Ok(None),
@@ -3182,7 +3785,8 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                 .cloned()
                 .or_else(|| self.global_struct_tags.get(base_name).cloned())
                 .and_then(|tag| {
-                    self.struct_gep_info.get(&tag)
+                    self.struct_gep_info
+                        .get(&tag)
                         .and_then(|m| m.get(&field_name).copied())
                 });
 
@@ -3196,12 +3800,16 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                     .get(base_name)
                     .cloned()
                     .or_else(|| self.global_struct_tags.get(base_name).cloned())
-                    .and_then(|tag| self.struct_tag_fields.get(&tag)
-                        .and_then(|fields| fields.iter().position(|f| f == &field_name)));
+                    .and_then(|tag| {
+                        self.struct_tag_fields
+                            .get(&tag)
+                            .and_then(|fields| fields.iter().position(|f| f == &field_name))
+                    });
                 if let Some(idx) = tag_field_lookup {
                     idx as u32
                 } else {
-                    let idx = self.struct_fields
+                    let idx = self
+                        .struct_fields
                         .get(base_name)
                         .and_then(|fields| fields.iter().position(|f| f == &field_name))
                         .unwrap_or(0) as u32;
@@ -3223,20 +3831,31 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
 
             if is_arrow {
                 // Arrow operator: base is a pointer to struct. Load the pointer, then GEP.
-                let struct_type = self.pointer_struct_types.get(base_name).copied()
+                let struct_type = self
+                    .pointer_struct_types
+                    .get(base_name)
+                    .copied()
                     .or_else(|| {
-                        self.var_struct_tag.get(base_name).cloned()
+                        self.var_struct_tag
+                            .get(base_name)
+                            .cloned()
                             .and_then(|tag| self.struct_tag_types.get(&tag).copied())
                     });
                 let Some(struct_type) = struct_type else {
                     return Ok(None);
                 };
                 // Load the pointer
-                let loaded_ptr = self.builder
-                    .build_load(self.context.ptr_type(AddressSpace::default()), binding.ptr, "arrow.load")
+                let loaded_ptr = self
+                    .builder
+                    .build_load(
+                        self.context.ptr_type(AddressSpace::default()),
+                        binding.ptr,
+                        "arrow.load",
+                    )
                     .map_err(|_| BackendError::InvalidNode)?
                     .into_pointer_value();
-                let field_ptr = self.builder
+                let field_ptr = self
+                    .builder
                     .build_struct_gep(struct_type, loaded_ptr, field_idx, "arrow.gep")
                     .map_err(|_| BackendError::InvalidNode)?;
                 let field_type = struct_type
@@ -3265,24 +3884,38 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
             // Dot access: base is also in memory. Use lower_member_access_ptr on base to get lvalue ptr
             if let Some(base_node) = arena.get(base_offset) {
                 if base_node.kind == 68 {
-                    if let Some((elem_ptr, elem_type)) = self.lower_array_element_ptr(arena, base_node)? {
+                    if let Some((elem_ptr, elem_type)) =
+                        self.lower_array_element_ptr(arena, base_node)?
+                    {
                         if let BasicTypeEnum::StructType(struct_type) = elem_type {
                             for (tag_name, fields) in &self.struct_tag_fields {
                                 if let Some(st) = self.struct_tag_types.get(tag_name).copied() {
                                     let types_match = st == struct_type || {
                                         let n = st.count_fields();
                                         n == struct_type.count_fields()
-                                            && (0..n).all(|i| st.get_field_type_at_index(i) == struct_type.get_field_type_at_index(i))
+                                            && (0..n).all(|i| {
+                                                st.get_field_type_at_index(i)
+                                                    == struct_type.get_field_type_at_index(i)
+                                            })
                                     };
                                     if types_match {
-                                        if let Some(idx) = fields.iter().position(|f| f == &field_name) {
+                                        if let Some(idx) =
+                                            fields.iter().position(|f| f == &field_name)
+                                        {
                                             let gep = self
                                                 .builder
-                                                .build_struct_gep(struct_type, elem_ptr, idx as u32, "arr.dot.gep")
+                                                .build_struct_gep(
+                                                    struct_type,
+                                                    elem_ptr,
+                                                    idx as u32,
+                                                    "arr.dot.gep",
+                                                )
                                                 .map_err(|_| BackendError::InvalidNode)?;
                                             let ft = struct_type
                                                 .get_field_type_at_index(idx as u32)
-                                                .unwrap_or_else(|| self.context.i32_type().as_basic_type_enum());
+                                                .unwrap_or_else(|| {
+                                                    self.context.i32_type().as_basic_type_enum()
+                                                });
                                             return Ok(Some((gep, ft)));
                                         }
                                     }
@@ -3294,12 +3927,17 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                 if base_node.kind == 69 {
                     // Recursively get the lvalue pointer of the base
                     let base_node_cloned = *base_node;
-                    if let Some((base_ptr, base_type)) = self.lower_member_access_ptr(arena, &base_node_cloned)? {
+                    if let Some((base_ptr, base_type)) =
+                        self.lower_member_access_ptr(arena, &base_node_cloned)?
+                    {
                         if let BasicTypeEnum::StructType(struct_type) = base_type {
                             // Find field index in the nested struct type
                             let field_name_of_base = {
                                 let fso = NodeOffset(base_node_cloned.data & 0x7FFF_FFFF);
-                                arena.get_string(fso).map(|s| s.to_string()).unwrap_or_default()
+                                arena
+                                    .get_string(fso)
+                                    .map(|s| s.to_string())
+                                    .unwrap_or_default()
                             };
                             // Look up field_name in the nested struct type
                             // We compare by struct identity OR by layout (field count + field types).
@@ -3310,17 +3948,30 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                                 if let Some(st) = self.struct_tag_types.get(tag_name).copied() {
                                     let types_match = st == struct_type || {
                                         let n = st.count_fields();
-                                        n == struct_type.count_fields() && (0..n).all(|i| {
-                                            st.get_field_type_at_index(i) == struct_type.get_field_type_at_index(i)
-                                        })
+                                        n == struct_type.count_fields()
+                                            && (0..n).all(|i| {
+                                                st.get_field_type_at_index(i)
+                                                    == struct_type.get_field_type_at_index(i)
+                                            })
                                     };
                                     if types_match {
-                                        if let Some(idx) = fields.iter().position(|f| f == &field_name) {
-                                            let gep = self.builder
-                                                .build_struct_gep(struct_type, base_ptr, idx as u32, "nested.dot.gep")
+                                        if let Some(idx) =
+                                            fields.iter().position(|f| f == &field_name)
+                                        {
+                                            let gep = self
+                                                .builder
+                                                .build_struct_gep(
+                                                    struct_type,
+                                                    base_ptr,
+                                                    idx as u32,
+                                                    "nested.dot.gep",
+                                                )
                                                 .map_err(|_| BackendError::InvalidNode)?;
-                                            let ft = struct_type.get_field_type_at_index(idx as u32)
-                                                .unwrap_or_else(|| self.context.i32_type().as_basic_type_enum());
+                                            let ft = struct_type
+                                                .get_field_type_at_index(idx as u32)
+                                                .unwrap_or_else(|| {
+                                                    self.context.i32_type().as_basic_type_enum()
+                                                });
                                             found = Some((gep, ft));
                                             break;
                                         }
@@ -3354,11 +4005,17 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                                 if let Some(idx) = fallback_idx {
                                     let gep = self
                                         .builder
-                                        .build_struct_gep(struct_type, base_ptr, idx, "nested.dot.fallback.gep")
+                                        .build_struct_gep(
+                                            struct_type,
+                                            base_ptr,
+                                            idx,
+                                            "nested.dot.fallback.gep",
+                                        )
                                         .map_err(|_| BackendError::InvalidNode)?;
-                                    let ft = struct_type
-                                        .get_field_type_at_index(idx)
-                                        .unwrap_or_else(|| self.context.i32_type().as_basic_type_enum());
+                                    let ft =
+                                        struct_type.get_field_type_at_index(idx).unwrap_or_else(
+                                            || self.context.i32_type().as_basic_type_enum(),
+                                        );
                                     return Ok(Some((gep, ft)));
                                 }
                             }
@@ -3394,17 +4051,23 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                     let root_var = self.find_member_access_root_var(arena, base_node);
                     if let Some(root_name) = root_var {
                         // Get the struct type from pointer_struct_types (same struct for self-ref)
-                        if let Some(struct_type) = self.pointer_struct_types.get(&root_name).copied() {
+                        if let Some(struct_type) =
+                            self.pointer_struct_types.get(&root_name).copied()
+                        {
                             // Look up field names from struct_fields
                             if let Some(fields) = self.struct_fields.get(&root_name) {
-                                let field_idx = fields.iter().position(|f| f == &field_name).unwrap_or(0) as u32;
+                                let field_idx =
+                                    fields.iter().position(|f| f == &field_name).unwrap_or(0)
+                                        as u32;
                                 let field_ptr = self
                                     .builder
                                     .build_struct_gep(struct_type, base_ptr, field_idx, "chain.gep")
                                     .map_err(|_| BackendError::InvalidNode)?;
                                 let ft = struct_type
                                     .get_field_type_at_index(field_idx)
-                                    .unwrap_or_else(|| self.context.i32_type().as_basic_type_enum());
+                                    .unwrap_or_else(|| {
+                                        self.context.i32_type().as_basic_type_enum()
+                                    });
                                 return Ok(Some((field_ptr, ft)));
                             }
                         }
@@ -3413,15 +4076,20 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                     // Fallback: search struct_tag_types/struct_tag_fields for a struct with this field
                     for (tag_name, fields) in &self.struct_tag_fields {
                         if fields.contains(&field_name) {
-                            if let Some(struct_type) = self.struct_tag_types.get(tag_name).copied() {
-                                let field_idx = fields.iter().position(|f| f == &field_name).unwrap_or(0) as u32;
+                            if let Some(struct_type) = self.struct_tag_types.get(tag_name).copied()
+                            {
+                                let field_idx =
+                                    fields.iter().position(|f| f == &field_name).unwrap_or(0)
+                                        as u32;
                                 let field_ptr = self
                                     .builder
                                     .build_struct_gep(struct_type, base_ptr, field_idx, "chain.gep")
                                     .map_err(|_| BackendError::InvalidNode)?;
                                 let ft = struct_type
                                     .get_field_type_at_index(field_idx)
-                                    .unwrap_or_else(|| self.context.i32_type().as_basic_type_enum());
+                                    .unwrap_or_else(|| {
+                                        self.context.i32_type().as_basic_type_enum()
+                                    });
                                 return Ok(Some((field_ptr, ft)));
                             }
                         }
@@ -3439,7 +4107,9 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
         let base_offset = node.first_child;
         if let Some(base) = arena.get(base_offset) {
             if base.kind == 60 {
-                return arena.get_string(NodeOffset(base.data)).map(|s| s.to_string());
+                return arena
+                    .get_string(NodeOffset(base.data))
+                    .map(|s| s.to_string());
             }
             if base.kind == 69 {
                 return self.find_member_access_root_var(arena, base);
@@ -3579,13 +4249,20 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                 }
             } else if rhs_val.is_pointer_value() {
                 // ptr - ptr → ptrdiff
-                let lhs_int = self.builder
+                let lhs_int = self
+                    .builder
                     .build_ptr_to_int(ptr, self.context.i64_type(), "ptr2int_lhs")
                     .map_err(|_| BackendError::InvalidNode)?;
-                let rhs_int = self.builder
-                    .build_ptr_to_int(rhs_val.into_pointer_value(), self.context.i64_type(), "ptr2int_rhs")
+                let rhs_int = self
+                    .builder
+                    .build_ptr_to_int(
+                        rhs_val.into_pointer_value(),
+                        self.context.i64_type(),
+                        "ptr2int_rhs",
+                    )
                     .map_err(|_| BackendError::InvalidNode)?;
-                return Ok(self.builder
+                return Ok(self
+                    .builder
                     .build_int_sub(lhs_int, rhs_int, "ptrdiff")
                     .map_err(|_| BackendError::InvalidNode)?
                     .into());
@@ -3603,7 +4280,11 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
         // Convert any remaining pointer operands to integers before arithmetic
         let lhs_val = if lhs_val.is_pointer_value() {
             self.builder
-                .build_ptr_to_int(lhs_val.into_pointer_value(), self.context.i64_type(), "op_ptr2int_lhs")
+                .build_ptr_to_int(
+                    lhs_val.into_pointer_value(),
+                    self.context.i64_type(),
+                    "op_ptr2int_lhs",
+                )
                 .map_err(|_| BackendError::InvalidNode)?
                 .into()
         } else {
@@ -3611,7 +4292,11 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
         };
         let rhs_val = if rhs_val.is_pointer_value() {
             self.builder
-                .build_ptr_to_int(rhs_val.into_pointer_value(), self.context.i64_type(), "op_ptr2int_rhs")
+                .build_ptr_to_int(
+                    rhs_val.into_pointer_value(),
+                    self.context.i64_type(),
+                    "op_ptr2int_rhs",
+                )
                 .map_err(|_| BackendError::InvalidNode)?
                 .into()
         } else {
@@ -3811,12 +4496,20 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                 } else {
                     bitfield_group = None;
                     if has_pointer {
-                        field_types.push(self.context.ptr_type(AddressSpace::default()).as_basic_type_enum());
+                        field_types.push(
+                            self.context
+                                .ptr_type(AddressSpace::default())
+                                .as_basic_type_enum(),
+                        );
                     } else if let Some(len) = array_len {
-                        let elem_type = if matches!(base_kind, 4 | 5) && struct_spec_offset != NodeOffset::NULL {
+                        let elem_type = if matches!(base_kind, 4 | 5)
+                            && struct_spec_offset != NodeOffset::NULL
+                        {
                             if let Some(sn) = arena.get(struct_spec_offset) {
                                 self.specifier_to_llvm_type(arena, sn)
-                            } else { self.node_kind_to_llvm_type(base_kind) }
+                            } else {
+                                self.node_kind_to_llvm_type(base_kind)
+                            }
                         } else {
                             self.node_kind_to_llvm_type(base_kind)
                         };
@@ -3843,7 +4536,10 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
             self.context.i8_type().as_basic_type_enum()
         } else {
             self.context
-                .struct_type(&field_types, self.node_has_attr(arena, node, &["packed", "__packed__"]))
+                .struct_type(
+                    &field_types,
+                    self.node_has_attr(arena, node, &["packed", "__packed__"]),
+                )
                 .as_basic_type_enum()
         }
     }
@@ -3874,7 +4570,9 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                             while inner != NodeOffset::NULL {
                                 if let Some(inner_n) = arena.get(inner) {
                                     if inner_n.kind == 60 {
-                                        if let Some(name) = arena.get_string(NodeOffset(inner_n.data)) {
+                                        if let Some(name) =
+                                            arena.get_string(NodeOffset(inner_n.data))
+                                        {
                                             names.push(name.to_string());
                                             found = true;
                                             break;
@@ -3895,7 +4593,9 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                             while inner != NodeOffset::NULL {
                                 if let Some(inner_n) = arena.get(inner) {
                                     if inner_n.kind == 60 {
-                                        if let Some(name) = arena.get_string(NodeOffset(inner_n.data)) {
+                                        if let Some(name) =
+                                            arena.get_string(NodeOffset(inner_n.data))
+                                        {
                                             names.push(name.to_string());
                                             found = true;
                                             break;
@@ -3907,7 +4607,9 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                                         while ic != NodeOffset::NULL {
                                             if let Some(ic_n) = arena.get(ic) {
                                                 if ic_n.kind == 60 {
-                                                    if let Some(name) = arena.get_string(NodeOffset(ic_n.data)) {
+                                                    if let Some(name) =
+                                                        arena.get_string(NodeOffset(ic_n.data))
+                                                    {
                                                         names.push(name.to_string());
                                                         found = true;
                                                         break;
@@ -3918,22 +4620,34 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                                                     while ic2 != NodeOffset::NULL {
                                                         if let Some(ic2_n) = arena.get(ic2) {
                                                             if ic2_n.kind == 60 {
-                                                                if let Some(name) = arena.get_string(NodeOffset(ic2_n.data)) {
+                                                                if let Some(name) = arena
+                                                                    .get_string(NodeOffset(
+                                                                        ic2_n.data,
+                                                                    ))
+                                                                {
                                                                     names.push(name.to_string());
                                                                     found = true;
                                                                     break;
                                                                 }
                                                             }
                                                             ic2 = ic2_n.next_sibling;
-                                                        } else { break; }
+                                                        } else {
+                                                            break;
+                                                        }
                                                     }
                                                 }
-                                                if found { break; }
+                                                if found {
+                                                    break;
+                                                }
                                                 ic = ic_n.next_sibling;
-                                            } else { break; }
+                                            } else {
+                                                break;
+                                            }
                                         }
                                     }
-                                    if found { break; }
+                                    if found {
+                                        break;
+                                    }
                                     inner = inner_n.next_sibling;
                                 } else {
                                     break;
@@ -3954,26 +4668,38 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                                         while inner2 != NodeOffset::NULL {
                                             if let Some(inner2_n) = arena.get(inner2) {
                                                 if inner2_n.kind == 60 {
-                                                    if let Some(name) = arena.get_string(NodeOffset(inner2_n.data)) {
+                                                    if let Some(name) =
+                                                        arena.get_string(NodeOffset(inner2_n.data))
+                                                    {
                                                         names.push(name.to_string());
                                                         found = true;
                                                         break;
                                                     }
                                                 }
                                                 inner2 = inner2_n.next_sibling;
-                                            } else { break; }
+                                            } else {
+                                                break;
+                                            }
                                         }
                                     } else if inner_n.kind == 60 {
-                                        if let Some(name) = arena.get_string(NodeOffset(inner_n.data)) {
+                                        if let Some(name) =
+                                            arena.get_string(NodeOffset(inner_n.data))
+                                        {
                                             names.push(name.to_string());
                                             found = true;
                                         }
                                     }
-                                    if found { break; }
+                                    if found {
+                                        break;
+                                    }
                                     inner = inner_n.next_sibling;
-                                } else { break; }
+                                } else {
+                                    break;
+                                }
                             }
-                            if found { break; }
+                            if found {
+                                break;
+                            }
                         }
                         child_off = child.next_sibling;
                     } else {
@@ -3994,7 +4720,11 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
     /// Pre-register a function definition so it can be called before its body is compiled.
     /// This extracts the signature (name, return type, parameter types) without
     /// compiling the body.
-    fn pre_register_func_def(&mut self, arena: &Arena, node: &CAstNode) -> Result<(), BackendError> {
+    fn pre_register_func_def(
+        &mut self,
+        arena: &Arena,
+        node: &CAstNode,
+    ) -> Result<(), BackendError> {
         let mut func_name = "func".to_string();
         let mut param_types: Vec<BasicMetadataTypeEnum> = Vec::new();
         let mut return_llvm_type: Option<BasicTypeEnum<'ctx>> = None;
@@ -4054,7 +4784,8 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                                 if let Some(name) = self.find_ident_name(arena, func_decl) {
                                     func_name = name;
                                 }
-                                let mut param_off = self.function_decl_param_offset(arena, func_decl);
+                                let mut param_off =
+                                    self.function_decl_param_offset(arena, func_decl);
                                 while param_off != NodeOffset::NULL {
                                     if let Some(param) = arena.get(param_off) {
                                         if param.kind == 24 {
@@ -4099,13 +4830,16 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
             return Ok(());
         }
 
-        let ret_llvm = return_llvm_type.unwrap_or_else(|| self.context.i32_type().as_basic_type_enum());
+        let ret_llvm =
+            return_llvm_type.unwrap_or_else(|| self.context.i32_type().as_basic_type_enum());
         let fn_type = if is_void_ret {
             self.context.void_type().fn_type(&param_types, is_variadic)
         } else {
             ret_llvm.fn_type(&param_types, is_variadic)
         };
-        let function = self.module.get_function(&func_name)
+        let function = self
+            .module
+            .get_function(&func_name)
             .unwrap_or_else(|| self.module.add_function(&func_name, fn_type, None));
         // Note: don't set internal linkage here — it creates invalid "declare internal"
         // if the function body fails to lower. Linkage is set in lower_func_def instead.
@@ -4177,7 +4911,8 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                                 if let Some(name) = self.find_ident_name(arena, func_decl) {
                                     func_name = name;
                                 }
-                                let mut param_off = self.function_decl_param_offset(arena, func_decl);
+                                let mut param_off =
+                                    self.function_decl_param_offset(arena, func_decl);
                                 while param_off != NodeOffset::NULL {
                                     if let Some(param) = arena.get(param_off) {
                                         if param.kind == 24 {
@@ -4214,7 +4949,8 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
             return Ok(());
         }
 
-        let ret_llvm = return_llvm_type.unwrap_or_else(|| self.context.i32_type().as_basic_type_enum());
+        let ret_llvm =
+            return_llvm_type.unwrap_or_else(|| self.context.i32_type().as_basic_type_enum());
         let fn_type = if is_void_ret {
             self.context.void_type().fn_type(&param_types, is_variadic)
         } else {
@@ -4300,7 +5036,9 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                         if is_void_ret && inferred_ptr_return {
                             is_void_ret = false;
                             return_llvm_type = Some(
-                                self.context.ptr_type(AddressSpace::default()).as_basic_type_enum()
+                                self.context
+                                    .ptr_type(AddressSpace::default())
+                                    .as_basic_type_enum(),
                             );
                         }
                         if !is_void_ret {
@@ -4357,7 +5095,9 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
             ret_llvm.fn_type(&param_types, is_variadic)
         };
         // Use the pre-registered function if available, otherwise create new
-        let function = self.module.get_function(&func_name)
+        let function = self
+            .module
+            .get_function(&func_name)
             .unwrap_or_else(|| self.module.add_function(&func_name, fn_type, None));
         if is_static_fn {
             function.set_linkage(inkwell::module::Linkage::Internal);
@@ -4484,9 +5224,9 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                         .map_err(|_| BackendError::InvalidNode)?;
                 } else {
                     // Fallback: try int, ignore error if it doesn't work
-                    let _ = self.builder.build_return(Some(
-                        &self.context.i32_type().const_int(0, false),
-                    ));
+                    let _ = self
+                        .builder
+                        .build_return(Some(&self.context.i32_type().const_int(0, false)));
                 }
             }
         }
@@ -4530,11 +5270,14 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
             let next = bb.get_next_basic_block();
             if Some(bb) != entry_block
                 && bb.get_first_use().is_none()
-                && bb.get_first_instruction()
+                && bb
+                    .get_first_instruction()
                     .map(|i| i.get_opcode() == inkwell::values::InstructionOpcode::Unreachable)
                     .unwrap_or(false)
             {
-                unsafe { bb.delete().ok(); }
+                unsafe {
+                    bb.delete().ok();
+                }
             }
             block_opt = next;
         }
@@ -4563,9 +5306,9 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                                     &ret_llvm.into_int_type().const_int(0, false),
                                 ));
                             } else if expected_is_ptr {
-                                let _ = self.builder.build_return(Some(
-                                    &ret_llvm.into_pointer_type().const_null(),
-                                ));
+                                let _ = self
+                                    .builder
+                                    .build_return(Some(&ret_llvm.into_pointer_type().const_null()));
                             } else if expected_is_float {
                                 let _ = self.builder.build_return(Some(
                                     &ret_llvm.into_float_type().const_float(0.0),
@@ -4676,12 +5419,7 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
             let float_val = val.into_float_value();
             let zero = float_val.get_type().const_float(0.0);
             self.builder
-                .build_float_compare(
-                    inkwell::FloatPredicate::ONE,
-                    float_val,
-                    zero,
-                    "float_nz",
-                )
+                .build_float_compare(inkwell::FloatPredicate::ONE, float_val, zero, "float_nz")
                 .map_err(|_| BackendError::InvalidNode)
         } else {
             Err(BackendError::InvalidNode)
@@ -5040,15 +5778,29 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                         // case label: first_child=expr
                         let case_bb = self.context.append_basic_block(function, "switch.case");
                         if child.first_child != NodeOffset::NULL {
-                            if let Some(val) = self.lower_expr(arena, child.first_child).ok().flatten() {
+                            if let Some(val) =
+                                self.lower_expr(arena, child.first_child).ok().flatten()
+                            {
                                 let case_int = if val.is_int_value() {
                                     let raw = val.into_int_value();
                                     let cond_bits = cond_int.get_type().get_bit_width();
                                     let case_bits = raw.get_type().get_bit_width();
                                     if case_bits < cond_bits {
-                                        self.builder.build_int_s_extend(raw, cond_int.get_type(), "case_sext").unwrap_or(raw)
+                                        self.builder
+                                            .build_int_s_extend(
+                                                raw,
+                                                cond_int.get_type(),
+                                                "case_sext",
+                                            )
+                                            .unwrap_or(raw)
                                     } else if case_bits > cond_bits {
-                                        self.builder.build_int_truncate(raw, cond_int.get_type(), "case_trunc").unwrap_or(raw)
+                                        self.builder
+                                            .build_int_truncate(
+                                                raw,
+                                                cond_int.get_type(),
+                                                "case_trunc",
+                                            )
+                                            .unwrap_or(raw)
                                     } else {
                                         raw
                                     }
@@ -5064,20 +5816,41 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                     }
                     54 => {
                         // case range: first_child=low_expr, data=high_expr_offset
-                        let case_bb = self.context.append_basic_block(function, "switch.case_range");
+                        let case_bb = self
+                            .context
+                            .append_basic_block(function, "switch.case_range");
                         let lo_val = if child.first_child != NodeOffset::NULL {
                             self.lower_expr(arena, child.first_child).ok().flatten()
-                        } else { None };
+                        } else {
+                            None
+                        };
                         let hi_val = if child.data != 0 {
-                            self.lower_expr(arena, NodeOffset(child.data)).ok().flatten()
-                        } else { None };
+                            self.lower_expr(arena, NodeOffset(child.data))
+                                .ok()
+                                .flatten()
+                        } else {
+                            None
+                        };
                         if let (Some(lo), Some(hi)) = (lo_val, hi_val) {
                             if lo.is_int_value() && hi.is_int_value() {
-                                let lo_c = lo.into_int_value().get_zero_extended_constant().unwrap_or(0);
-                                let hi_c = hi.into_int_value().get_zero_extended_constant().unwrap_or(0);
-                                let count = if hi_c >= lo_c { (hi_c - lo_c + 1).min(MAX_CASE_RANGE_EXPANSION) } else { 1 };
+                                let lo_c = lo
+                                    .into_int_value()
+                                    .get_zero_extended_constant()
+                                    .unwrap_or(0);
+                                let hi_c = hi
+                                    .into_int_value()
+                                    .get_zero_extended_constant()
+                                    .unwrap_or(0);
+                                let count = if hi_c >= lo_c {
+                                    (hi_c - lo_c + 1).min(MAX_CASE_RANGE_EXPANSION)
+                                } else {
+                                    1
+                                };
                                 for i in 0..count {
-                                    cases.push((cond_int.get_type().const_int(lo_c + i, false), case_bb));
+                                    cases.push((
+                                        cond_int.get_type().const_int(lo_c + i, false),
+                                        case_bb,
+                                    ));
                                 }
                             }
                         }
@@ -5118,7 +5891,8 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
             case_bb_map.iter().cloned().collect();
 
         // We need to track the ordered list of case BBs to handle fall-through
-        let ordered_case_bbs: Vec<BasicBlock<'ctx>> = case_bb_map.iter().map(|(_, bb)| *bb).collect();
+        let ordered_case_bbs: Vec<BasicBlock<'ctx>> =
+            case_bb_map.iter().map(|(_, bb)| *bb).collect();
 
         self.push_scope();
         {
@@ -5133,7 +5907,9 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                 if let Some(&case_bb) = case_offset_to_bb.get(&child_off) {
                     // This is a case or default label — switch to its BB
                     // If current block has no terminator, fall through to this BB
-                    if self.builder.get_insert_block()
+                    if self
+                        .builder
+                        .get_insert_block()
                         .and_then(|bb| bb.get_terminator())
                         .is_none()
                     {
@@ -5151,7 +5927,9 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
         self.pop_scope();
 
         // Ensure current BB (last case body) has a terminator
-        if self.builder.get_insert_block()
+        if self
+            .builder
+            .get_insert_block()
             .and_then(|bb| bb.get_terminator())
             .is_none()
         {
@@ -5322,10 +6100,7 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
         let is_volatile = (node.data & 1) != 0;
 
         // Read template string from arena
-        let template = arena
-            .get_string(node.first_child)
-            .unwrap_or("")
-            .to_string();
+        let template = arena.get_string(node.first_child).unwrap_or("").to_string();
 
         // Strip surrounding quotes if present (parser may store them)
         let template = template
@@ -5366,7 +6141,10 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                     // Determine if readwrite (+) or output-only (=)
                     let is_readwrite = constraint.starts_with('+');
                     let clean = if is_readwrite {
-                        constraint.strip_prefix('+').unwrap_or(&constraint).to_string()
+                        constraint
+                            .strip_prefix('+')
+                            .unwrap_or(&constraint)
+                            .to_string()
                     } else {
                         format!("={}", constraint.strip_prefix('=').unwrap_or(&constraint))
                     };
@@ -5388,7 +6166,8 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                         // For readwrite operands, the current value is also an input
                         if is_readwrite {
                             if let Some((ptr, pointee_ty)) = &lvalue {
-                                let loaded = self.builder
+                                let loaded = self
+                                    .builder
                                     .build_load(*pointee_ty, *ptr, "asm_rw_load")
                                     .map_err(|_| BackendError::InvalidNode)?;
                                 input_values.push(loaded.into());
@@ -5506,7 +6285,8 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
         );
 
         // Call the inline asm
-        let call_result = self.builder
+        let call_result = self
+            .builder
             .build_indirect_call(asm_fn_type, asm_val, &input_values, "asm_call")
             .map_err(|_| BackendError::InvalidNode)?;
 
@@ -5520,7 +6300,9 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                             if result.is_int_value() && pointee_ty.is_int_type() {
                                 let result_int = result.into_int_value();
                                 let target_int = pointee_ty.into_int_type();
-                                if result_int.get_type().get_bit_width() > target_int.get_bit_width() {
+                                if result_int.get_type().get_bit_width()
+                                    > target_int.get_bit_width()
+                                {
                                     self.builder
                                         .build_int_truncate(result_int, target_int, "asm_trunc")
                                         .map_err(|_| BackendError::InvalidNode)?
@@ -5550,7 +6332,8 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                 inkwell::values::ValueKind::Basic(result) => {
                     for (i, lvalue) in output_lvalues.iter().enumerate() {
                         if let Some((ptr, _pointee_ty)) = lvalue {
-                            let extracted = self.builder
+                            let extracted = self
+                                .builder
                                 .build_extract_value(
                                     result.into_struct_value(),
                                     i as u32,
@@ -6139,7 +6922,11 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
             }
         } else {
             // Guard against non-integer aggregate types (e.g., struct values)
-            if lhs_val.is_struct_value() || rhs_val.is_struct_value() || lhs_val.is_array_value() || rhs_val.is_array_value() {
+            if lhs_val.is_struct_value()
+                || rhs_val.is_struct_value()
+                || lhs_val.is_array_value()
+                || rhs_val.is_array_value()
+            {
                 return Err(BackendError::InvalidNode);
             }
             let lhs_int = lhs_val.into_int_value();
@@ -6455,7 +7242,9 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                                         );
                                     }
 
-                                    if self.byte_pointer_vars.contains(name) || name.starts_with('z') {
+                                    if self.byte_pointer_vars.contains(name)
+                                        || name.starts_with('z')
+                                    {
                                         return Some(self.context.i8_type().as_basic_type_enum());
                                     }
                                 }
@@ -6478,7 +7267,9 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                                     .get(child.first_child)
                                     .map(|arg1| arg1.next_sibling)
                                     .filter(|off| *off != NodeOffset::NULL)
-                                    .and_then(|type_off| self.lower_builtin_pointee_type_ast(arena, type_off))
+                                    .and_then(|type_off| {
+                                        self.lower_builtin_pointee_type_ast(arena, type_off)
+                                    })
                             } else {
                                 None
                             }
@@ -6551,8 +7342,8 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
         arg: inkwell::values::BasicMetadataValueEnum<'ctx>,
         expected: inkwell::types::BasicMetadataTypeEnum<'ctx>,
     ) -> Result<inkwell::values::BasicMetadataValueEnum<'ctx>, BackendError> {
-        use inkwell::values::BasicMetadataValueEnum;
         use inkwell::types::BasicMetadataTypeEnum;
+        use inkwell::values::BasicMetadataValueEnum;
 
         match arg {
             BasicMetadataValueEnum::PointerValue(ptr_val) => {
@@ -6567,44 +7358,42 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                     Ok(arg)
                 }
             }
-            BasicMetadataValueEnum::IntValue(int_val) => {
-                match expected {
-                    BasicMetadataTypeEnum::PointerType(ptr_ty) => {
-                        let cast = self
-                            .builder
-                            .build_int_to_ptr(int_val, ptr_ty, "arg_int2ptr")
-                            .map_err(|_| BackendError::InvalidNode)?;
-                        Ok(cast.into())
-                    }
-                    BasicMetadataTypeEnum::IntType(exp_int) => {
-                        let val_width = int_val.get_type().get_bit_width();
-                        let exp_width = exp_int.get_bit_width();
-                        if val_width < exp_width {
-                            let ext = self
-                                .builder
-                                .build_int_s_extend(int_val, exp_int, "arg_sext")
-                                .map_err(|_| BackendError::InvalidNode)?;
-                            Ok(ext.into())
-                        } else if val_width > exp_width {
-                            let trunc = self
-                                .builder
-                                .build_int_truncate(int_val, exp_int, "arg_trunc")
-                                .map_err(|_| BackendError::InvalidNode)?;
-                            Ok(trunc.into())
-                        } else {
-                            Ok(arg)
-                        }
-                    }
-                    BasicMetadataTypeEnum::FloatType(ft) => {
-                        let cast = self
-                            .builder
-                            .build_signed_int_to_float(int_val, ft, "arg_i2f")
-                            .map_err(|_| BackendError::InvalidNode)?;
-                        Ok(cast.into())
-                    }
-                    _ => Ok(arg),
+            BasicMetadataValueEnum::IntValue(int_val) => match expected {
+                BasicMetadataTypeEnum::PointerType(ptr_ty) => {
+                    let cast = self
+                        .builder
+                        .build_int_to_ptr(int_val, ptr_ty, "arg_int2ptr")
+                        .map_err(|_| BackendError::InvalidNode)?;
+                    Ok(cast.into())
                 }
-            }
+                BasicMetadataTypeEnum::IntType(exp_int) => {
+                    let val_width = int_val.get_type().get_bit_width();
+                    let exp_width = exp_int.get_bit_width();
+                    if val_width < exp_width {
+                        let ext = self
+                            .builder
+                            .build_int_s_extend(int_val, exp_int, "arg_sext")
+                            .map_err(|_| BackendError::InvalidNode)?;
+                        Ok(ext.into())
+                    } else if val_width > exp_width {
+                        let trunc = self
+                            .builder
+                            .build_int_truncate(int_val, exp_int, "arg_trunc")
+                            .map_err(|_| BackendError::InvalidNode)?;
+                        Ok(trunc.into())
+                    } else {
+                        Ok(arg)
+                    }
+                }
+                BasicMetadataTypeEnum::FloatType(ft) => {
+                    let cast = self
+                        .builder
+                        .build_signed_int_to_float(int_val, ft, "arg_i2f")
+                        .map_err(|_| BackendError::InvalidNode)?;
+                    Ok(cast.into())
+                }
+                _ => Ok(arg),
+            },
             BasicMetadataValueEnum::FloatValue(float_val) => {
                 if let BasicMetadataTypeEnum::IntType(int_ty) = expected {
                     let cast = self
@@ -6693,7 +7482,8 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
 
         if let Some(op) = atomic_binop {
             if let (Some(ptr), Some(val)) = (get_ptr(0), get_int(1)) {
-                let ordering = self.atomic_ordering_from_arg(args.get(2), AtomicOrdering::SequentiallyConsistent);
+                let ordering = self
+                    .atomic_ordering_from_arg(args.get(2), AtomicOrdering::SequentiallyConsistent);
                 let old = self
                     .builder
                     .build_atomicrmw(op, ptr, val, ordering)
@@ -6723,7 +7513,10 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                         _ => AtomicRMWBinOp::Xor,
                     };
                     let ordering = if builtin_name.starts_with("__atomic_") {
-                        self.atomic_ordering_from_arg(args.get(2), AtomicOrdering::SequentiallyConsistent)
+                        self.atomic_ordering_from_arg(
+                            args.get(2),
+                            AtomicOrdering::SequentiallyConsistent,
+                        )
                     } else {
                         AtomicOrdering::SequentiallyConsistent
                     };
@@ -6732,8 +7525,12 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                         .build_atomicrmw(op, ptr, val, ordering)
                         .map_err(|_| BackendError::InvalidNode)?;
                     let new_val = match op {
-                        AtomicRMWBinOp::Add => self.builder.build_int_add(old, val, "atomic_add_fetch"),
-                        AtomicRMWBinOp::Sub => self.builder.build_int_sub(old, val, "atomic_sub_fetch"),
+                        AtomicRMWBinOp::Add => {
+                            self.builder.build_int_add(old, val, "atomic_add_fetch")
+                        }
+                        AtomicRMWBinOp::Sub => {
+                            self.builder.build_int_sub(old, val, "atomic_sub_fetch")
+                        }
                         AtomicRMWBinOp::Or => self.builder.build_or(old, val, "atomic_or_fetch"),
                         AtomicRMWBinOp::And => self.builder.build_and(old, val, "atomic_and_fetch"),
                         _ => self.builder.build_xor(old, val, "atomic_xor_fetch"),
@@ -6744,7 +7541,8 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                 Ok(Some(int_zero()))
             }
             "__sync_val_compare_and_swap" => {
-                if let (Some(ptr), Some(cmp), Some(new_val)) = (get_ptr(0), get_int(1), get_int(2)) {
+                if let (Some(ptr), Some(cmp), Some(new_val)) = (get_ptr(0), get_int(1), get_int(2))
+                {
                     let result = self
                         .builder
                         .build_cmpxchg(
@@ -6764,7 +7562,8 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                 Ok(Some(int_zero()))
             }
             "__sync_bool_compare_and_swap" => {
-                if let (Some(ptr), Some(cmp), Some(new_val)) = (get_ptr(0), get_int(1), get_int(2)) {
+                if let (Some(ptr), Some(cmp), Some(new_val)) = (get_ptr(0), get_int(1), get_int(2))
+                {
                     let result = self
                         .builder
                         .build_cmpxchg(
@@ -6802,7 +7601,10 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                 let ordering = if builtin_name == "__sync_synchronize" {
                     AtomicOrdering::SequentiallyConsistent
                 } else {
-                    self.atomic_ordering_from_arg(args.first(), AtomicOrdering::SequentiallyConsistent)
+                    self.atomic_ordering_from_arg(
+                        args.first(),
+                        AtomicOrdering::SequentiallyConsistent,
+                    )
                 };
                 self.builder
                     .build_fence(ordering, builtin_name == "__atomic_signal_fence", "")
@@ -6811,7 +7613,10 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
             }
             "__atomic_exchange_n" => {
                 if let (Some(ptr), Some(val)) = (get_ptr(0), get_int(1)) {
-                    let ordering = self.atomic_ordering_from_arg(args.get(2), AtomicOrdering::SequentiallyConsistent);
+                    let ordering = self.atomic_ordering_from_arg(
+                        args.get(2),
+                        AtomicOrdering::SequentiallyConsistent,
+                    );
                     let old = self
                         .builder
                         .build_atomicrmw(AtomicRMWBinOp::Xchg, ptr, val, ordering)
@@ -6839,15 +7644,24 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                 Ok(Some(int_zero()))
             }
             "__atomic_compare_exchange_n" => {
-                if let (Some(ptr), Some(expected_ptr), Some(desired)) = (get_ptr(0), get_ptr(1), get_int(2)) {
+                if let (Some(ptr), Some(expected_ptr), Some(desired)) =
+                    (get_ptr(0), get_ptr(1), get_int(2))
+                {
                     let expected = self
                         .builder
                         .build_load(desired.get_type(), expected_ptr, "atomic_expected")
                         .map_err(|_| BackendError::InvalidNode)?
                         .into_int_value();
-                    let success = self.atomic_ordering_from_arg(args.get(4), AtomicOrdering::SequentiallyConsistent);
-                    let mut failure = self.atomic_ordering_from_arg(args.get(5), AtomicOrdering::Monotonic);
-                    if matches!(failure, AtomicOrdering::Release | AtomicOrdering::AcquireRelease) {
+                    let success = self.atomic_ordering_from_arg(
+                        args.get(4),
+                        AtomicOrdering::SequentiallyConsistent,
+                    );
+                    let mut failure =
+                        self.atomic_ordering_from_arg(args.get(5), AtomicOrdering::Monotonic);
+                    if matches!(
+                        failure,
+                        AtomicOrdering::Release | AtomicOrdering::AcquireRelease
+                    ) {
                         failure = AtomicOrdering::Monotonic;
                     }
                     let result = self
@@ -6932,7 +7746,10 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
         }
 
         if std::env::var("OPTICC_DEBUG_FNPTR").is_ok() {
-            eprintln!("DEBUG lower_call_expr: func_name={func_name:?} first_child_kind={}", first_child.map(|n|n.kind).unwrap_or(999));
+            eprintln!(
+                "DEBUG lower_call_expr: func_name={func_name:?} first_child_kind={}",
+                first_child.map(|n| n.kind).unwrap_or(999)
+            );
         }
 
         if let Some(name) = func_name {
@@ -6940,41 +7757,36 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
             match name {
                 "__builtin_va_start" | "va_start" => {
                     // va_start(ap) → llvm.va_start(ap)
-                    let va_start_type = self
-                        .context
-                        .void_type()
-                        .fn_type(&[self.context.ptr_type(AddressSpace::default()).into()], false);
-                    let va_start_fn = self
-                        .module
-                        .get_function("llvm.va_start")
-                        .unwrap_or_else(|| {
-                            self.module
-                                .add_function("llvm.va_start", va_start_type, None)
-                        });
+                    let va_start_type = self.context.void_type().fn_type(
+                        &[self.context.ptr_type(AddressSpace::default()).into()],
+                        false,
+                    );
+                    let va_start_fn =
+                        self.module
+                            .get_function("llvm.va_start")
+                            .unwrap_or_else(|| {
+                                self.module
+                                    .add_function("llvm.va_start", va_start_type, None)
+                            });
                     if let Some(ap_arg) = args.first() {
                         let ap_ptr = match ap_arg {
                             inkwell::values::BasicMetadataValueEnum::PointerValue(p) => Some(*p),
                             _ => None,
                         };
                         if let Some(ptr) = ap_ptr {
-                            let _ = self
-                                .builder
-                                .build_call(va_start_fn, &[ptr.into()], "");
+                            let _ = self.builder.build_call(va_start_fn, &[ptr.into()], "");
                         }
                     }
                     return Ok(Some(self.context.i32_type().const_int(0, false).into()));
                 }
                 "__builtin_va_end" | "va_end" => {
-                    let va_end_type = self
-                        .context
-                        .void_type()
-                        .fn_type(&[self.context.ptr_type(AddressSpace::default()).into()], false);
-                    let va_end_fn = self
-                        .module
-                        .get_function("llvm.va_end")
-                        .unwrap_or_else(|| {
-                            self.module.add_function("llvm.va_end", va_end_type, None)
-                        });
+                    let va_end_type = self.context.void_type().fn_type(
+                        &[self.context.ptr_type(AddressSpace::default()).into()],
+                        false,
+                    );
+                    let va_end_fn = self.module.get_function("llvm.va_end").unwrap_or_else(|| {
+                        self.module.add_function("llvm.va_end", va_end_type, None)
+                    });
                     if let Some(ap_arg) = args.first() {
                         let ap_ptr = match ap_arg {
                             inkwell::values::BasicMetadataValueEnum::PointerValue(p) => Some(*p),
@@ -6994,12 +7806,9 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                         ],
                         false,
                     );
-                    let va_copy_fn = self
-                        .module
-                        .get_function("llvm.va_copy")
-                        .unwrap_or_else(|| {
-                            self.module
-                                .add_function("llvm.va_copy", va_copy_type, None)
+                    let va_copy_fn =
+                        self.module.get_function("llvm.va_copy").unwrap_or_else(|| {
+                            self.module.add_function("llvm.va_copy", va_copy_type, None)
                         });
                     if args.len() >= 2 {
                         let dest = match &args[0] {
@@ -7026,7 +7835,9 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
             }
 
             match name {
-                "__builtin_expect" | "__builtin_expect_with_probability" | "__builtin_assume_aligned" => {
+                "__builtin_expect"
+                | "__builtin_expect_with_probability"
+                | "__builtin_assume_aligned" => {
                     if let Some(arg) = args.first() {
                         return Ok(Some(match arg {
                             inkwell::values::BasicMetadataValueEnum::IntValue(v) => (*v).into(),
@@ -7071,12 +7882,14 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                             .first()
                             .and_then(|off| self.lower_builtin_int_constant(arena, *off))
                             .map(|v| v != 0)
-                            .or_else(|| args.first().and_then(|arg| match arg {
-                                inkwell::values::BasicMetadataValueEnum::IntValue(v) => {
-                                    v.get_zero_extended_constant().map(|n| n != 0)
-                                }
-                                _ => None,
-                            }))
+                            .or_else(|| {
+                                args.first().and_then(|arg| match arg {
+                                    inkwell::values::BasicMetadataValueEnum::IntValue(v) => {
+                                        v.get_zero_extended_constant().map(|n| n != 0)
+                                    }
+                                    _ => None,
+                                })
+                            })
                             .unwrap_or(true);
                         let selected = if cond_is_true { 1 } else { 2 };
                         return Ok(Some(match &args[selected] {
@@ -7118,23 +7931,30 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
             // Check if this is a function pointer variable (e.g., a parameter of function pointer type,
             // or a local variable of typedef function-pointer type like sqlite3_loadext_entry)
             if std::env::var("OPTICC_DEBUG_FNPTR").is_ok() {
-                eprintln!("DEBUG lower_call_expr: name={name:?} in_vars={}", self.variables.contains_key(name));
+                eprintln!(
+                    "DEBUG lower_call_expr: name={name:?} in_vars={}",
+                    self.variables.contains_key(name)
+                );
             }
             if let Some(binding) = self.variables.get(name).copied() {
                 // Load the variable's value (should be a function pointer)
-                let loaded = self.builder
+                let loaded = self
+                    .builder
                     .build_load(binding.pointee_type, binding.ptr, "fn_ptr_load")
                     .map_err(|_| BackendError::InvalidNode)?;
-                let fn_ptr_opt: Option<inkwell::values::PointerValue> = if loaded.is_pointer_value() {
+                let fn_ptr_opt: Option<inkwell::values::PointerValue> = if loaded.is_pointer_value()
+                {
                     Some(loaded.into_pointer_value())
                 } else if loaded.is_int_value() {
                     // Function pointer may have been stored as an integer (e.g., from typedef)
                     // Convert int → ptr
-                    self.builder.build_int_to_ptr(
-                        loaded.into_int_value(),
-                        self.context.ptr_type(AddressSpace::default()),
-                        "fn_i2p"
-                    ).ok()
+                    self.builder
+                        .build_int_to_ptr(
+                            loaded.into_int_value(),
+                            self.context.ptr_type(AddressSpace::default()),
+                            "fn_i2p",
+                        )
+                        .ok()
                 } else {
                     None
                 };
@@ -7142,8 +7962,12 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                     let param_types: Vec<inkwell::types::BasicMetadataTypeEnum> = args
                         .iter()
                         .map(|a| match a {
-                            inkwell::values::BasicMetadataValueEnum::IntValue(v) => v.get_type().into(),
-                            inkwell::values::BasicMetadataValueEnum::FloatValue(v) => v.get_type().into(),
+                            inkwell::values::BasicMetadataValueEnum::IntValue(v) => {
+                                v.get_type().into()
+                            }
+                            inkwell::values::BasicMetadataValueEnum::FloatValue(v) => {
+                                v.get_type().into()
+                            }
                             inkwell::values::BasicMetadataValueEnum::PointerValue(_) => {
                                 self.context.ptr_type(AddressSpace::default()).into()
                             }
@@ -7153,7 +7977,8 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                     let fn_type = binding
                         .function_type
                         .unwrap_or_else(|| self.context.i32_type().fn_type(&param_types, true));
-                    let call_site = self.builder
+                    let call_site = self
+                        .builder
                         .build_indirect_call(fn_type, fn_ptr, &args, "indirect_call")
                         .map_err(|_| BackendError::InvalidNode)?;
                     return Ok(Some(match call_site.try_as_basic_value() {
@@ -7173,25 +7998,41 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                 let param_types: Vec<_> = fn_type.get_param_types();
                 while args.len() < param_types.len() {
                     let pt = param_types[args.len()];
-                    let zero_val: inkwell::values::BasicMetadataValueEnum = if pt.is_pointer_type() {
-                        self.context.ptr_type(AddressSpace::default()).const_null().into()
+                    let zero_val: inkwell::values::BasicMetadataValueEnum = if pt.is_pointer_type()
+                    {
+                        self.context
+                            .ptr_type(AddressSpace::default())
+                            .const_null()
+                            .into()
                     } else {
                         self.context.i32_type().const_zero().into()
                     };
                     args.push(zero_val);
                 }
                 for (i, pt) in param_types.iter().enumerate() {
-                    if i >= args.len() { break; }
-                    let arg_is_ptr = matches!(args[i], inkwell::values::BasicMetadataValueEnum::PointerValue(_));
+                    if i >= args.len() {
+                        break;
+                    }
+                    let arg_is_ptr = matches!(
+                        args[i],
+                        inkwell::values::BasicMetadataValueEnum::PointerValue(_)
+                    );
                     if arg_is_ptr && pt.is_int_type() {
                         if let inkwell::values::BasicMetadataValueEnum::PointerValue(pv) = args[i] {
-                            if let Ok(iv) = self.builder.build_ptr_to_int(pv, pt.into_int_type(), "coerce_p2i") {
+                            if let Ok(iv) =
+                                self.builder
+                                    .build_ptr_to_int(pv, pt.into_int_type(), "coerce_p2i")
+                            {
                                 args[i] = iv.into();
                             }
                         }
                     } else if !arg_is_ptr && pt.is_pointer_type() {
                         if let inkwell::values::BasicMetadataValueEnum::IntValue(iv) = args[i] {
-                            if let Ok(pv) = self.builder.build_int_to_ptr(iv, self.context.ptr_type(AddressSpace::default()), "coerce_i2p") {
+                            if let Ok(pv) = self.builder.build_int_to_ptr(
+                                iv,
+                                self.context.ptr_type(AddressSpace::default()),
+                                "coerce_i2p",
+                            ) {
                                 args[i] = pv.into();
                             }
                         }
@@ -7202,11 +8043,19 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                             if actual_width != expected_width {
                                 let target_type = pt.into_int_type();
                                 if actual_width < expected_width {
-                                    if let Ok(ext) = self.builder.build_int_z_extend(iv, target_type, "coerce_zext") {
+                                    if let Ok(ext) = self.builder.build_int_z_extend(
+                                        iv,
+                                        target_type,
+                                        "coerce_zext",
+                                    ) {
                                         args[i] = ext.into();
                                     }
                                 } else {
-                                    if let Ok(trunc) = self.builder.build_int_truncate(iv, target_type, "coerce_trunc") {
+                                    if let Ok(trunc) = self.builder.build_int_truncate(
+                                        iv,
+                                        target_type,
+                                        "coerce_trunc",
+                                    ) {
                                         args[i] = trunc.into();
                                     }
                                 }
@@ -7234,25 +8083,41 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                 let param_types: Vec<_> = fn_type.get_param_types();
                 while args.len() < param_types.len() {
                     let pt = param_types[args.len()];
-                    let zero_val: inkwell::values::BasicMetadataValueEnum = if pt.is_pointer_type() {
-                        self.context.ptr_type(AddressSpace::default()).const_null().into()
+                    let zero_val: inkwell::values::BasicMetadataValueEnum = if pt.is_pointer_type()
+                    {
+                        self.context
+                            .ptr_type(AddressSpace::default())
+                            .const_null()
+                            .into()
                     } else {
                         self.context.i32_type().const_zero().into()
                     };
                     args.push(zero_val);
                 }
                 for (i, pt) in param_types.iter().enumerate() {
-                    if i >= args.len() { break; }
-                    let arg_is_ptr = matches!(args[i], inkwell::values::BasicMetadataValueEnum::PointerValue(_));
+                    if i >= args.len() {
+                        break;
+                    }
+                    let arg_is_ptr = matches!(
+                        args[i],
+                        inkwell::values::BasicMetadataValueEnum::PointerValue(_)
+                    );
                     if arg_is_ptr && pt.is_int_type() {
                         if let inkwell::values::BasicMetadataValueEnum::PointerValue(pv) = args[i] {
-                            if let Ok(iv) = self.builder.build_ptr_to_int(pv, pt.into_int_type(), "coerce_p2i") {
+                            if let Ok(iv) =
+                                self.builder
+                                    .build_ptr_to_int(pv, pt.into_int_type(), "coerce_p2i")
+                            {
                                 args[i] = iv.into();
                             }
                         }
                     } else if !arg_is_ptr && pt.is_pointer_type() {
                         if let inkwell::values::BasicMetadataValueEnum::IntValue(iv) = args[i] {
-                            if let Ok(pv) = self.builder.build_int_to_ptr(iv, self.context.ptr_type(AddressSpace::default()), "coerce_i2p") {
+                            if let Ok(pv) = self.builder.build_int_to_ptr(
+                                iv,
+                                self.context.ptr_type(AddressSpace::default()),
+                                "coerce_i2p",
+                            ) {
                                 args[i] = pv.into();
                             }
                         }
@@ -7263,11 +8128,19 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                             if actual_width != expected_width {
                                 let target_type = pt.into_int_type();
                                 if actual_width < expected_width {
-                                    if let Ok(ext) = self.builder.build_int_z_extend(iv, target_type, "coerce_zext") {
+                                    if let Ok(ext) = self.builder.build_int_z_extend(
+                                        iv,
+                                        target_type,
+                                        "coerce_zext",
+                                    ) {
                                         args[i] = ext.into();
                                     }
                                 } else {
-                                    if let Ok(trunc) = self.builder.build_int_truncate(iv, target_type, "coerce_trunc") {
+                                    if let Ok(trunc) = self.builder.build_int_truncate(
+                                        iv,
+                                        target_type,
+                                        "coerce_trunc",
+                                    ) {
                                         args[i] = trunc.into();
                                     }
                                 }
@@ -7281,7 +8154,9 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                     .iter()
                     .map(|a| match a {
                         inkwell::values::BasicMetadataValueEnum::IntValue(v) => v.get_type().into(),
-                        inkwell::values::BasicMetadataValueEnum::FloatValue(v) => v.get_type().into(),
+                        inkwell::values::BasicMetadataValueEnum::FloatValue(v) => {
+                            v.get_type().into()
+                        }
                         inkwell::values::BasicMetadataValueEnum::PointerValue(_) => {
                             self.context.ptr_type(AddressSpace::default()).into()
                         }
@@ -7312,7 +8187,9 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                     .iter()
                     .map(|a| match a {
                         inkwell::values::BasicMetadataValueEnum::IntValue(v) => v.get_type().into(),
-                        inkwell::values::BasicMetadataValueEnum::FloatValue(v) => v.get_type().into(),
+                        inkwell::values::BasicMetadataValueEnum::FloatValue(v) => {
+                            v.get_type().into()
+                        }
                         inkwell::values::BasicMetadataValueEnum::PointerValue(_) => {
                             self.context.ptr_type(AddressSpace::default()).into()
                         }
@@ -7364,12 +8241,19 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
     ) -> Result<Option<BasicValueEnum<'ctx>>, BackendError> {
         // Field name stored in data (bit31=arrow, lower=string offset); fallback to next_sibling
         let field_str_offset = NodeOffset(node.data & 0x7FFF_FFFF);
-        let field_name_str: Option<String> = arena.get_string(field_str_offset)
+        let field_name_str: Option<String> = arena
+            .get_string(field_str_offset)
             .filter(|s| !s.is_empty())
             .map(|s| s.to_string())
-            .or_else(|| arena.get(node.next_sibling).and_then(|n| {
-                if n.kind == 60 { arena.get_string(NodeOffset(n.data)).map(|s| s.to_string()) } else { None }
-            }));
+            .or_else(|| {
+                arena.get(node.next_sibling).and_then(|n| {
+                    if n.kind == 60 {
+                        arena.get_string(NodeOffset(n.data)).map(|s| s.to_string())
+                    } else {
+                        None
+                    }
+                })
+            });
 
         let field_name = match field_name_str {
             Some(f) => f,
@@ -7483,17 +8367,13 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                 (node.data, inner_offset)
             }
         } else {
-            return Ok(Some(
-                self.context.i64_type().const_int(4, false).into(),
-            ));
+            return Ok(Some(self.context.i64_type().const_int(4, false).into()));
         };
 
         if data == 0 {
             // sizeof(type) — examine type specifier node kind
             let size = self.sizeof_type_from_ast(arena, child_offset);
-            Ok(Some(
-                self.context.i64_type().const_int(size, false).into(),
-            ))
+            Ok(Some(self.context.i64_type().const_int(size, false).into()))
         } else {
             // sizeof(expr) — infer from AST/value type without evaluating side effects.
             let mut inferred_size = 4u64;
@@ -7513,13 +8393,17 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                         }
                     }
                     68 => {
-                        if let Ok(Some((_ptr, elem_ty))) = self.lower_array_element_ptr(arena, expr_node) {
+                        if let Ok(Some((_ptr, elem_ty))) =
+                            self.lower_array_element_ptr(arena, expr_node)
+                        {
                             inferred_size = self.llvm_type_size_bytes(elem_ty);
                         }
                     }
                     69 => {
                         let saved_bitfield = self.last_bitfield_access.take();
-                        if let Ok(Some((_ptr, field_ty))) = self.lower_member_access_ptr(arena, expr_node) {
+                        if let Ok(Some((_ptr, field_ty))) =
+                            self.lower_member_access_ptr(arena, expr_node)
+                        {
                             inferred_size = self.llvm_type_size_bytes(field_ty);
                         }
                         self.last_bitfield_access = saved_bitfield;
@@ -7529,7 +8413,10 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
             }
 
             Ok(Some(
-                self.context.i64_type().const_int(inferred_size, false).into(),
+                self.context
+                    .i64_type()
+                    .const_int(inferred_size, false)
+                    .into(),
             ))
         }
     }
@@ -7566,22 +8453,27 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                     0
                 }
             }
-            2 => 4,   // int
-            3 => 1,   // char
-            10 => 2,  // short
-            11 => {   // long — check if "long long" by looking at sibling
+            2 => 4,  // int
+            3 => 1,  // char
+            10 => 2, // short
+            11 => {
+                // long — check if "long long" by looking at sibling
                 let sibling = arena.get(node.next_sibling);
-                if sibling.map(|s| s.kind) == Some(11) { 8 } else { 8 }
+                if sibling.map(|s| s.kind) == Some(11) {
+                    8
+                } else {
+                    8
+                }
             }
-            12 => 4,  // signed (defaults to signed int)
-            13 => 4,  // unsigned (defaults to unsigned int)
-            14 => 1,  // _Bool
+            12 => 4, // signed (defaults to signed int)
+            13 => 4, // unsigned (defaults to unsigned int)
+            14 => 1, // _Bool
             4 | 5 => self
                 .ast_record_size_align(arena, &node)
                 .map(|(size, _)| size)
                 .unwrap_or(0),
-            83 => 4,  // float
-            84 => 8,  // double
+            83 => 4, // float
+            84 => 8, // double
             _ => {
                 if node.first_child != NodeOffset::NULL {
                     let nested = self.sizeof_type_from_ast(arena, node.first_child);
@@ -7645,13 +8537,16 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                 let int_type = int_val.get_type();
                 let shifted = if bit_offset > 0 {
                     let sh = int_type.const_int(bit_offset as u64, false);
-                    self.builder.build_right_shift(int_val, sh, false, "bf.ca.shr")
+                    self.builder
+                        .build_right_shift(int_val, sh, false, "bf.ca.shr")
                         .map_err(|_| BackendError::InvalidNode)?
                 } else {
                     int_val
                 };
                 let field_mask = int_type.const_int((1u64 << bit_width) - 1, false);
-                let current_bf = self.builder.build_and(shifted, field_mask, "bf.ca.cur")
+                let current_bf = self
+                    .builder
+                    .build_and(shifted, field_mask, "bf.ca.cur")
                     .map_err(|_| BackendError::InvalidNode)?;
                 self.apply_assignment_op(node.data, current_bf.into(), rhs_val)?
             };
@@ -7724,27 +8619,34 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
             self.apply_assignment_op(node.data, current_val, rhs_val)?
         };
 
-        let value_to_store = if let (BasicTypeEnum::IntType(lhs_int), BasicValueEnum::IntValue(rhs_int)) = (lhs_type, value_to_store) {
-            if lhs_int.get_bit_width() != rhs_int.get_type().get_bit_width() {
-                self.builder
-                    .build_int_cast(rhs_int, lhs_int, "assign_int_cast")
-                    .map_err(|_| BackendError::InvalidNode)?
-                    .as_basic_value_enum()
+        let value_to_store =
+            if let (BasicTypeEnum::IntType(lhs_int), BasicValueEnum::IntValue(rhs_int)) =
+                (lhs_type, value_to_store)
+            {
+                if lhs_int.get_bit_width() != rhs_int.get_type().get_bit_width() {
+                    self.builder
+                        .build_int_cast(rhs_int, lhs_int, "assign_int_cast")
+                        .map_err(|_| BackendError::InvalidNode)?
+                        .as_basic_value_enum()
+                } else {
+                    rhs_int.as_basic_value_enum()
+                }
+            } else if let (
+                BasicTypeEnum::PointerType(lhs_ptr_ty),
+                BasicValueEnum::IntValue(rhs_int),
+            ) = (lhs_type, value_to_store)
+            {
+                if rhs_int.get_zero_extended_constant() == Some(0) {
+                    lhs_ptr_ty.const_null().as_basic_value_enum()
+                } else {
+                    self.builder
+                        .build_int_to_ptr(rhs_int, lhs_ptr_ty, "assign_int2ptr")
+                        .map_err(|_| BackendError::InvalidNode)?
+                        .as_basic_value_enum()
+                }
             } else {
-                rhs_int.as_basic_value_enum()
-            }
-        } else if let (BasicTypeEnum::PointerType(lhs_ptr_ty), BasicValueEnum::IntValue(rhs_int)) = (lhs_type, value_to_store) {
-            if rhs_int.get_zero_extended_constant() == Some(0) {
-                lhs_ptr_ty.const_null().as_basic_value_enum()
-            } else {
-                self.builder
-                    .build_int_to_ptr(rhs_int, lhs_ptr_ty, "assign_int2ptr")
-                    .map_err(|_| BackendError::InvalidNode)?
-                    .as_basic_value_enum()
-            }
-        } else {
-            value_to_store
-        };
+                value_to_store
+            };
 
         if Self::types_compatible(lhs_type, value_to_store) {
             self.builder
@@ -7858,7 +8760,9 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
     fn lower_builtin_type_signature(&self, arena: &Arena, offset: NodeOffset) -> Option<String> {
         let node = arena.get(offset)?;
         match node.kind {
-            60 => arena.get_string(NodeOffset(node.data)).map(|s| s.to_string()),
+            60 => arena
+                .get_string(NodeOffset(node.data))
+                .map(|s| s.to_string()),
             1 => Some("void".to_string()),
             2 | 12 | 13 => Some("int".to_string()),
             3 => Some("char".to_string()),
@@ -7909,7 +8813,11 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
         }
     }
 
-    fn lower_builtin_type_ast(&self, arena: &Arena, offset: NodeOffset) -> Option<BasicTypeEnum<'ctx>> {
+    fn lower_builtin_type_ast(
+        &self,
+        arena: &Arena,
+        offset: NodeOffset,
+    ) -> Option<BasicTypeEnum<'ctx>> {
         let mut current = offset;
         let mut base_type: Option<BasicTypeEnum<'ctx>> = None;
 
@@ -7917,7 +8825,11 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
             let node = arena.get(current)?;
             match node.kind {
                 7 | 8 | 9 => {
-                    return Some(self.context.ptr_type(AddressSpace::default()).as_basic_type_enum())
+                    return Some(
+                        self.context
+                            .ptr_type(AddressSpace::default())
+                            .as_basic_type_enum(),
+                    )
                 }
                 4 | 5 => return Some(self.specifier_to_llvm_type(arena, node)),
                 1 | 2 | 3 | 10 | 11 | 12 | 13 | 14 | 16 | 83 | 84 => {
@@ -7929,7 +8841,11 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                 60 => {
                     if let Some(name) = arena.get_string(NodeOffset(node.data)) {
                         if self.typedef_aliases.contains(name) {
-                            return Some(self.context.ptr_type(AddressSpace::default()).as_basic_type_enum());
+                            return Some(
+                                self.context
+                                    .ptr_type(AddressSpace::default())
+                                    .as_basic_type_enum(),
+                            );
                         }
                     }
                 }
@@ -7961,7 +8877,11 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                     Some(self.context.i8_type().as_basic_type_enum())
                 }
             }
-            8 | 9 => Some(self.context.ptr_type(AddressSpace::default()).as_basic_type_enum()),
+            8 | 9 => Some(
+                self.context
+                    .ptr_type(AddressSpace::default())
+                    .as_basic_type_enum(),
+            ),
             74 | 201 => self.lower_builtin_pointee_type_ast(arena, node.first_child),
             _ => {
                 if node.first_child != NodeOffset::NULL {
@@ -8098,14 +9018,17 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                 }))
             }
             "__builtin_va_start" => {
-                let va_start_type = self
-                    .context
-                    .void_type()
-                    .fn_type(&[self.context.ptr_type(AddressSpace::default()).into()], false);
+                let va_start_type = self.context.void_type().fn_type(
+                    &[self.context.ptr_type(AddressSpace::default()).into()],
+                    false,
+                );
                 let va_start_fn = self
                     .module
                     .get_function("llvm.va_start")
-                    .unwrap_or_else(|| self.module.add_function("llvm.va_start", va_start_type, None));
+                    .unwrap_or_else(|| {
+                        self.module
+                            .add_function("llvm.va_start", va_start_type, None)
+                    });
                 if let Some(ap_off) = arg_offsets.first().copied() {
                     if let Some((ap_ptr, _)) = self.lower_lvalue_ptr(arena, ap_off)? {
                         let _ = self.builder.build_call(va_start_fn, &[ap_ptr.into()], "");
@@ -8114,10 +9037,10 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                 Ok(Some(self.context.i32_type().const_zero().into()))
             }
             "__builtin_va_end" => {
-                let va_end_type = self
-                    .context
-                    .void_type()
-                    .fn_type(&[self.context.ptr_type(AddressSpace::default()).into()], false);
+                let va_end_type = self.context.void_type().fn_type(
+                    &[self.context.ptr_type(AddressSpace::default()).into()],
+                    false,
+                );
                 let va_end_fn = self
                     .module
                     .get_function("llvm.va_end")
@@ -8138,7 +9061,10 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                             let to_store = if Self::types_compatible(dst_type, src_val) {
                                 src_val
                             } else {
-                                self.context.ptr_type(AddressSpace::default()).const_null().into()
+                                self.context
+                                    .ptr_type(AddressSpace::default())
+                                    .const_null()
+                                    .into()
                             };
                             self.builder
                                 .build_store(dst_ptr, to_store)
@@ -8165,7 +9091,9 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                     BasicTypeEnum::ArrayType(ty) => self.builder.build_va_arg(ap_ptr, ty, "vaarg"),
                     BasicTypeEnum::FloatType(ty) => self.builder.build_va_arg(ap_ptr, ty, "vaarg"),
                     BasicTypeEnum::IntType(ty) => self.builder.build_va_arg(ap_ptr, ty, "vaarg"),
-                    BasicTypeEnum::PointerType(ty) => self.builder.build_va_arg(ap_ptr, ty, "vaarg"),
+                    BasicTypeEnum::PointerType(ty) => {
+                        self.builder.build_va_arg(ap_ptr, ty, "vaarg")
+                    }
                     BasicTypeEnum::StructType(ty) => self.builder.build_va_arg(ap_ptr, ty, "vaarg"),
                     BasicTypeEnum::VectorType(ty) => self.builder.build_va_arg(ap_ptr, ty, "vaarg"),
                     BasicTypeEnum::ScalableVectorType(ty) => {
@@ -8248,9 +9176,7 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
             }
             "__builtin_clz" | "__builtin_clzl" | "__builtin_clzll" => {
                 // Count leading zeros → LLVM ctlz intrinsic
-                if let Some(inkwell::values::BasicMetadataValueEnum::IntValue(val)) =
-                    args.first()
-                {
+                if let Some(inkwell::values::BasicMetadataValueEnum::IntValue(val)) = args.first() {
                     let bit_width = val.get_type().get_bit_width();
                     let fn_name = format!("llvm.ctlz.i{}", bit_width);
                     let fn_type = val.get_type().fn_type(
@@ -8283,9 +9209,7 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
             }
             "__builtin_ctz" | "__builtin_ctzl" | "__builtin_ctzll" => {
                 // Count trailing zeros → LLVM cttz intrinsic
-                if let Some(inkwell::values::BasicMetadataValueEnum::IntValue(val)) =
-                    args.first()
-                {
+                if let Some(inkwell::values::BasicMetadataValueEnum::IntValue(val)) = args.first() {
                     let bit_width = val.get_type().get_bit_width();
                     let fn_name = format!("llvm.cttz.i{}", bit_width);
                     let fn_type = val.get_type().fn_type(
@@ -8317,9 +9241,7 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
             }
             "__builtin_popcount" | "__builtin_popcountl" | "__builtin_popcountll" => {
                 // Population count → LLVM ctpop intrinsic
-                if let Some(inkwell::values::BasicMetadataValueEnum::IntValue(val)) =
-                    args.first()
-                {
+                if let Some(inkwell::values::BasicMetadataValueEnum::IntValue(val)) = args.first() {
                     let bit_width = val.get_type().get_bit_width();
                     let fn_name = format!("llvm.ctpop.i{}", bit_width);
                     let fn_type = val.get_type().fn_type(&[val.get_type().into()], false);
@@ -8341,9 +9263,7 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
             }
             "__builtin_bswap16" | "__builtin_bswap32" | "__builtin_bswap64" => {
                 // Byte swap → LLVM bswap intrinsic
-                if let Some(inkwell::values::BasicMetadataValueEnum::IntValue(val)) =
-                    args.first()
-                {
+                if let Some(inkwell::values::BasicMetadataValueEnum::IntValue(val)) = args.first() {
                     let bit_width = val.get_type().get_bit_width();
                     let fn_name = format!("llvm.bswap.i{}", bit_width);
                     let fn_type = val.get_type().fn_type(&[val.get_type().into()], false);
@@ -8366,9 +9286,7 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
             "__builtin_ffs" | "__builtin_ffsl" | "__builtin_ffsll" => {
                 // Find first set bit (1-indexed, 0 if input is 0)
                 // ffs(x) = x == 0 ? 0 : ctz(x) + 1
-                if let Some(inkwell::values::BasicMetadataValueEnum::IntValue(val)) =
-                    args.first()
-                {
+                if let Some(inkwell::values::BasicMetadataValueEnum::IntValue(val)) = args.first() {
                     let bit_width = val.get_type().get_bit_width();
                     let fn_name = format!("llvm.cttz.i{}", bit_width);
                     let fn_type = val.get_type().fn_type(
@@ -8415,9 +9333,7 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
             }
             "__builtin_abs" | "__builtin_labs" | "__builtin_llabs" => {
                 // Absolute value of integer
-                if let Some(inkwell::values::BasicMetadataValueEnum::IntValue(val)) =
-                    args.first()
-                {
+                if let Some(inkwell::values::BasicMetadataValueEnum::IntValue(val)) = args.first() {
                     let zero = val.get_type().const_zero();
                     let neg = self
                         .builder
@@ -8469,12 +9385,14 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                         .first()
                         .and_then(|off| self.lower_builtin_int_constant(arena, *off))
                         .map(|v| v != 0)
-                        .or_else(|| args.first().and_then(|arg| match arg {
-                            inkwell::values::BasicMetadataValueEnum::IntValue(v) => {
-                                v.get_zero_extended_constant().map(|n| n != 0)
-                            }
-                            _ => None,
-                        }))
+                        .or_else(|| {
+                            args.first().and_then(|arg| match arg {
+                                inkwell::values::BasicMetadataValueEnum::IntValue(v) => {
+                                    v.get_zero_extended_constant().map(|n| n != 0)
+                                }
+                                _ => None,
+                            })
+                        })
                         .unwrap_or(true);
                     let selected = if cond_is_true { 1 } else { 2 };
                     match &args[selected] {
@@ -8528,10 +9446,16 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                             if aw == bw {
                                 (*a, *b)
                             } else if aw < bw {
-                                let ext = self.builder.build_int_s_extend(*a, b.get_type(), "ovf_sext_a").unwrap_or(*a);
+                                let ext = self
+                                    .builder
+                                    .build_int_s_extend(*a, b.get_type(), "ovf_sext_a")
+                                    .unwrap_or(*a);
                                 (ext, *b)
                             } else {
-                                let ext = self.builder.build_int_s_extend(*b, a.get_type(), "ovf_sext_b").unwrap_or(*b);
+                                let ext = self
+                                    .builder
+                                    .build_int_s_extend(*b, a.get_type(), "ovf_sext_b")
+                                    .unwrap_or(*b);
                                 (*a, ext)
                             }
                         };
@@ -8548,24 +9472,18 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                                 .builder
                                 .build_int_mul(a_coerced, b_coerced, "overflow_mul")
                                 .map_err(|_| BackendError::InvalidNode)?,
-                            _ => unreachable!("overflow builtin matched but not handled: {}", builtin_name),
+                            _ => return Err(BackendError::UndefinedFunction(builtin_name.clone())),
                         };
                         self.builder
                             .build_store(*result_ptr, result)
                             .map_err(|_| BackendError::InvalidNode)?;
                         // Return 0 (no overflow detected — conservative)
-                        Ok(Some(
-                            self.context.i32_type().const_int(0, false).into(),
-                        ))
+                        Ok(Some(self.context.i32_type().const_int(0, false).into()))
                     } else {
-                        Ok(Some(
-                            self.context.i32_type().const_int(0, false).into(),
-                        ))
+                        Ok(Some(self.context.i32_type().const_int(0, false).into()))
                     }
                 } else {
-                    Ok(Some(
-                        self.context.i32_type().const_int(0, false).into(),
-                    ))
+                    Ok(Some(self.context.i32_type().const_int(0, false).into()))
                 }
             }
             "__sync_synchronize" => {
@@ -8577,9 +9495,7 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                         "sync_fence",
                     )
                     .map_err(|_| BackendError::InvalidNode)?;
-                Ok(Some(
-                    self.context.i32_type().const_int(0, false).into(),
-                ))
+                Ok(Some(self.context.i32_type().const_int(0, false).into()))
             }
             _ => {
                 if let Some(func) = self.functions.get(&builtin_name) {
@@ -8963,7 +9879,11 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
 
     /// Extract attribute information from a node's child/sibling chain.
     /// Returns a list of (attr_name, optional_string_arg, optional_int_arg) tuples.
-    fn extract_attributes(&self, arena: &Arena, node: &CAstNode) -> Vec<(String, Option<String>, Option<u32>)> {
+    fn extract_attributes(
+        &self,
+        arena: &Arena,
+        node: &CAstNode,
+    ) -> Vec<(String, Option<String>, Option<u32>)> {
         let mut attrs = Vec::new();
         self.collect_attributes_from_chain(arena, node.first_child, &mut attrs);
         attrs
@@ -9077,7 +9997,9 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                         let clean = vis.trim_matches('"');
                         match clean {
                             "hidden" => global.set_visibility(inkwell::GlobalVisibility::Hidden),
-                            "protected" => global.set_visibility(inkwell::GlobalVisibility::Protected),
+                            "protected" => {
+                                global.set_visibility(inkwell::GlobalVisibility::Protected)
+                            }
                             _ => {}
                         }
                     }
@@ -9281,7 +10203,9 @@ mod tests {
         let context = Context::create();
         let ts = TypeSystem::new();
         let mut backend = LlvmBackend::with_types(&context, "test", &ts);
-        backend.compile(&parser.arena, root).expect("compile failed");
+        backend
+            .compile(&parser.arena, root)
+            .expect("compile failed");
         backend.dump_ir()
     }
 
@@ -9295,10 +10219,14 @@ mod tests {
                     default: return 30; \
                 } \
                 return 0; \
-            }"
+            }",
         );
         // The IR should contain a switch instruction
-        assert!(ir.contains("switch"), "Expected switch instruction in IR:\n{}", ir);
+        assert!(
+            ir.contains("switch"),
+            "Expected switch instruction in IR:\n{}",
+            ir
+        );
     }
 
     #[test]
@@ -9310,10 +10238,14 @@ mod tests {
                 x = 1; \
                 done: \
                 return x; \
-            }"
+            }",
         );
         // Should contain a branch to a label block
-        assert!(ir.contains("br label"), "Expected unconditional branch in IR:\n{}", ir);
+        assert!(
+            ir.contains("br label"),
+            "Expected unconditional branch in IR:\n{}",
+            ir
+        );
     }
 
     #[test]
@@ -9327,7 +10259,7 @@ mod tests {
                     default: result = 30; break; \
                 } \
                 return result; \
-            }"
+            }",
         );
         assert!(ir.contains("switch"), "Expected switch in IR:\n{}", ir);
     }
@@ -9342,7 +10274,7 @@ mod tests {
                     i = i + 1; \
                 } \
                 return i; \
-            }"
+            }",
         );
         // Should have a branch to the end block (break)
         assert!(ir.contains("br label"), "Expected branches in IR:\n{}", ir);
@@ -9359,7 +10291,7 @@ mod tests {
                     sum = sum + i; \
                 } \
                 return sum; \
-            }"
+            }",
         );
         assert!(ir.contains("br label"), "Expected branches in IR:\n{}", ir);
     }
@@ -9369,10 +10301,14 @@ mod tests {
         let ir = compile_c_to_ir(
             "int test_expect(int x) { \
                 return __builtin_expect(x, 1); \
-            }"
+            }",
         );
         // __builtin_expect just returns its first argument
-        assert!(ir.contains("define"), "Expected function definition in IR:\n{}", ir);
+        assert!(
+            ir.contains("define"),
+            "Expected function definition in IR:\n{}",
+            ir
+        );
     }
 
     #[test]
@@ -9380,9 +10316,13 @@ mod tests {
         let ir = compile_c_to_ir(
             "int test_constant_p(int x) { \
                 return __builtin_constant_p(x); \
-            }"
+            }",
         );
-        assert!(ir.contains("define"), "Expected function definition in IR:\n{}", ir);
+        assert!(
+            ir.contains("define"),
+            "Expected function definition in IR:\n{}",
+            ir
+        );
     }
 
     #[test]
@@ -9390,29 +10330,60 @@ mod tests {
         let ir = compile_c_to_ir(
             "static const char __UNIQUE_ID_license230[] __attribute__((used)) __attribute__((section(\".modinfo\"))) __attribute__((aligned(1))) = \"license\" \"=\" \"GPL\";"
         );
-        assert!(ir.contains("@__UNIQUE_ID_license230"), "Expected global license symbol in IR:\n{}", ir);
-        assert!(ir.contains(".modinfo"), "Expected .modinfo section in IR:\n{}", ir);
-        assert!(ir.contains("license=GPL"), "Expected license payload in IR:\n{}", ir);
+        assert!(
+            ir.contains("@__UNIQUE_ID_license230"),
+            "Expected global license symbol in IR:\n{}",
+            ir
+        );
+        assert!(
+            ir.contains(".modinfo"),
+            "Expected .modinfo section in IR:\n{}",
+            ir
+        );
+        assert!(
+            ir.contains("license=GPL"),
+            "Expected license payload in IR:\n{}",
+            ir
+        );
     }
 
     #[test]
     fn test_builtin_types_compatible_p_distinguishes_types() {
         let ir = compile_c_to_ir(
             "int same_type(void) { return __builtin_types_compatible_p(int, int); } \
-             int diff_type(void) { return __builtin_types_compatible_p(int, char); }"
+             int diff_type(void) { return __builtin_types_compatible_p(int, char); }",
         );
-        assert!(ir.contains("define i32 @same_type()"), "Expected same_type in IR:\n{}", ir);
-        assert!(ir.contains("ret i32 1"), "Expected types_compatible_p(int, int) == 1 in IR:\n{}", ir);
-        assert!(ir.contains("define i32 @diff_type()"), "Expected diff_type in IR:\n{}", ir);
-        assert!(ir.contains("ret i32 0"), "Expected types_compatible_p(int, char) == 0 in IR:\n{}", ir);
+        assert!(
+            ir.contains("define i32 @same_type()"),
+            "Expected same_type in IR:\n{}",
+            ir
+        );
+        assert!(
+            ir.contains("ret i32 1"),
+            "Expected types_compatible_p(int, int) == 1 in IR:\n{}",
+            ir
+        );
+        assert!(
+            ir.contains("define i32 @diff_type()"),
+            "Expected diff_type in IR:\n{}",
+            ir
+        );
+        assert!(
+            ir.contains("ret i32 0"),
+            "Expected types_compatible_p(int, char) == 0 in IR:\n{}",
+            ir
+        );
     }
 
     #[test]
     fn test_builtin_choose_expr_selects_false_branch() {
-        let ir = compile_c_to_ir(
-            "int choose_false(void) { return __builtin_choose_expr(0, 11, 22); }"
+        let ir =
+            compile_c_to_ir("int choose_false(void) { return __builtin_choose_expr(0, 11, 22); }");
+        assert!(
+            ir.contains("ret i32 22"),
+            "Expected false branch result in IR:\n{}",
+            ir
         );
-        assert!(ir.contains("ret i32 22"), "Expected false branch result in IR:\n{}", ir);
     }
 
     #[test]
@@ -9420,17 +10391,21 @@ mod tests {
         let ir = compile_c_to_ir(
             "int my_printf(int fmt, ...) { \
                 return 0; \
-            }"
+            }",
         );
         // Variadic functions should have ... in the LLVM signature
-        assert!(ir.contains("..."), "Expected variadic signature in IR:\n{}", ir);
+        assert!(
+            ir.contains("..."),
+            "Expected variadic signature in IR:\n{}",
+            ir
+        );
     }
 
     #[test]
     fn test_va_list_typedef_parameter_lowers_to_ptr() {
         let ir = compile_c_to_ir(
             "typedef __builtin_va_list va_list; \
-             int consume(va_list ap) { return 0; }"
+             int consume(va_list ap) { return 0; }",
         );
         assert!(
             ir.contains("define i32 @consume(ptr"),
@@ -9445,7 +10420,7 @@ mod tests {
             "int write_ptr(int **out, int *value) { \
                 *out = value; \
                 return 0; \
-            }"
+            }",
         );
         assert!(
             ir.contains("store ptr %value") && ir.contains(", ptr %out"),
@@ -9459,9 +10434,13 @@ mod tests {
         let ir = compile_c_to_ir(
             "void test_asm() { \
                 asm volatile(\"nop\"); \
-            }"
+            }",
         );
-        assert!(ir.contains("call void asm sideeffect"), "Expected asm sideeffect call in IR:\n{}", ir);
+        assert!(
+            ir.contains("call void asm sideeffect"),
+            "Expected asm sideeffect call in IR:\n{}",
+            ir
+        );
         assert!(ir.contains("nop"), "Expected nop in asm template:\n{}", ir);
     }
 
@@ -9470,10 +10449,14 @@ mod tests {
         let ir = compile_c_to_ir(
             "void memory_barrier() { \
                 asm volatile(\"\" : : : \"memory\"); \
-            }"
+            }",
         );
         // Should produce an asm call with memory clobber
-        assert!(ir.contains("asm sideeffect"), "Expected asm sideeffect in IR:\n{}", ir);
+        assert!(
+            ir.contains("asm sideeffect"),
+            "Expected asm sideeffect in IR:\n{}",
+            ir
+        );
     }
 
     #[test]
@@ -9483,9 +10466,13 @@ mod tests {
                 int val; \
                 asm(\"mov $0, %0\" : \"=r\"(val)); \
                 return val; \
-            }"
+            }",
         );
-        assert!(ir.contains("asm"), "Expected asm instruction in IR:\n{}", ir);
+        assert!(
+            ir.contains("asm"),
+            "Expected asm instruction in IR:\n{}",
+            ir
+        );
     }
 
     #[test]
@@ -9495,9 +10482,13 @@ mod tests {
                 int result; \
                 asm(\"addl %1, %0\" : \"=r\"(result) : \"r\"(x)); \
                 return result; \
-            }"
+            }",
         );
-        assert!(ir.contains("asm"), "Expected asm instruction in IR:\n{}", ir);
+        assert!(
+            ir.contains("asm"),
+            "Expected asm instruction in IR:\n{}",
+            ir
+        );
     }
 
     #[test]
@@ -9505,9 +10496,13 @@ mod tests {
         let ir = compile_c_to_ir(
             "void test_cc_clobber() { \
                 asm volatile(\"\" : : : \"cc\"); \
-            }"
+            }",
         );
-        assert!(ir.contains("asm sideeffect"), "Expected asm sideeffect in IR:\n{}", ir);
+        assert!(
+            ir.contains("asm sideeffect"),
+            "Expected asm sideeffect in IR:\n{}",
+            ir
+        );
     }
 
     #[test]
@@ -9515,7 +10510,7 @@ mod tests {
         let ir = compile_c_to_ir(
             "void test_alloca(int n) { \
                 void *p = __builtin_alloca(n); \
-            }"
+            }",
         );
         assert!(ir.contains("alloca"), "Expected alloca in IR:\n{}", ir);
     }
@@ -9525,9 +10520,13 @@ mod tests {
         let ir = compile_c_to_ir(
             "void test_memcpy(char *dst, char *src, int n) { \
                 __builtin_memcpy(dst, src, n); \
-            }"
+            }",
         );
-        assert!(ir.contains("memcpy") || ir.contains("__builtin_memcpy"), "Expected memcpy call in IR:\n{}", ir);
+        assert!(
+            ir.contains("memcpy") || ir.contains("__builtin_memcpy"),
+            "Expected memcpy call in IR:\n{}",
+            ir
+        );
     }
 
     #[test]
@@ -9535,9 +10534,13 @@ mod tests {
         let ir = compile_c_to_ir(
             "void test_memset(char *dst, int c, int n) { \
                 __builtin_memset(dst, c, n); \
-            }"
+            }",
         );
-        assert!(ir.contains("memset") || ir.contains("__builtin_memset"), "Expected memset call in IR:\n{}", ir);
+        assert!(
+            ir.contains("memset") || ir.contains("__builtin_memset"),
+            "Expected memset call in IR:\n{}",
+            ir
+        );
     }
 
     #[test]
@@ -9545,9 +10548,13 @@ mod tests {
         let ir = compile_c_to_ir(
             "int test_sync_add(int *p) { \
                 return __sync_fetch_and_add(p, 1); \
-            }"
+            }",
         );
-        assert!(ir.contains("atomicrmw add"), "Expected atomicrmw add in IR:\n{}", ir);
+        assert!(
+            ir.contains("atomicrmw add"),
+            "Expected atomicrmw add in IR:\n{}",
+            ir
+        );
     }
 
     #[test]
@@ -9555,7 +10562,7 @@ mod tests {
         let ir = compile_c_to_ir(
             "int test_sync_cas(int *p) { \
                 return __sync_val_compare_and_swap(p, 1, 2); \
-            }"
+            }",
         );
         assert!(ir.contains("cmpxchg"), "Expected cmpxchg in IR:\n{}", ir);
     }
@@ -9565,9 +10572,13 @@ mod tests {
         let ir = compile_c_to_ir(
             "void test_atomic_fence() { \
                 __atomic_thread_fence(5); \
-            }"
+            }",
         );
-        assert!(ir.contains("fence seq_cst") || ir.contains("fence"), "Expected fence in IR:\n{}", ir);
+        assert!(
+            ir.contains("fence seq_cst") || ir.contains("fence"),
+            "Expected fence in IR:\n{}",
+            ir
+        );
     }
 
     #[test]
@@ -9578,10 +10589,13 @@ mod tests {
                 target: \
                 p = &&target; \
                 return 0; \
-            }"
+            }",
         );
-        assert!(ir.contains("blockaddress") || ir.contains("label.target"), 
-            "Expected blockaddress or label block in IR:\n{}", ir);
+        assert!(
+            ir.contains("blockaddress") || ir.contains("label.target"),
+            "Expected blockaddress or label block in IR:\n{}",
+            ir
+        );
     }
 
     #[test]
@@ -9592,10 +10606,13 @@ mod tests {
                 label1: \
                 target = &&label1; \
                 goto *target; \
-            }"
+            }",
         );
-        assert!(ir.contains("indirectbr") || ir.contains("label.label1"), 
-            "Expected indirectbr or label block in IR:\n{}", ir);
+        assert!(
+            ir.contains("indirectbr") || ir.contains("label.label1"),
+            "Expected indirectbr or label block in IR:\n{}",
+            ir
+        );
     }
 
     #[test]
@@ -9607,12 +10624,19 @@ mod tests {
                     case 10 ... 20: return 2; \
                     default: return 0; \
                 } \
-            }"
+            }",
         );
-        assert!(ir.contains("switch"), "Expected switch instruction in IR:\n{}", ir);
+        assert!(
+            ir.contains("switch"),
+            "Expected switch instruction in IR:\n{}",
+            ir
+        );
         // Case ranges should generate multiple case entries
-        assert!(ir.contains("switch.case_range") || ir.contains("i32 1") || ir.contains("switch i32"),
-            "Expected case range expansion in IR:\n{}", ir);
+        assert!(
+            ir.contains("switch.case_range") || ir.contains("i32 1") || ir.contains("switch i32"),
+            "Expected case range expansion in IR:\n{}",
+            ir
+        );
     }
 
     #[test]
@@ -9623,7 +10647,7 @@ mod tests {
                     case 5 ... 5: return 1; \
                     default: return 0; \
                 } \
-            }"
+            }",
         );
         assert!(ir.contains("switch"), "Expected switch in IR:\n{}", ir);
     }
@@ -9632,9 +10656,13 @@ mod tests {
     fn test_attribute_weak_function() {
         let ir = compile_c_to_ir(
             "void my_weak_func(void) __attribute__((weak)); \
-             void my_weak_func(void) { return; }"
+             void my_weak_func(void) { return; }",
         );
-        assert!(ir.contains("my_weak_func"), "Expected function in IR:\n{}", ir);
+        assert!(
+            ir.contains("my_weak_func"),
+            "Expected function in IR:\n{}",
+            ir
+        );
         // weak linkage should appear as `weak` or `extern_weak`
         assert!(ir.contains("weak"), "Expected weak linkage in IR:\n{}", ir);
     }
@@ -9652,28 +10680,36 @@ mod tests {
     #[test]
     fn test_attribute_section_function() {
         let ir = compile_c_to_ir(
-            "__attribute__((section(\".init.text\"))) void init_func(void) { return; }"
+            "__attribute__((section(\".init.text\"))) void init_func(void) { return; }",
         );
         assert!(ir.contains("init_func"), "Expected function in IR:\n{}", ir);
-        assert!(ir.contains(".init.text"), "Expected section attribute in IR:\n{}", ir);
+        assert!(
+            ir.contains(".init.text"),
+            "Expected section attribute in IR:\n{}",
+            ir
+        );
     }
 
     #[test]
     fn test_attribute_noreturn_function() {
-        let ir = compile_c_to_ir(
-            "__attribute__((noreturn)) void die(void) { return; }"
-        );
+        let ir = compile_c_to_ir("__attribute__((noreturn)) void die(void) { return; }");
         assert!(ir.contains("die"), "Expected function in IR:\n{}", ir);
-        assert!(ir.contains("noreturn"), "Expected noreturn attribute in IR:\n{}", ir);
+        assert!(
+            ir.contains("noreturn"),
+            "Expected noreturn attribute in IR:\n{}",
+            ir
+        );
     }
 
     #[test]
     fn test_attribute_cold_function() {
-        let ir = compile_c_to_ir(
-            "__attribute__((cold)) void rare_path(void) { return; }"
-        );
+        let ir = compile_c_to_ir("__attribute__((cold)) void rare_path(void) { return; }");
         assert!(ir.contains("rare_path"), "Expected function in IR:\n{}", ir);
-        assert!(ir.contains("cold"), "Expected cold attribute in IR:\n{}", ir);
+        assert!(
+            ir.contains("cold"),
+            "Expected cold attribute in IR:\n{}",
+            ir
+        );
     }
 
     #[test]
@@ -9681,125 +10717,193 @@ mod tests {
         let ir = compile_c_to_ir(
             "__attribute__((noinline)) void slow_path(void) { return; } \
              __attribute__((always_inline)) void fast_path(void) { return; } \
-             __attribute__((hot)) void hot_path(void) { return; }"
+             __attribute__((hot)) void hot_path(void) { return; }",
         );
-        assert!(ir.contains("slow_path"), "Expected slow_path in IR:\n{}", ir);
-        assert!(ir.contains("fast_path"), "Expected fast_path in IR:\n{}", ir);
+        assert!(
+            ir.contains("slow_path"),
+            "Expected slow_path in IR:\n{}",
+            ir
+        );
+        assert!(
+            ir.contains("fast_path"),
+            "Expected fast_path in IR:\n{}",
+            ir
+        );
         assert!(ir.contains("hot_path"), "Expected hot_path in IR:\n{}", ir);
-        assert!(ir.contains("noinline"), "Expected noinline attribute in IR:\n{}", ir);
-        assert!(ir.contains("alwaysinline"), "Expected alwaysinline attribute in IR:\n{}", ir);
+        assert!(
+            ir.contains("noinline"),
+            "Expected noinline attribute in IR:\n{}",
+            ir
+        );
+        assert!(
+            ir.contains("alwaysinline"),
+            "Expected alwaysinline attribute in IR:\n{}",
+            ir
+        );
         assert!(ir.contains("hot"), "Expected hot attribute in IR:\n{}", ir);
     }
 
     #[test]
     fn test_attribute_constructor_function() {
-        let ir = compile_c_to_ir(
-            "__attribute__((constructor)) void init_hook(void) { return; }"
+        let ir = compile_c_to_ir("__attribute__((constructor)) void init_hook(void) { return; }");
+        assert!(
+            ir.contains("@llvm.global_ctors"),
+            "Expected llvm.global_ctors in IR:\n{}",
+            ir
         );
-        assert!(ir.contains("@llvm.global_ctors"), "Expected llvm.global_ctors in IR:\n{}", ir);
-        assert!(ir.contains("@init_hook"), "Expected init_hook in ctor table IR:\n{}", ir);
+        assert!(
+            ir.contains("@init_hook"),
+            "Expected init_hook in ctor table IR:\n{}",
+            ir
+        );
     }
 
     #[test]
     fn test_attribute_destructor_function() {
-        let ir = compile_c_to_ir(
-            "__attribute__((destructor)) void cleanup_hook(void) { return; }"
+        let ir = compile_c_to_ir("__attribute__((destructor)) void cleanup_hook(void) { return; }");
+        assert!(
+            ir.contains("@llvm.global_dtors"),
+            "Expected llvm.global_dtors in IR:\n{}",
+            ir
         );
-        assert!(ir.contains("@llvm.global_dtors"), "Expected llvm.global_dtors in IR:\n{}", ir);
-        assert!(ir.contains("@cleanup_hook"), "Expected cleanup_hook in dtor table IR:\n{}", ir);
+        assert!(
+            ir.contains("@cleanup_hook"),
+            "Expected cleanup_hook in dtor table IR:\n{}",
+            ir
+        );
     }
 
     #[test]
     fn test_unused_static_inline_function_not_emitted() {
         let ir = compile_c_to_ir(
             "static inline int helper(void) { extern void hidden(void); hidden(); return 0; } \
-             int ok(void) { return 1; }"
+             int ok(void) { return 1; }",
         );
-        assert!(ir.contains("define i32 @ok()"), "Expected ok in IR:\n{}", ir);
-        assert!(!ir.contains("@helper"), "Unused static inline helper should not be emitted:\n{}", ir);
-        assert!(!ir.contains("@hidden"), "Unused helper dependency should not be emitted:\n{}", ir);
+        assert!(
+            ir.contains("define i32 @ok()"),
+            "Expected ok in IR:\n{}",
+            ir
+        );
+        assert!(
+            !ir.contains("@helper"),
+            "Unused static inline helper should not be emitted:\n{}",
+            ir
+        );
+        assert!(
+            !ir.contains("@hidden"),
+            "Unused helper dependency should not be emitted:\n{}",
+            ir
+        );
     }
 
     #[test]
     fn test_attribute_packed_struct_sizeof() {
         let ir = compile_c_to_ir(
             "struct __attribute__((packed)) S { int a; char b; }; \
-             int packed_size(void) { return sizeof(struct S); }"
+             int packed_size(void) { return sizeof(struct S); }",
         );
-        assert!(ir.contains("ret i32 5"), "Expected packed struct size 5 in IR:\n{}", ir);
+        assert!(
+            ir.contains("ret i32 5"),
+            "Expected packed struct size 5 in IR:\n{}",
+            ir
+        );
     }
 
     #[test]
     fn test_attribute_packed_struct_ir_layout() {
         let ir = compile_c_to_ir(
             "struct __attribute__((packed)) S { int a; char b; }; \
-             int read_b(struct S *p) { return p->b; }"
+             int read_b(struct S *p) { return p->b; }",
         );
-        assert!(ir.contains("<{ i32, i8 }>") || ir.contains("<{i32, i8}>"), "Expected packed LLVM struct layout in IR:\n{}", ir);
+        assert!(
+            ir.contains("<{ i32, i8 }>") || ir.contains("<{i32, i8}>"),
+            "Expected packed LLVM struct layout in IR:\n{}",
+            ir
+        );
     }
 
     #[test]
     fn test_flexible_array_sizeof_header() {
         let ir = compile_c_to_ir(
             "struct Flex { int len; char data[]; }; \
-             int flex_header_size(void) { return sizeof(struct Flex); }"
+             int flex_header_size(void) { return sizeof(struct Flex); }",
         );
-        assert!(ir.contains("ret i32 4"), "Expected flexible array header size 4 in IR:\n{}", ir);
+        assert!(
+            ir.contains("ret i32 4"),
+            "Expected flexible array header size 4 in IR:\n{}",
+            ir
+        );
     }
 
     #[test]
     fn test_sizeof_int() {
-        let ir = compile_c_to_ir(
-            "int test_sizeof(void) { return sizeof(int); }"
-        );
+        let ir = compile_c_to_ir("int test_sizeof(void) { return sizeof(int); }");
         // sizeof(int) should produce 4, returned as i32
-        assert!(ir.contains("ret i32 4"), "Expected ret i32 4 for sizeof(int):\n{}", ir);
+        assert!(
+            ir.contains("ret i32 4"),
+            "Expected ret i32 4 for sizeof(int):\n{}",
+            ir
+        );
     }
 
     #[test]
     fn test_sizeof_char() {
-        let ir = compile_c_to_ir(
-            "int test_sizeof_char(void) { return sizeof(char); }"
-        );
+        let ir = compile_c_to_ir("int test_sizeof_char(void) { return sizeof(char); }");
         // sizeof(char) should produce 1, returned as i32
-        assert!(ir.contains("ret i32 1"), "Expected ret i32 1 for sizeof(char):\n{}", ir);
+        assert!(
+            ir.contains("ret i32 1"),
+            "Expected ret i32 1 for sizeof(char):\n{}",
+            ir
+        );
     }
 
     #[test]
     fn test_ternary_select() {
-        let ir = compile_c_to_ir(
-            "int max(int a, int b) { return a > b ? a : b; }"
-        );
+        let ir = compile_c_to_ir("int max(int a, int b) { return a > b ? a : b; }");
         // Ternary should produce a select instruction
-        assert!(ir.contains("select"), "Expected select instruction for ternary:\n{}", ir);
+        assert!(
+            ir.contains("select"),
+            "Expected select instruction for ternary:\n{}",
+            ir
+        );
     }
 
     #[test]
     fn test_extern_func_decl_with_params() {
         let ir = compile_c_to_ir(
             "extern int puts(const char *s); \
-             int main(void) { return puts(\"hello\"); }"
+             int main(void) { return puts(\"hello\"); }",
         );
         // extern decl should produce declare with ptr param, not variadic
-        assert!(ir.contains("declare i32 @puts(ptr)"), "Expected declare i32 @puts(ptr):\n{}", ir);
-        assert!(!ir.contains("@puts(...)"), "Should not have variadic puts:\n{}", ir);
+        assert!(
+            ir.contains("declare i32 @puts(ptr)"),
+            "Expected declare i32 @puts(ptr):\n{}",
+            ir
+        );
+        assert!(
+            !ir.contains("@puts(...)"),
+            "Should not have variadic puts:\n{}",
+            ir
+        );
     }
 
     #[test]
     fn test_pointer_array_indexing() {
         let ir = compile_c_to_ir(
             "extern int puts(const char *s); \
-             int main(int argc, char **argv) { return puts(argv[1]); }"
+             int main(int argc, char **argv) { return puts(argv[1]); }",
         );
         // argv[1] should use ptr element type GEP, not i32
-        assert!(ir.contains("getelementptr ptr"), "Expected getelementptr ptr for char **argv:\n{}", ir);
+        assert!(
+            ir.contains("getelementptr ptr"),
+            "Expected getelementptr ptr for char **argv:\n{}",
+            ir
+        );
     }
 
     #[test]
     fn test_char_pointer_deref_loads_i8() {
-        let ir = compile_c_to_ir(
-            "int first_char(const char *z){ return *z; }"
-        );
+        let ir = compile_c_to_ir("int first_char(const char *z){ return *z; }");
         assert!(
             ir.contains("load i8, ptr"),
             "char-pointer dereference should load i8, not i32:\n{}",
@@ -9814,7 +10918,7 @@ mod tests {
                const unsigned char *a = zLeft; \
                const unsigned char *b = zRight; \
                return *a - *b; \
-             }"
+             }",
         );
         assert!(
             ir.contains("load i8, ptr"),
@@ -9830,7 +10934,7 @@ mod tests {
                const unsigned char *a = (const unsigned char*)zLeft; \
                const unsigned char *b = (const unsigned char*)zRight; \
                return *a - *b; \
-             }"
+             }",
         );
         assert!(
             ir.contains("load i8, ptr"),
@@ -9848,7 +10952,7 @@ mod tests {
                a = (const unsigned char*)zLeft; \
                b = (const unsigned char*)zRight; \
                return *a - *b; \
-             }"
+             }",
         );
         assert!(
             ir.contains("load i8, ptr"),
@@ -9866,12 +10970,20 @@ mod tests {
     fn test_call_arg_isolation() {
         let ir = compile_c_to_ir(
             "extern int puts(const char *s); \
-             int main(int argc, char **argv) { puts(argv[1]); return 0; }"
+             int main(int argc, char **argv) { puts(argv[1]); return 0; }",
         );
         // puts should be called with exactly one argument (ptr), not two
-        assert!(ir.contains("call i32 @puts(ptr"), "Expected call with ptr arg:\n{}", ir);
+        assert!(
+            ir.contains("call i32 @puts(ptr"),
+            "Expected call with ptr arg:\n{}",
+            ir
+        );
         // Should NOT have two arguments
-        assert!(!ir.contains("@puts(ptr %idx, i32"), "Should not have extra index arg in puts call:\n{}", ir);
+        assert!(
+            !ir.contains("@puts(ptr %idx, i32"),
+            "Should not have extra index arg in puts call:\n{}",
+            ir
+        );
     }
 
     #[test]
@@ -9879,17 +10991,25 @@ mod tests {
         let ir = compile_c_to_ir(
             "typedef unsigned char u8; \
              struct S { u8 x; int y; }; \
-             int getx(struct S *s) { return s->x; }"
+             int getx(struct S *s) { return s->x; }",
         );
-        assert!(!ir.contains("@u8 ="), "typedef should not emit a global symbol:\n{}", ir);
-        assert!(ir.contains("{ i8, i32 }"), "typedef-backed field should keep i8 layout:\n{}", ir);
+        assert!(
+            !ir.contains("@u8 ="),
+            "typedef should not emit a global symbol:\n{}",
+            ir
+        );
+        assert!(
+            ir.contains("{ i8, i32 }"),
+            "typedef-backed field should keep i8 layout:\n{}",
+            ir
+        );
     }
 
     #[test]
     fn test_typedef_cast_does_not_become_function_call() {
         let ir = compile_c_to_ir(
             "typedef unsigned char u8; \
-             int f(int v) { return 0xe0 + (u8)((v >> 12) & 0x0f); }"
+             int f(int v) { return 0xe0 + (u8)((v >> 12) & 0x0f); }",
         );
         assert!(
             !ir.contains("@u8("),
@@ -9911,7 +11031,7 @@ mod tests {
              int f(char *zOut, u32 v) { \
                  zOut[0] = 0xe0 + (u8)((v >> 12) & 0x0f); \
                  return 3; \
-             }"
+             }",
         );
         assert!(
             !ir.contains("@u8("),
@@ -9941,7 +11061,7 @@ mod tests {
             "int openDatabase(const char*, void**, unsigned int, const char*); \
              int sqlite3_open(const char *zFilename, void **ppDb){ \
                return openDatabase(zFilename, ppDb, 0x00000002 | 0x00000004, 0); \
-             }"
+             }",
         );
         assert!(
             ir.contains("call i32 @openDatabase"),
@@ -9961,7 +11081,7 @@ mod tests {
             "int f(int flags){ \
                if(((1<<(flags&7)) & 0x46)==0) return 21; \
                return 0; \
-             }"
+             }",
         );
         assert!(
             !ir.contains("br i1 poison"),
@@ -9995,7 +11115,7 @@ mod tests {
                char **pzErr \
              ){ \
                return xConstruct(db, 0, 0, 0, 0, pzErr); \
-             }"
+             }",
         );
         assert!(
             ir.contains("define internal i32 @vtabCallConstructor"),
@@ -10029,7 +11149,7 @@ mod tests {
         let ir = compile_c_to_ir(
             "struct G { int x; int y; }; \
              struct G g; \
-             int read_x(void) { return (g).x; }"
+             int read_x(void) { return (g).x; }",
         );
         assert!(
             ir.contains("define i32 @read_x"),
@@ -10045,9 +11165,7 @@ mod tests {
 
     #[test]
     fn test_function_pointer_variable_call_uses_signature() {
-        let ir = compile_c_to_ir(
-            "void call_cb(void (*cb)(void*), void *p) { cb(p); }"
-        );
+        let ir = compile_c_to_ir("void call_cb(void (*cb)(void*), void *p) { cb(p); }");
         assert!(
             ir.contains("call void"),
             "function-pointer call should preserve void return type:\n{}",
@@ -10066,7 +11184,7 @@ mod tests {
             "typedef struct FuncDef FuncDef; \
              typedef struct FuncDefHash { FuncDef *a[23]; } FuncDefHash; \
              static FuncDefHash h; \
-             int f(void){ return 0; }"
+             int f(void){ return 0; }",
         );
         assert!(
             ir.contains("[23 x ptr]"),
@@ -10082,7 +11200,7 @@ mod tests {
              enum { SQLITE_N_LIMIT = 11 + 1 }; \
              static int aHardLimit[12]; \
              struct Db { int aLimit[SQLITE_N_LIMIT]; }; \
-             void init(struct Db *db){ memcpy(db->aLimit, aHardLimit, sizeof(db->aLimit)); }"
+             void init(struct Db *db){ memcpy(db->aLimit, aHardLimit, sizeof(db->aLimit)); }",
         );
         assert!(
             !ir.contains("inttoptr i32 %aLimit to ptr"),
@@ -10101,7 +11219,7 @@ mod tests {
         let ir = compile_c_to_ir(
             "typedef struct S S; \
              struct S { int x; }; \
-             int read2(S *a){ return a[2].x; }"
+             int read2(S *a){ return a[2].x; }",
         );
         assert!(
             ir.contains("getelementptr inbounds { i32 }"),
@@ -10116,7 +11234,7 @@ mod tests {
             "typedef struct S { int x; } S; \
              typedef struct H { S a[4]; } H; \
              H h; \
-             int readh(int i){ return h.a[i].x; }"
+             int readh(int i){ return h.a[i].x; }",
         );
         assert!(
             ir.contains("define i32 @readh"),
@@ -10137,7 +11255,7 @@ mod tests {
              struct FuncDef { int x; }; \
              typedef struct Hash { FuncDef *a[23]; } Hash; \
              static Hash gHash; \
-             void insert(FuncDef *p, int h) { gHash.a[h] = p; }"
+             void insert(FuncDef *p, int h) { gHash.a[h] = p; }",
         );
         assert!(
             ir.contains("@gHash"),
@@ -10155,7 +11273,7 @@ mod tests {
     fn test_member_function_pointer_call_uses_signature() {
         let ir = compile_c_to_ir(
             "struct Cfg { void (*xFree)(void*); }; \
-             void invoke(struct Cfg *cfg, void *p) { cfg->xFree(p); }"
+             void invoke(struct Cfg *cfg, void *p) { cfg->xFree(p); }",
         );
         assert!(
             ir.contains("call void"),
@@ -10173,51 +11291,81 @@ mod tests {
     fn test_struct_pointer_field_type() {
         let ir = compile_c_to_ir(
             "struct node { int value; struct node *next; }; \
-             int test(struct node *head) { return head->value; }"
+             int test(struct node *head) { return head->value; }",
         );
         // Struct should have {i32, ptr} layout, not {i32, i32}
-        assert!(ir.contains("{ i32, ptr }"), "Expected struct type {{i32, ptr}}:\n{}", ir);
+        assert!(
+            ir.contains("{ i32, ptr }"),
+            "Expected struct type {{i32, ptr}}:\n{}",
+            ir
+        );
     }
 
     #[test]
     fn test_struct_field_index_correctness() {
         let ir = compile_c_to_ir(
             "struct node { int value; struct node *next; }; \
-             struct node *get_next(struct node *head) { return head->next; }"
+             struct node *get_next(struct node *head) { return head->next; }",
         );
         // head->next should use field index 1, not 0
-        assert!(ir.contains("i32 0, i32 1"), "Expected GEP index 1 for next field:\n{}", ir);
+        assert!(
+            ir.contains("i32 0, i32 1"),
+            "Expected GEP index 1 for next field:\n{}",
+            ir
+        );
     }
 
     #[test]
     fn test_nested_member_access() {
         let ir = compile_c_to_ir(
             "struct node { int value; struct node *next; }; \
-             int test(struct node *head) { return head->next->value; }"
+             int test(struct node *head) { return head->next->value; }",
         );
         // Should have two GEPs: one for ->next (index 1), one for ->value (index 0)
-        assert!(ir.contains("i32 0, i32 1"), "Expected GEP for next (index 1):\n{}", ir);
-        assert!(ir.contains("chain.gep"), "Expected chained GEP for nested access:\n{}", ir);
-        assert!(ir.contains("ret i32 %value"), "Expected return of value field:\n{}", ir);
+        assert!(
+            ir.contains("i32 0, i32 1"),
+            "Expected GEP for next (index 1):\n{}",
+            ir
+        );
+        assert!(
+            ir.contains("chain.gep"),
+            "Expected chained GEP for nested access:\n{}",
+            ir
+        );
+        assert!(
+            ir.contains("ret i32 %value"),
+            "Expected return of value field:\n{}",
+            ir
+        );
     }
 
     #[test]
     fn test_assign_expr_comparison() {
         let ir = compile_c_to_ir(
-            "int test_assign_cmp(void) { int x; if ((x = 42) > 0) { return x; } return -1; }"
+            "int test_assign_cmp(void) { int x; if ((x = 42) > 0) { return x; } return -1; }",
         );
         // The comparison should be a runtime icmp on the assign_result load,
         // not a constant-folded `br i1 true`
-        assert!(ir.contains("assign_result"), "Expected assign_result load:\n{}", ir);
-        assert!(ir.contains("icmp sgt"), "Expected runtime icmp sgt:\n{}", ir);
-        assert!(!ir.contains("br i1 true"), "Should NOT have constant-folded branch:\n{}", ir);
+        assert!(
+            ir.contains("assign_result"),
+            "Expected assign_result load:\n{}",
+            ir
+        );
+        assert!(
+            ir.contains("icmp sgt"),
+            "Expected runtime icmp sgt:\n{}",
+            ir
+        );
+        assert!(
+            !ir.contains("br i1 true"),
+            "Should NOT have constant-folded branch:\n{}",
+            ir
+        );
     }
 
     #[test]
     fn test_pointer_assignment_from_zero_stores_null() {
-        let ir = compile_c_to_ir(
-            "void set_null(void **pp){ *pp = 0; }"
-        );
+        let ir = compile_c_to_ir("void set_null(void **pp){ *pp = 0; }");
         assert!(
             ir.contains("store ptr null"),
             "pointer assignment from zero should coerce to null pointer store:\n{}",
@@ -10231,13 +11379,19 @@ mod tests {
             "struct point { int x; int y; }; \
              struct point make_point(int x, int y) { \
                  struct point p; p.x = x; p.y = y; return p; \
-             }"
+             }",
         );
         // Function should return { i32, i32 }, not i32
-        assert!(ir.contains("define { i32, i32 } @make_point"),
-                "Expected struct return type:\n{}", ir);
-        assert!(ir.contains("ret { i32, i32 }"),
-                "Expected struct ret instruction:\n{}", ir);
+        assert!(
+            ir.contains("define { i32, i32 } @make_point"),
+            "Expected struct return type:\n{}",
+            ir
+        );
+        assert!(
+            ir.contains("ret { i32, i32 }"),
+            "Expected struct ret instruction:\n{}",
+            ir
+        );
     }
 
     #[test]
@@ -10247,30 +11401,58 @@ mod tests {
             "void test_multi() { \
                  int x = 42; \
                  int *p = &x, a[10]; \
-             }"
+             }",
         );
-        assert!(ir.contains("alloca ptr"), "T1: Expected alloca ptr for *p:\n{}", ir);
-        assert!(ir.contains("alloca [10 x i32]"), "T1: Expected alloca [10 x i32] for a[10]:\n{}", ir);
+        assert!(
+            ir.contains("alloca ptr"),
+            "T1: Expected alloca ptr for *p:\n{}",
+            ir
+        );
+        assert!(
+            ir.contains("alloca [10 x i32]"),
+            "T1: Expected alloca [10 x i32] for a[10]:\n{}",
+            ir
+        );
 
         // Test 2: array first, then pointer (reversed order)
         let ir2 = compile_c_to_ir(
             "void test_multi2() { \
                  int x = 42; \
                  int a[10], *p; \
-             }"
+             }",
         );
-        assert!(ir2.contains("alloca [10 x i32]"), "T2: Expected alloca [10 x i32] for a[10]:\n{}", ir2);
-        assert!(ir2.contains("alloca ptr"), "T2: Expected alloca ptr for *p:\n{}", ir2);
+        assert!(
+            ir2.contains("alloca [10 x i32]"),
+            "T2: Expected alloca [10 x i32] for a[10]:\n{}",
+            ir2
+        );
+        assert!(
+            ir2.contains("alloca ptr"),
+            "T2: Expected alloca ptr for *p:\n{}",
+            ir2
+        );
 
         // Test 3: pointer, scalar, and array in one decl
         let ir3 = compile_c_to_ir(
             "void test_multi3() { \
                  int *p, n, a[5]; \
-             }"
+             }",
         );
-        assert!(ir3.contains("alloca ptr"), "T3: Expected alloca ptr for *p:\n{}", ir3);
-        assert!(ir3.contains("alloca i32"), "T3: Expected alloca i32 for n:\n{}", ir3);
-        assert!(ir3.contains("alloca [5 x i32]"), "T3: Expected alloca [5 x i32] for a[5]:\n{}", ir3);
+        assert!(
+            ir3.contains("alloca ptr"),
+            "T3: Expected alloca ptr for *p:\n{}",
+            ir3
+        );
+        assert!(
+            ir3.contains("alloca i32"),
+            "T3: Expected alloca i32 for n:\n{}",
+            ir3
+        );
+        assert!(
+            ir3.contains("alloca [5 x i32]"),
+            "T3: Expected alloca [5 x i32] for a[5]:\n{}",
+            ir3
+        );
 
         // Test 4: double pointer then array
         let ir4 = compile_c_to_ir(
@@ -10278,10 +11460,18 @@ mod tests {
                  int x = 42; \
                  int *px = &x; \
                  int **pp = &px, a[10]; \
-             }"
+             }",
         );
-        assert!(ir4.contains("alloca ptr"), "T4: Expected alloca ptr for **pp:\n{}", ir4);
-        assert!(ir4.contains("alloca [10 x i32]"), "T4: Expected alloca [10 x i32] for a[10]:\n{}", ir4);
+        assert!(
+            ir4.contains("alloca ptr"),
+            "T4: Expected alloca ptr for **pp:\n{}",
+            ir4
+        );
+        assert!(
+            ir4.contains("alloca [10 x i32]"),
+            "T4: Expected alloca [10 x i32] for a[10]:\n{}",
+            ir4
+        );
 
         // Test 5: two pointers without initializers — verifies declarator_llvm_type
         // does NOT walk next_sibling (which would count q's pointer declarator
@@ -10289,10 +11479,14 @@ mod tests {
         let ir5 = compile_c_to_ir(
             "void test_multi5() { \
                  int *p, *q; \
-             }"
+             }",
         );
         let p_alloca_count = ir5.matches("alloca ptr").count();
-        assert_eq!(p_alloca_count, 2, "T5: Expected exactly 2 alloca ptr (one for *p, one for *q):\n{}", ir5);
+        assert_eq!(
+            p_alloca_count, 2,
+            "T5: Expected exactly 2 alloca ptr (one for *p, one for *q):\n{}",
+            ir5
+        );
     }
 
     #[test]
@@ -10301,22 +11495,37 @@ mod tests {
             "struct point { int x; int y; }; \
              void test_desig_init() { \
                  struct point p = {.x = 1, .y = 2}; \
-             }"
+             }",
         );
         // Should allocate the struct
-        assert!(ir.contains("alloca { i32, i32 }"),
-                "Expected struct alloca:\n{}", ir);
+        assert!(
+            ir.contains("alloca { i32, i32 }"),
+            "Expected struct alloca:\n{}",
+            ir
+        );
         // Should have GEP instructions targeting struct fields
-        assert!(ir.contains("getelementptr inbounds { i32, i32 }"),
-                "Expected struct GEP for designated init:\n{}", ir);
+        assert!(
+            ir.contains("getelementptr inbounds { i32, i32 }"),
+            "Expected struct GEP for designated init:\n{}",
+            ir
+        );
         // Should have stores for both fields
-        assert!(ir.contains("store i32 1"),
-                "Expected store of 1 for .x:\n{}", ir);
-        assert!(ir.contains("store i32 2"),
-                "Expected store of 2 for .y:\n{}", ir);
+        assert!(
+            ir.contains("store i32 1"),
+            "Expected store of 1 for .x:\n{}",
+            ir
+        );
+        assert!(
+            ir.contains("store i32 2"),
+            "Expected store of 2 for .y:\n{}",
+            ir
+        );
         // Should have the designated-init GEP label
-        assert!(ir.contains("desig.gep"),
-                "Expected desig.gep label:\n{}", ir);
+        assert!(
+            ir.contains("desig.gep"),
+            "Expected desig.gep label:\n{}",
+            ir
+        );
     }
 
     #[test]
@@ -10326,15 +11535,24 @@ mod tests {
             "struct point { int x; int y; }; \
              void test_partial() { \
                  struct point p = {.y = 42}; \
-             }"
+             }",
         );
-        assert!(ir.contains("alloca { i32, i32 }"),
-                "Expected struct alloca:\n{}", ir);
+        assert!(
+            ir.contains("alloca { i32, i32 }"),
+            "Expected struct alloca:\n{}",
+            ir
+        );
         // .y is field index 1
-        assert!(ir.contains("desig.gep"),
-                "Expected desig.gep for .y:\n{}", ir);
-        assert!(ir.contains("store i32 42"),
-                "Expected store of 42 for .y:\n{}", ir);
+        assert!(
+            ir.contains("desig.gep"),
+            "Expected desig.gep for .y:\n{}",
+            ir
+        );
+        assert!(
+            ir.contains("store i32 42"),
+            "Expected store of 42 for .y:\n{}",
+            ir
+        );
     }
 
     #[test]
@@ -10344,23 +11562,27 @@ mod tests {
             "struct rgb { int r; int g; int b; }; \
              void test_order() { \
                  struct rgb c = {.b = 3, .r = 1, .g = 2}; \
-             }"
+             }",
         );
-        assert!(ir.contains("alloca { i32, i32, i32 }"),
-                "Expected 3-field struct alloca:\n{}", ir);
+        assert!(
+            ir.contains("alloca { i32, i32, i32 }"),
+            "Expected 3-field struct alloca:\n{}",
+            ir
+        );
         // All three field values should be stored
-        assert!(ir.contains("store i32 3"),
-                "Expected store for .b:\n{}", ir);
-        assert!(ir.contains("store i32 1"),
-                "Expected store for .r:\n{}", ir);
-        assert!(ir.contains("store i32 2"),
-                "Expected store for .g:\n{}", ir);
+        assert!(ir.contains("store i32 3"), "Expected store for .b:\n{}", ir);
+        assert!(ir.contains("store i32 1"), "Expected store for .r:\n{}", ir);
+        assert!(ir.contains("store i32 2"), "Expected store for .g:\n{}", ir);
         // Should have 3 GEPs (each GEP line contains "desig.gep")
-        let gep_count = ir.lines()
+        let gep_count = ir
+            .lines()
             .filter(|l| l.contains("getelementptr") && l.contains("desig.gep"))
             .count();
-        assert_eq!(gep_count, 3,
-                "Expected 3 desig.gep GEP instructions:\n{}", ir);
+        assert_eq!(
+            gep_count, 3,
+            "Expected 3 desig.gep GEP instructions:\n{}",
+            ir
+        );
     }
 
     // ------------------------------------------------------------------ //
@@ -10374,19 +11596,31 @@ mod tests {
              int test_cl() { \
                  struct point p = (struct point){.x = 10, .y = 20}; \
                  return p.x + p.y; \
-             }"
+             }",
         );
         // Should allocate a temporary for the compound literal
-        assert!(ir.contains("compound.lit"),
-                "Expected compound.lit alloca:\n{}", ir);
+        assert!(
+            ir.contains("compound.lit"),
+            "Expected compound.lit alloca:\n{}",
+            ir
+        );
         // Should have stores for the designated init values
-        assert!(ir.contains("store i32 10"),
-                "Expected store of 10 for .x:\n{}", ir);
-        assert!(ir.contains("store i32 20"),
-                "Expected store of 20 for .y:\n{}", ir);
+        assert!(
+            ir.contains("store i32 10"),
+            "Expected store of 10 for .x:\n{}",
+            ir
+        );
+        assert!(
+            ir.contains("store i32 20"),
+            "Expected store of 20 for .y:\n{}",
+            ir
+        );
         // Should have a load of the compound literal
-        assert!(ir.contains("compound.lit.load"),
-                "Expected compound.lit.load:\n{}", ir);
+        assert!(
+            ir.contains("compound.lit.load"),
+            "Expected compound.lit.load:\n{}",
+            ir
+        );
     }
 
     #[test]
@@ -10395,15 +11629,20 @@ mod tests {
             "int test_scalar_cl() { \
                  int x = (int){42}; \
                  return x; \
-             }"
+             }",
         );
         // Should allocate a temporary for the compound literal
-        assert!(ir.contains("compound.lit"),
-                "Expected compound.lit alloca:\n{}", ir);
-        assert!(ir.contains("store i32 42"),
-                "Expected store of 42:\n{}", ir);
-        assert!(ir.contains("compound.lit.load"),
-                "Expected compound.lit.load:\n{}", ir);
+        assert!(
+            ir.contains("compound.lit"),
+            "Expected compound.lit alloca:\n{}",
+            ir
+        );
+        assert!(ir.contains("store i32 42"), "Expected store of 42:\n{}", ir);
+        assert!(
+            ir.contains("compound.lit.load"),
+            "Expected compound.lit.load:\n{}",
+            ir
+        );
     }
 
     #[test]
@@ -10414,14 +11653,23 @@ mod tests {
              int test_cl_expr() { \
                  struct pair p = (struct pair){.a = 3, .b = 7}; \
                  return p.a; \
-             }"
+             }",
         );
-        assert!(ir.contains("compound.lit"),
-                "Expected compound.lit alloca:\n{}", ir);
-        assert!(ir.contains("store i32 3"),
-                "Expected store of 3 for .a:\n{}", ir);
-        assert!(ir.contains("store i32 7"),
-                "Expected store of 7 for .b:\n{}", ir);
+        assert!(
+            ir.contains("compound.lit"),
+            "Expected compound.lit alloca:\n{}",
+            ir
+        );
+        assert!(
+            ir.contains("store i32 3"),
+            "Expected store of 3 for .a:\n{}",
+            ir
+        );
+        assert!(
+            ir.contains("store i32 7"),
+            "Expected store of 7 for .b:\n{}",
+            ir
+        );
     }
 
     // ------------------------------------------------------------------ //
@@ -10443,20 +11691,32 @@ mod tests {
                  f.writable = 0; \
                  f.executable = 1; \
                  return f.readable + f.executable; \
-             }"
+             }",
         );
         // The struct should be { i32 } (one storage unit), not { i32, i32, i32 }
-        assert!(ir.contains("{ i32 }"),
-                "Expected packed bitfield struct {{ i32 }}:\n{}", ir);
+        assert!(
+            ir.contains("{ i32 }"),
+            "Expected packed bitfield struct {{ i32 }}:\n{}",
+            ir
+        );
         // Bitfield writes should use OR to insert bits
-        assert!(ir.contains("bf.insert"),
-                "Expected bf.insert (OR) for bitfield write:\n{}", ir);
+        assert!(
+            ir.contains("bf.insert"),
+            "Expected bf.insert (OR) for bitfield write:\n{}",
+            ir
+        );
         // Bitfield writes should clear old bits with AND
-        assert!(ir.contains("bf.cleared"),
-                "Expected bf.cleared (AND) for bitfield clear:\n{}", ir);
+        assert!(
+            ir.contains("bf.cleared"),
+            "Expected bf.cleared (AND) for bitfield clear:\n{}",
+            ir
+        );
         // Bitfield reads should use AND mask
-        assert!(ir.contains("bf.mask"),
-                "Expected bf.mask (AND) for bitfield read:\n{}", ir);
+        assert!(
+            ir.contains("bf.mask"),
+            "Expected bf.mask (AND) for bitfield read:\n{}",
+            ir
+        );
     }
 
     #[test]
@@ -10472,13 +11732,19 @@ mod tests {
                  f.readable = 1; \
                  f.writable = 1; \
                  return f.writable; \
-             }"
+             }",
         );
         // Reading writable (bit_offset=1) needs lshr by 1
-        assert!(ir.contains("bf.shr"),
-                "Expected bf.shr (right shift) for non-zero bit_offset read:\n{}", ir);
-        assert!(ir.contains("bf.mask"),
-                "Expected bf.mask for bitfield read:\n{}", ir);
+        assert!(
+            ir.contains("bf.shr"),
+            "Expected bf.shr (right shift) for non-zero bit_offset read:\n{}",
+            ir
+        );
+        assert!(
+            ir.contains("bf.mask"),
+            "Expected bf.mask for bitfield read:\n{}",
+            ir
+        );
     }
 
     #[test]
@@ -10493,13 +11759,19 @@ mod tests {
              void set_writable(int val) { \
                  struct flags f; \
                  f.writable = val; \
-             }"
+             }",
         );
         // Writing writable (bit_offset=1) needs shl by 1
-        assert!(ir.contains("bf.new.shl"),
-                "Expected bf.new.shl (left shift) for non-zero bit_offset write:\n{}", ir);
-        assert!(ir.contains("bf.insert"),
-                "Expected bf.insert (OR) for bitfield write:\n{}", ir);
+        assert!(
+            ir.contains("bf.new.shl"),
+            "Expected bf.new.shl (left shift) for non-zero bit_offset write:\n{}",
+            ir
+        );
+        assert!(
+            ir.contains("bf.insert"),
+            "Expected bf.insert (OR) for bitfield write:\n{}",
+            ir
+        );
     }
 
     // ===== Multi-Translation-Unit (multi-TU) IR-level tests =====
@@ -10507,14 +11779,18 @@ mod tests {
     #[test]
     fn test_multi_tu_helper_defines_add() {
         // Simulate helper.c: defines a function `add`
-        let ir = compile_c_to_ir(
-            "int add(int a, int b) { return a + b; }"
-        );
+        let ir = compile_c_to_ir("int add(int a, int b) { return a + b; }");
         // The helper TU should have a `define` for `add`, not a `declare`
-        assert!(ir.contains("define i32 @add(i32"),
-                "Expected define i32 @add in helper TU:\n{}", ir);
-        assert!(!ir.contains("declare i32 @add"),
-                "Helper TU should NOT have declare for add:\n{}", ir);
+        assert!(
+            ir.contains("define i32 @add(i32"),
+            "Expected define i32 @add in helper TU:\n{}",
+            ir
+        );
+        assert!(
+            !ir.contains("declare i32 @add"),
+            "Helper TU should NOT have declare for add:\n{}",
+            ir
+        );
     }
 
     #[test]
@@ -10522,20 +11798,32 @@ mod tests {
         // Simulate main.c: declares extern add and calls it from main
         let ir = compile_c_to_ir(
             "extern int add(int a, int b); \
-             int main(void) { return add(3, 4); }"
+             int main(void) { return add(3, 4); }",
         );
         // The main TU should have a `declare` for `add` (extern, not defined here)
-        assert!(ir.contains("declare i32 @add(i32"),
-                "Expected declare i32 @add in main TU:\n{}", ir);
+        assert!(
+            ir.contains("declare i32 @add(i32"),
+            "Expected declare i32 @add in main TU:\n{}",
+            ir
+        );
         // The main TU should have a `define` for `main`
-        assert!(ir.contains("define i32 @main"),
-                "Expected define i32 @main in main TU:\n{}", ir);
+        assert!(
+            ir.contains("define i32 @main"),
+            "Expected define i32 @main in main TU:\n{}",
+            ir
+        );
         // The main TU should NOT have a `define` for `add`
-        assert!(!ir.contains("define i32 @add"),
-                "Main TU should NOT define add:\n{}", ir);
+        assert!(
+            !ir.contains("define i32 @add"),
+            "Main TU should NOT define add:\n{}",
+            ir
+        );
         // Should contain a call to @add with two i32 arguments
-        assert!(ir.contains("call i32 @add(i32"),
-                "Expected call i32 @add(i32 ...) in main TU:\n{}", ir);
+        assert!(
+            ir.contains("call i32 @add(i32"),
+            "Expected call i32 @add(i32 ...) in main TU:\n{}",
+            ir
+        );
     }
 
     #[test]
@@ -10546,20 +11834,29 @@ mod tests {
                  int len = 0; \
                  while (s[len]) len = len + 1; \
                  return len; \
-             }"
+             }",
         );
-        assert!(helper_ir.contains("define i32 @string_length(ptr"),
-                "Expected define i32 @string_length(ptr) in helper TU:\n{}", helper_ir);
+        assert!(
+            helper_ir.contains("define i32 @string_length(ptr"),
+            "Expected define i32 @string_length(ptr) in helper TU:\n{}",
+            helper_ir
+        );
 
         // Main TU: declares extern and calls it
         let main_ir = compile_c_to_ir(
             "extern int string_length(const char *s); \
-             int main(void) { return string_length(\"hello\"); }"
+             int main(void) { return string_length(\"hello\"); }",
         );
-        assert!(main_ir.contains("declare i32 @string_length(ptr"),
-                "Expected declare i32 @string_length(ptr) in main TU:\n{}", main_ir);
-        assert!(main_ir.contains("call i32 @string_length(ptr"),
-                "Expected call to string_length in main TU:\n{}", main_ir);
+        assert!(
+            main_ir.contains("declare i32 @string_length(ptr"),
+            "Expected declare i32 @string_length(ptr) in main TU:\n{}",
+            main_ir
+        );
+        assert!(
+            main_ir.contains("call i32 @string_length(ptr"),
+            "Expected call to string_length in main TU:\n{}",
+            main_ir
+        );
     }
 
     #[test]
@@ -10567,20 +11864,29 @@ mod tests {
         // Helper TU: defines a void function
         let helper_ir = compile_c_to_ir(
             "int global_val; \
-             void set_value(int v) { global_val = v; }"
+             void set_value(int v) { global_val = v; }",
         );
-        assert!(helper_ir.contains("define void @set_value(i32"),
-                "Expected define void @set_value in helper TU:\n{}", helper_ir);
+        assert!(
+            helper_ir.contains("define void @set_value(i32"),
+            "Expected define void @set_value in helper TU:\n{}",
+            helper_ir
+        );
 
         // Main TU: declares extern void function and calls it
         let main_ir = compile_c_to_ir(
             "extern void set_value(int v); \
-             int main(void) { set_value(42); return 0; }"
+             int main(void) { set_value(42); return 0; }",
         );
-        assert!(main_ir.contains("declare void @set_value(i32"),
-                "Expected declare void @set_value in main TU:\n{}", main_ir);
-        assert!(!main_ir.contains("define void @set_value"),
-                "Main TU should NOT define set_value:\n{}", main_ir);
+        assert!(
+            main_ir.contains("declare void @set_value(i32"),
+            "Expected declare void @set_value in main TU:\n{}",
+            main_ir
+        );
+        assert!(
+            !main_ir.contains("define void @set_value"),
+            "Main TU should NOT define set_value:\n{}",
+            main_ir
+        );
     }
 
     #[test]
@@ -10589,18 +11895,33 @@ mod tests {
         let ir = compile_c_to_ir(
             "extern int add(int a, int b); \
              extern int multiply(int a, int b); \
-             int main(void) { return add(2, 3) + multiply(4, 5); }"
+             int main(void) { return add(2, 3) + multiply(4, 5); }",
         );
-        assert!(ir.contains("declare i32 @add(i32"),
-                "Expected declare for add:\n{}", ir);
-        assert!(ir.contains("declare i32 @multiply(i32"),
-                "Expected declare for multiply:\n{}", ir);
-        assert!(ir.contains("define i32 @main"),
-                "Expected define for main:\n{}", ir);
-        assert!(ir.contains("call i32 @add(i32"),
-                "Expected call to add:\n{}", ir);
-        assert!(ir.contains("call i32 @multiply(i32"),
-                "Expected call to multiply:\n{}", ir);
+        assert!(
+            ir.contains("declare i32 @add(i32"),
+            "Expected declare for add:\n{}",
+            ir
+        );
+        assert!(
+            ir.contains("declare i32 @multiply(i32"),
+            "Expected declare for multiply:\n{}",
+            ir
+        );
+        assert!(
+            ir.contains("define i32 @main"),
+            "Expected define for main:\n{}",
+            ir
+        );
+        assert!(
+            ir.contains("call i32 @add(i32"),
+            "Expected call to add:\n{}",
+            ir
+        );
+        assert!(
+            ir.contains("call i32 @multiply(i32"),
+            "Expected call to multiply:\n{}",
+            ir
+        );
     }
 
     #[test]
@@ -10614,13 +11935,19 @@ mod tests {
             let temp_file = NamedTempFile::new().unwrap();
             let arena = Arena::new(temp_file.path(), 65536).unwrap();
             let mut parser = Parser::new(arena);
-            let root = parser.parse("int add(int a, int b) { return a + b; }").expect("parse failed");
+            let root = parser
+                .parse("int add(int a, int b) { return a + b; }")
+                .expect("parse failed");
 
             let context = Context::create();
             let ts = TypeSystem::new();
             let mut backend = LlvmBackend::with_types(&context, "helper", &ts);
-            backend.compile(&parser.arena, root).expect("compile failed");
-            backend.verify().expect("helper TU LLVM verification failed");
+            backend
+                .compile(&parser.arena, root)
+                .expect("compile failed");
+            backend
+                .verify()
+                .expect("helper TU LLVM verification failed");
         }
 
         // Main TU
@@ -10628,15 +11955,19 @@ mod tests {
             let temp_file = NamedTempFile::new().unwrap();
             let arena = Arena::new(temp_file.path(), 65536).unwrap();
             let mut parser = Parser::new(arena);
-            let root = parser.parse(
-                "extern int add(int a, int b); \
-                 int main(void) { return add(3, 4); }"
-            ).expect("parse failed");
+            let root = parser
+                .parse(
+                    "extern int add(int a, int b); \
+                 int main(void) { return add(3, 4); }",
+                )
+                .expect("parse failed");
 
             let context = Context::create();
             let ts = TypeSystem::new();
             let mut backend = LlvmBackend::with_types(&context, "main", &ts);
-            backend.compile(&parser.arena, root).expect("compile failed");
+            backend
+                .compile(&parser.arena, root)
+                .expect("compile failed");
             backend.verify().expect("main TU LLVM verification failed");
         }
     }
@@ -10644,12 +11975,10 @@ mod tests {
     #[test]
     fn test_multi_tu_signature_consistency() {
         // Verify that the define in helper and declare in main have matching signatures
-        let helper_ir = compile_c_to_ir(
-            "int add(int a, int b) { return a + b; }"
-        );
+        let helper_ir = compile_c_to_ir("int add(int a, int b) { return a + b; }");
         let main_ir = compile_c_to_ir(
             "extern int add(int a, int b); \
-             int main(void) { return add(1, 2); }"
+             int main(void) { return add(1, 2); }",
         );
 
         // Extract the signature of add from both TUs
@@ -10658,20 +11987,38 @@ mod tests {
         // Both use i32 return type and two i32 params
         let helper_has_i32_ret = helper_ir.contains("define i32 @add(");
         let main_has_i32_ret = main_ir.contains("declare i32 @add(");
-        assert!(helper_has_i32_ret, "Helper TU add should return i32:\n{}", helper_ir);
-        assert!(main_has_i32_ret, "Main TU add declare should return i32:\n{}", main_ir);
+        assert!(
+            helper_has_i32_ret,
+            "Helper TU add should return i32:\n{}",
+            helper_ir
+        );
+        assert!(
+            main_has_i32_ret,
+            "Main TU add declare should return i32:\n{}",
+            main_ir
+        );
 
         // Count i32 params: both should have exactly 2
-        let helper_add_line = helper_ir.lines()
+        let helper_add_line = helper_ir
+            .lines()
             .find(|l| l.contains("define i32 @add("))
             .expect("no define line for add");
-        let main_add_line = main_ir.lines()
+        let main_add_line = main_ir
+            .lines()
             .find(|l| l.contains("declare i32 @add("))
             .expect("no declare line for add");
 
         let helper_param_count = helper_add_line.matches("i32").count() - 1; // subtract return type
         let main_param_count = main_add_line.matches("i32").count() - 1;
-        assert_eq!(helper_param_count, 2, "Helper add should have 2 i32 params: {}", helper_add_line);
-        assert_eq!(main_param_count, 2, "Main add declare should have 2 i32 params: {}", main_add_line);
+        assert_eq!(
+            helper_param_count, 2,
+            "Helper add should have 2 i32 params: {}",
+            helper_add_line
+        );
+        assert_eq!(
+            main_param_count, 2,
+            "Main add declare should have 2 i32 params: {}",
+            main_add_line
+        );
     }
 }

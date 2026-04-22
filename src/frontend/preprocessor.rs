@@ -286,7 +286,8 @@ impl Preprocessor {
     }
 
     pub fn add_include_path(&mut self, path: &str) {
-        self.include_paths.insert(self.user_include_count, PathBuf::from(path));
+        self.include_paths
+            .insert(self.user_include_count, PathBuf::from(path));
         self.user_include_count += 1;
     }
 
@@ -1098,7 +1099,10 @@ impl Preprocessor {
                     self.parse_directive_name(&pp_tokens, i);
                 // Debug: trace all directives
                 if std::env::var("OPTIC_TRACE_INCLUDES").is_ok() {
-                    eprintln!("[DIRECTIVE] #{} at line {} in {}", directive, dir_line, file);
+                    eprintln!(
+                        "[DIRECTIVE] #{} at line {} in {}",
+                        directive, dir_line, file
+                    );
                 }
                 match directive.as_str() {
                     "include" => {
@@ -1113,13 +1117,20 @@ impl Preprocessor {
                             match self.resolve_include_file(&include_path, file) {
                                 Ok(Some(tokens)) => {
                                     if std::env::var("OPTIC_TRACE_INCLUDES").is_ok() {
-                                        eprintln!("[INCLUDE] {} -> {} tokens", include_path, tokens.len());
+                                        eprintln!(
+                                            "[INCLUDE] {} -> {} tokens",
+                                            include_path,
+                                            tokens.len()
+                                        );
                                     }
                                     result.extend(tokens);
                                 }
                                 Ok(None) => {
                                     if std::env::var("OPTIC_TRACE_INCLUDES").is_ok() {
-                                        eprintln!("[INCLUDE] {} -> SKIPPED (dedup/guard)", include_path);
+                                        eprintln!(
+                                            "[INCLUDE] {} -> SKIPPED (dedup/guard)",
+                                            include_path
+                                        );
                                     }
                                 }
                                 Err(e) => {
@@ -2158,10 +2169,18 @@ impl Preprocessor {
         } else if tokens[j].kind == PpTokenKind::Identifier {
             let name = &tokens[j].text;
             match name.as_str() {
-                "__has_attribute" => return self.parse_feature_probe(tokens, j, |value| self.supports_attribute(value)),
-                "__has_builtin" => return self.parse_feature_probe(tokens, j, |value| self.supports_builtin(value)),
+                "__has_attribute" => {
+                    return self
+                        .parse_feature_probe(tokens, j, |value| self.supports_attribute(value))
+                }
+                "__has_builtin" => {
+                    return self
+                        .parse_feature_probe(tokens, j, |value| self.supports_builtin(value))
+                }
                 "__has_feature" | "__has_extension" => {
-                    return self.parse_feature_probe(tokens, j, |value| self.supports_language_extension(value));
+                    return self.parse_feature_probe(tokens, j, |value| {
+                        self.supports_language_extension(value)
+                    });
                 }
                 "__has_include" | "__has_include_next" => {
                     return self.parse_has_include_probe(tokens, j, file);
@@ -2318,17 +2337,15 @@ impl Preprocessor {
     }
 
     fn supports_builtin(&self, name: &str) -> bool {
-        BuiltinKind::is_builtin(name) || name.starts_with("__sync_") || name.starts_with("__atomic_")
+        BuiltinKind::is_builtin(name)
+            || name.starts_with("__sync_")
+            || name.starts_with("__atomic_")
     }
 
     fn supports_language_extension(&self, name: &str) -> bool {
         matches!(
             name,
-            "c_atomic"
-                | "gnu_asm"
-                | "gnu_attributes"
-                | "statement_expression"
-                | "c_static_assert"
+            "c_atomic" | "gnu_asm" | "gnu_attributes" | "statement_expression" | "c_static_assert"
         )
     }
 
@@ -3350,7 +3367,11 @@ const char *s = STR(hello world);"#;
         .unwrap();
 
         let main_path = temp_dir.path().join("main.c");
-        fs::write(&main_path, "#include \"asm/unwind_hints.h\"\nint main_var = 1;").unwrap();
+        fs::write(
+            &main_path,
+            "#include \"asm/unwind_hints.h\"\nint main_var = 1;",
+        )
+        .unwrap();
 
         pp.add_include_path(temp_dir.path().to_str().unwrap());
 
@@ -3555,9 +3576,18 @@ const char *s = STR(hello world);"#;
         // platform_fallback_macros should provide __BYTE_ORDER__ and __CHAR_BIT__ unconditionally
         let macros = Preprocessor::platform_fallback_macros();
         let names: Vec<&str> = macros.iter().map(|(n, _)| n.as_str()).collect();
-        assert!(names.contains(&"__BYTE_ORDER__"), "Expected __BYTE_ORDER__ in fallback macros");
-        assert!(names.contains(&"__CHAR_BIT__"), "Expected __CHAR_BIT__ in fallback macros");
-        assert!(names.contains(&"__SIZE_TYPE__"), "Expected __SIZE_TYPE__ in fallback macros");
+        assert!(
+            names.contains(&"__BYTE_ORDER__"),
+            "Expected __BYTE_ORDER__ in fallback macros"
+        );
+        assert!(
+            names.contains(&"__CHAR_BIT__"),
+            "Expected __CHAR_BIT__ in fallback macros"
+        );
+        assert!(
+            names.contains(&"__SIZE_TYPE__"),
+            "Expected __SIZE_TYPE__ in fallback macros"
+        );
     }
 
     #[cfg(target_os = "linux")]
@@ -3574,7 +3604,10 @@ const char *s = STR(hello world);"#;
     fn test_platform_fallback_x86_64_macros() {
         let macros = Preprocessor::platform_fallback_macros();
         let names: Vec<&str> = macros.iter().map(|(n, _)| n.as_str()).collect();
-        assert!(names.contains(&"__x86_64__"), "Expected __x86_64__ on x86_64");
+        assert!(
+            names.contains(&"__x86_64__"),
+            "Expected __x86_64__ on x86_64"
+        );
         assert!(names.contains(&"__LP64__"), "Expected __LP64__ on x86_64");
     }
 
@@ -3652,7 +3685,11 @@ const char *s = STR(hello world);"#;
         // Pattern: int debug_on = 1 ;
         let pos = texts.iter().position(|&t| t == "debug_on").unwrap();
         assert_eq!(texts[pos + 1], "=");
-        assert_eq!(texts[pos + 2], "1", "Expected debug_on = 1 in #ifdef DEBUG branch");
+        assert_eq!(
+            texts[pos + 2],
+            "1",
+            "Expected debug_on = 1 in #ifdef DEBUG branch"
+        );
     }
 
     /// Verify that `discover_default_include_paths()` finds at least one

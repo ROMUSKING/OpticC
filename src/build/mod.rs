@@ -1060,8 +1060,13 @@ fn compile_to_ir_artifacts(
             pp.process(input_path.to_str().unwrap())
                 .map_err(|e| format!("Preprocessor error: {}", e))?
         } else {
-            let source_text = fs::read_to_string(input_path)
-                .map_err(|e| format!("Failed to read source file '{}': {}", input_path.display(), e))?;
+            let source_text = fs::read_to_string(input_path).map_err(|e| {
+                format!(
+                    "Failed to read source file '{}': {}",
+                    input_path.display(),
+                    e
+                )
+            })?;
             let mut prefixed_source = String::new();
             for header in force_includes {
                 let resolved = resolve_force_include_path(input_path, header, include_paths);
@@ -1310,9 +1315,18 @@ mod tests {
     fn test_rewrite_return_thunks_for_kernel_rethunk() {
         let input = "hello:\n\txorl\t%eax, %eax\n\tretq\nworld:\n\tret\n";
         let rewritten = rewrite_return_thunks_for_kernel(input);
-        assert!(!rewritten.contains("\tretq\n"), "bare retq should be removed: {rewritten}");
-        assert!(!rewritten.contains("\tret\n"), "bare ret should be removed: {rewritten}");
-        assert!(rewritten.contains("\tjmp\t__x86_return_thunk\n"), "rethunk jump missing: {rewritten}");
+        assert!(
+            !rewritten.contains("\tretq\n"),
+            "bare retq should be removed: {rewritten}"
+        );
+        assert!(
+            !rewritten.contains("\tret\n"),
+            "bare ret should be removed: {rewritten}"
+        );
+        assert!(
+            rewritten.contains("\tjmp\t__x86_return_thunk\n"),
+            "rethunk jump missing: {rewritten}"
+        );
     }
 
     #[test]
@@ -1478,7 +1492,10 @@ mod tests {
             ok_arena.to_str().unwrap(),
             false,
         );
-        assert!(with_force.is_ok(), "force-include compilation should succeed");
+        assert!(
+            with_force.is_ok(),
+            "force-include compilation should succeed"
+        );
     }
 
     #[test]
@@ -1497,10 +1514,7 @@ mod tests {
 
     /// Helper: compile C source string to LLVM IR via the same pipeline used by the build system.
     /// Returns (ir_string, timings).
-    fn compile_source_string_to_ir(
-        source: &str,
-        module_name: &str,
-    ) -> Result<String, String> {
+    fn compile_source_string_to_ir(source: &str, module_name: &str) -> Result<String, String> {
         use crate::arena::Arena;
         use crate::backend::llvm::LlvmBackend;
         use crate::frontend::parser::Parser as CParser;
@@ -1516,12 +1530,15 @@ mod tests {
                 .as_nanos()
         ));
 
-        let arena = Arena::new(&arena_path, 65536)
-            .map_err(|e| format!("Arena creation failed: {}", e))?;
+        let arena =
+            Arena::new(&arena_path, 65536).map_err(|e| format!("Arena creation failed: {}", e))?;
         let mut parser = CParser::new(arena);
-        let root = parser
-            .parse(source)
-            .map_err(|e| format!("Parse error: {} (line {}, col {})", e.message, e.line, e.column))?;
+        let root = parser.parse(source).map_err(|e| {
+            format!(
+                "Parse error: {} (line {}, col {})",
+                e.message, e.line, e.column
+            )
+        })?;
 
         let context = inkwell::context::Context::create();
         let ts = TypeSystem::new();
@@ -1541,11 +1558,8 @@ mod tests {
     #[test]
     fn test_multi_tu_ir_generation_helper() {
         // Compile helper.c (defines add function) and verify IR
-        let ir = compile_source_string_to_ir(
-            "int add(int a, int b) { return a + b; }",
-            "helper",
-        )
-        .expect("helper.c compilation failed");
+        let ir = compile_source_string_to_ir("int add(int a, int b) { return a + b; }", "helper")
+            .expect("helper.c compilation failed");
 
         assert!(
             ir.contains("define i32 @add("),
@@ -1594,18 +1608,24 @@ mod tests {
     #[test]
     fn test_multi_tu_both_ir_verify() {
         // Verify that both TUs independently produce valid LLVM IR
-        let helper_ir = compile_source_string_to_ir(
-            "int add(int a, int b) { return a + b; }",
-            "helper",
+        let helper_ir =
+            compile_source_string_to_ir("int add(int a, int b) { return a + b; }", "helper");
+        assert!(
+            helper_ir.is_ok(),
+            "Helper TU should compile & verify: {:?}",
+            helper_ir.err()
         );
-        assert!(helper_ir.is_ok(), "Helper TU should compile & verify: {:?}", helper_ir.err());
 
         let main_ir = compile_source_string_to_ir(
             "extern int add(int a, int b); \
              int main(void) { return add(3, 4); }",
             "main",
         );
-        assert!(main_ir.is_ok(), "Main TU should compile & verify: {:?}", main_ir.err());
+        assert!(
+            main_ir.is_ok(),
+            "Main TU should compile & verify: {:?}",
+            main_ir.err()
+        );
     }
 
     #[test]
@@ -1624,11 +1644,7 @@ mod tests {
 
         // Write helper.c
         let helper_path = temp_dir.join("helper.c");
-        fs::write(
-            &helper_path,
-            "int add(int a, int b) { return a + b; }\n",
-        )
-        .unwrap();
+        fs::write(&helper_path, "int add(int a, int b) { return a + b; }\n").unwrap();
 
         // Write main.c
         let main_path = temp_dir.join("main.c");
@@ -1723,7 +1739,10 @@ mod tests {
         let config = BuildConfig::new()
             .with_source_files(vec![helper_path.clone(), main_path.clone()])
             .with_output(temp_dir.join("test_program"));
-        assert!(config.validate().is_ok(), "Config validation should pass for existing files");
+        assert!(
+            config.validate().is_ok(),
+            "Config validation should pass for existing files"
+        );
 
         // Verify source discovery finds both
         let discovered = BuildConfig::discover_source_files(&temp_dir);
@@ -1911,11 +1930,23 @@ mod tests {
         .expect("main.c compilation failed");
 
         // math.c: defines add and sub
-        assert!(math_ir.contains("define i32 @add("), "math.c should define add:\n{}", math_ir);
-        assert!(math_ir.contains("define i32 @sub("), "math.c should define sub:\n{}", math_ir);
+        assert!(
+            math_ir.contains("define i32 @add("),
+            "math.c should define add:\n{}",
+            math_ir
+        );
+        assert!(
+            math_ir.contains("define i32 @sub("),
+            "math.c should define sub:\n{}",
+            math_ir
+        );
 
         // utils.c: declares add, defines double_add
-        assert!(utils_ir.contains("declare i32 @add("), "utils.c should declare add:\n{}", utils_ir);
+        assert!(
+            utils_ir.contains("declare i32 @add("),
+            "utils.c should declare add:\n{}",
+            utils_ir
+        );
         assert!(
             utils_ir.contains("define i32 @double_add("),
             "utils.c should define double_add:\n{}",
