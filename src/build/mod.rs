@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::fmt;
 use std::fs;
 use std::io::Write;
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -1065,7 +1066,7 @@ fn compile_to_ir_artifacts(
             let mut prefixed_source = String::new();
             for header in force_includes {
                 let resolved = resolve_force_include_path(input_path, header, include_paths);
-                prefixed_source.push_str(&format!("#include \"{}\"\n", resolved.display()));
+                write!(prefixed_source, "#include \"{}\"\n", resolved.display()).unwrap();
             }
             prefixed_source.push_str(&source_text);
             pp.process_source(&prefixed_source, input_path.to_str().unwrap())

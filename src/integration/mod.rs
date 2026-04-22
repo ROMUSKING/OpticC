@@ -1,3 +1,4 @@
+use std::fmt::Write;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io;
@@ -639,57 +640,57 @@ int main(void) {
         report.push_str("# OpticC SQLite Integration Test Report\n\n");
 
         report.push_str("## Configuration\n\n");
-        report.push_str(&format!("- **SQLite URL:** {}\n", self.sqlite_url));
-        report.push_str(&format!("- **SQLite Version:** {}\n", self.sqlite_version));
-        report.push_str(&format!(
+        write!(report, "- **SQLite URL:** {}\n", self.sqlite_url).unwrap();
+        write!(report, "- **SQLite Version:** {}\n", self.sqlite_version).unwrap();
+        write!(report,
             "- **Test Directory:** {}\n",
             self.test_dir.display()
-        ));
-        report.push_str(&format!(
+        ).unwrap();
+        write!(report,
             "- **Output Directory:** {}\n",
             self.output_dir.display()
-        ));
+        ).unwrap();
         report.push('\n');
 
         report.push_str("## Results Summary\n\n");
 
         let status = if result.all_passed() { "PASS" } else { "FAIL" };
-        report.push_str(&format!("- Overall Status: {}\n", status));
-        report.push_str(&format!(
+        write!(report, "- Overall Status: {}\n", status).unwrap();
+        write!(report,
             "- Download: {}\n",
             self.bool_status(result.download_success)
-        ));
-        report.push_str(&format!(
+        ).unwrap();
+        write!(report,
             "- Preprocess: {}\n",
             self.bool_status(result.preprocess_success)
-        ));
-        report.push_str(&format!(
+        ).unwrap();
+        write!(report,
             "- Compile: {}\n",
             self.bool_status(result.compile_success)
-        ));
-        report.push_str(&format!(
+        ).unwrap();
+        write!(report,
             "- Link: {}\n",
             self.bool_status(result.link_success)
-        ));
-        report.push_str(&format!(
+        ).unwrap();
+        write!(report,
             "- Smoke Test: {}\n",
             self.bool_status(result.smoke_test_success)
-        ));
-        report.push_str(&format!(
+        ).unwrap();
+        write!(report,
             "- Library Created: {}\n",
             self.bool_status(result.library_created)
-        ));
-        report.push_str(&format!(
+        ).unwrap();
+        write!(report,
             "- Library Size: {} bytes\n",
             result.library_size_bytes
-        ));
-        report.push_str(&format!("- Compile Time: {} ms\n", result.compile_time_ms));
+        ).unwrap();
+        write!(report, "- Compile Time: {} ms\n", result.compile_time_ms).unwrap();
         report.push('\n');
 
         if !result.errors.is_empty() {
             report.push_str("## Errors\n\n");
             for error in &result.errors {
-                report.push_str(&format!("- {}\n", error));
+                write!(report, "- {}\n", error).unwrap();
             }
             report.push('\n');
         }
@@ -697,7 +698,7 @@ int main(void) {
         if !result.warnings.is_empty() {
             report.push_str("## Warnings\n\n");
             for warning in &result.warnings {
-                report.push_str(&format!("- {}\n", warning));
+                write!(report, "- {}\n", warning).unwrap();
             }
             report.push('\n');
         }
