@@ -831,6 +831,27 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_define_arg() {
+        let mut defines = HashMap::new();
+
+        // Test normal key-value
+        parse_define_arg("FOO=BAR", &mut defines);
+        assert_eq!(defines.get("FOO").unwrap(), "BAR");
+
+        // Test missing value (implicit 1)
+        parse_define_arg("BAZ", &mut defines);
+        assert_eq!(defines.get("BAZ").unwrap(), "1");
+
+        // Test empty value
+        parse_define_arg("EMPTY=", &mut defines);
+        assert_eq!(defines.get("EMPTY").unwrap(), "");
+
+        // Test value containing equals signs
+        parse_define_arg("COMPLEX=a=b=c", &mut defines);
+        assert_eq!(defines.get("COMPLEX").unwrap(), "a=b=c");
+    }
+
+    #[test]
     fn test_kbuild_style_flag_parsing() {
         let args = vec![
             "optic_c".to_string(),
