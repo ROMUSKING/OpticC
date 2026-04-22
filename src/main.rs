@@ -1,3 +1,4 @@
+use std::fmt::Write;
 use clap::{Parser, Subcommand};
 use std::collections::HashMap;
 use std::fs;
@@ -464,7 +465,7 @@ fn write_depfile(
     let mut content = format!("{}: {}\n", target, deps);
     if dep_phony {
         for source in source_files {
-            content.push_str(&format!("{}:\n", source.display()));
+            write!(content, "{}:\n", source.display()).unwrap();
         }
     }
 

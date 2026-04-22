@@ -1,3 +1,4 @@
+use std::fmt::Write;
 use crate::arena::{Arena, CAstNode, NodeOffset, NodeFlags};
 use crate::analysis::alias::AliasAnalyzer;
 use std::path::Path;
@@ -170,7 +171,7 @@ impl<'a> Vfs<'a> {
     fn reconstruct_file_content(&self, kind: u16, data: u32, first_child: NodeOffset) -> Vec<u8> {
         let mut content = String::new();
         content.push_str("/* OPTIC RECONSTRUCTED FILE */\n");
-        content.push_str(&format!("/* NodeKind: {}, DataOffset: {} */\n", kind, data));
+        write!(content, "/* NodeKind: {}, DataOffset: {} */\n", kind, data).unwrap();
         
         let mut child = first_child;
         while child != NodeOffset::NULL {
