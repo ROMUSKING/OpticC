@@ -401,44 +401,47 @@ impl Preprocessor {
     }
 
     fn compiler_predefined_macro_definitions() -> Vec<(String, MacroDefinition)> {
-        for compiler in ["gcc", "clang", "cc"] {
-            let output = match Command::new(compiler).args(["-dM", "-E", "-"]).output() {
-                Ok(output) => output,
-                Err(_) => continue,
-            };
-            if !output.status.success() {
-                continue;
-            }
-
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            let mut macros = Vec::new();
-            for line in stdout.lines() {
-                let Some(rest) = line.strip_prefix("#define ") else {
-                    continue;
+        static CACHE: OnceLock<Vec<(String, MacroDefinition)>> = OnceLock::new();
+        CACHE.get_or_init(|| {
+            for compiler in ["gcc", "clang", "cc"] {
+                let output = match Command::new(compiler).args(["-dM", "-E", "-"]).output() {
+                    Ok(output) => output,
+                    Err(_) => continue,
                 };
-                let mut parts = rest.splitn(2, char::is_whitespace);
-                let Some(name) = parts.next() else {
-                    continue;
-                };
-                if name.is_empty() || name.contains('(') {
+                if !output.status.success() {
                     continue;
                 }
-                let value = parts
-                    .next()
-                    .map(str::trim)
-                    .filter(|v| !v.is_empty())
-                    .unwrap_or("1");
-                macros.push((
-                    name.to_string(),
-                    MacroDefinition::ObjectLike {
-                        replacement: Self::tokenize_replacement_static(value),
-                    },
-                ));
+
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                let mut macros = Vec::new();
+                for line in stdout.lines() {
+                    let Some(rest) = line.strip_prefix("#define ") else {
+                        continue;
+                    };
+                    let mut parts = rest.splitn(2, char::is_whitespace);
+                    let Some(name) = parts.next() else {
+                        continue;
+                    };
+                    if name.is_empty() || name.contains('(') {
+                        continue;
+                    }
+                    let value = parts
+                        .next()
+                        .map(str::trim)
+                        .filter(|v| !v.is_empty())
+                        .unwrap_or("1");
+                    macros.push((
+                        name.to_string(),
+                        MacroDefinition::ObjectLike {
+                            replacement: Self::tokenize_replacement_static(value),
+                        },
+                    ));
+                }
+                return macros;
             }
-            return macros;
-        }
-        // Fallback: no system compiler found, define essential platform macros
-        Self::platform_fallback_macros()
+            // Fallback: no system compiler found, define essential platform macros
+            Self::platform_fallback_macros()
+        }).clone()
     }
 
     /// Fallback platform-specific macros when no system compiler (gcc/clang/cc) is available.
@@ -3756,5 +3759,14 @@ const char *s = STR(hello world);"#;
             "Expected FEATURE_VAL=77 when USE_FEATURE is defined; tokens: {:?}",
             non_ws.iter().map(|t| &t.text).collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn bench_compiler_predefined() {
+        let start = std::time::Instant::now();
+        for _ in 0..100 {
+            let _ = Preprocessor::compiler_predefined_macro_definitions();
+        }
+        println!("Time for 100 iterations of compiler_predefined_macro_definitions: {:?}", start.elapsed());
     }
 }
