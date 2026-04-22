@@ -334,26 +334,9 @@ impl<'a> TypeResolver<'a> {
         None
     }
 
-    fn resolve_struct_decl(&mut self, arena: &Arena, node: &CAstNode) -> Option<TypeId> {
-        let name = if node.data != 0 {
-            Some(format!("struct_{}", node.data))
-        } else {
-            None
-        };
-
-        let struct_id = self.types.add_type(CType::Struct {
-            name: name.clone(),
-            members: Vec::new(),
-            size: 0,
-            align: 0,
-        });
-
-        if let Some(ref n) = name {
-            self.struct_defs.insert(n.clone(), struct_id);
-        }
-
+    fn resolve_composite_members(&mut self, arena: &Arena, first_child: NodeOffset) -> Vec<StructMember> {
         let mut members = Vec::new();
-        let mut child = node.first_child;
+        let mut child = first_child;
         while child.0 != 0 {
             if let Some(member_node) = arena.get(child) {
                 let member_type = self.resolve_node(arena, child);
@@ -372,6 +355,28 @@ impl<'a> TypeResolver<'a> {
                 break;
             }
         }
+        members
+    }
+
+    fn resolve_struct_decl(&mut self, arena: &Arena, node: &CAstNode) -> Option<TypeId> {
+        let name = if node.data != 0 {
+            Some(format!("struct_{}", node.data))
+        } else {
+            None
+        };
+
+        let struct_id = self.types.add_type(CType::Struct {
+            name: name.clone(),
+            members: Vec::new(),
+            size: 0,
+            align: 0,
+        });
+
+        if let Some(ref n) = name {
+            self.struct_defs.insert(n.clone(), struct_id);
+        }
+
+        let members = self.resolve_composite_members(arena, node.first_child);
 
         if let Some(CType::Struct { members: ms, .. }) =
             self.types.types.get_mut(struct_id.0 as usize)
@@ -401,26 +406,7 @@ impl<'a> TypeResolver<'a> {
             self.struct_defs.insert(n.clone(), union_id);
         }
 
-        let mut members = Vec::new();
-        let mut child = node.first_child;
-        while child.0 != 0 {
-            if let Some(member_node) = arena.get(child) {
-                let member_type = self.resolve_node(arena, child);
-                if let Some(ty) = member_type {
-                    let mname = format!("member_{}", member_node.data);
-                    members.push(StructMember {
-                        name: mname,
-                        type_id: ty,
-                        offset: 0,
-                        bit_offset: None,
-                        bit_width: None,
-                    });
-                }
-                child = member_node.next_sibling;
-            } else {
-                break;
-            }
-        }
+        let members = self.resolve_composite_members(arena, node.first_child);
 
         if let Some(CType::Union { members: ms, .. }) =
             self.types.types.get_mut(union_id.0 as usize)
