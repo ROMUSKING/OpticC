@@ -570,23 +570,6 @@ impl Builder {
         self.link_objects()
     }
 
-    pub fn run_external(&self, cmd: &str, args: &[&str]) -> Result<(), BuildError> {
-        let output = Command::new(cmd)
-            .args(args)
-            .output()
-            .map_err(BuildError::IoError)?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(BuildError::ExternalToolError {
-                tool: cmd.to_string(),
-                message: stderr.to_string(),
-            });
-        }
-
-        Ok(())
-    }
-
     pub fn object_files(&self) -> &[PathBuf] {
         &self.object_files
     }
@@ -1381,26 +1364,6 @@ mod tests {
 
         let result = find_tool(&["nonexistent_tool_xyz_123"]);
         assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_run_external_success() {
-        let config = BuildConfig::new();
-        let builder = Builder::new(config);
-        let result = builder.run_external("echo", &["hello"]);
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    fn test_run_external_failure() {
-        let config = BuildConfig::new();
-        let builder = Builder::new(config);
-        let result = builder.run_external("false", &[]);
-        assert!(result.is_err());
-        assert!(matches!(
-            result.unwrap_err(),
-            BuildError::ExternalToolError { .. }
-        ));
     }
 
     #[test]
