@@ -313,6 +313,7 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
         name_opt: &mut Option<String>,
         is_pointer: &mut bool,
         is_array: &mut bool,
+        array_len: &mut u32,
         is_static: &mut bool,
         is_thread_local: &mut bool,
         init_offset: &mut NodeOffset,
@@ -343,6 +344,9 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                 }
                 8 => {
                     *is_array = true;
+                    if *array_len == 0 && node.data != 0 {
+                        *array_len = node.data;
+                    }
                     if node.next_sibling != NodeOffset::NULL && *init_offset == NodeOffset::NULL {
                         *init_offset = node.next_sibling;
                     }
@@ -359,6 +363,7 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                     name_opt,
                     is_pointer,
                     is_array,
+                    array_len,
                     is_static,
                     is_thread_local,
                     init_offset,
@@ -971,6 +976,7 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
         let mut name_opt: Option<String> = None;
         let mut is_pointer = false;
         let mut is_array = false;
+        let mut array_len: u32 = 0;
         let mut is_static = false;
         let mut is_thread_local = false;
         let mut init_offset = NodeOffset::NULL;
@@ -980,17 +986,39 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
             &mut name_opt,
             &mut is_pointer,
             &mut is_array,
+            &mut array_len,
             &mut is_static,
             &mut is_thread_local,
             &mut init_offset,
         );
 
+        let infer_array_len_from_init = |start: NodeOffset| -> u32 {
+            let mut count = 0u32;
+            let mut cur = start;
+            while cur != NodeOffset::NULL {
+                if arena.get(cur).is_none() {
+                    break;
+                }
+                count += 1;
+                cur = arena
+                    .get(cur)
+                    .map(|n| n.next_sibling)
+                    .unwrap_or(NodeOffset::NULL);
+            }
+            count
+        };
+
         if let Some(var_name) = name_opt {
             let global_type = if is_pointer {
                 self.context.ptr_type(AddressSpace::default()).as_basic_type_enum()
             } else if is_array {
-                // For arrays like `char name[] = "..."`, use the initializer to determine type
-                llvm_type
+                let inferred = if array_len == 0 && init_offset != NodeOffset::NULL {
+                    infer_array_len_from_init(init_offset)
+                } else {
+                    array_len
+                };
+                let len = inferred.max(1);
+                llvm_type.array_type(len).as_basic_type_enum()
             } else {
                 llvm_type
             };
@@ -1044,6 +1072,79 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                         self.global_variables.insert(var_name.clone(), binding);
                         self.variables.insert(var_name, binding);
                         return Ok(());
+                    } else if is_array {
+                        if let BasicTypeEnum::ArrayType(arr_ty) = global_type {
+                            let elem_ty = arr_ty.get_element_type();
+                            let mut values: Vec<BasicValueEnum> = Vec::new();
+                            let mut cur = init_offset;
+                            while cur != NodeOffset::NULL {
+                                let Some(item) = arena.get(cur) else {
+                                    break;
+                                };
+                                let v = match (item.kind, elem_ty) {
+                                    (61 | 80, BasicTypeEnum::IntType(it)) => {
+                                        it.const_int(item.data as u64, false).into()
+                                    }
+                                    (61 | 80, BasicTypeEnum::FloatType(ft)) => {
+                                        ft.const_float(item.data as f64).into()
+                                    }
+                                    _ => match elem_ty {
+                                        BasicTypeEnum::IntType(it) => it.const_zero().into(),
+                                        BasicTypeEnum::FloatType(ft) => ft.const_zero().into(),
+                                        BasicTypeEnum::PointerType(pt) => pt.const_null().into(),
+                                        BasicTypeEnum::StructType(st) => st.const_zero().into(),
+                                        BasicTypeEnum::ArrayType(at) => at.const_zero().into(),
+                                        _ => self.context.i32_type().const_zero().into(),
+                                    },
+                                };
+                                values.push(v);
+                                cur = item.next_sibling;
+                            }
+
+                            while values.len() < arr_ty.len() as usize {
+                                values.push(match elem_ty {
+                                    BasicTypeEnum::IntType(it) => it.const_zero().into(),
+                                    BasicTypeEnum::FloatType(ft) => ft.const_zero().into(),
+                                    BasicTypeEnum::PointerType(pt) => pt.const_null().into(),
+                                    BasicTypeEnum::StructType(st) => st.const_zero().into(),
+                                    BasicTypeEnum::ArrayType(at) => at.const_zero().into(),
+                                    _ => self.context.i32_type().const_zero().into(),
+                                });
+                            }
+                            values.truncate(arr_ty.len() as usize);
+
+                            let global = self.module.add_global(
+                                global_type,
+                                Some(AddressSpace::default()),
+                                &var_name,
+                            );
+                            let arr_const = arr_ty.const_array(
+                                &values
+                                    .iter()
+                                    .filter_map(|v| (*v).try_into().ok())
+                                    .collect::<Vec<_>>(),
+                            );
+                            global.set_initializer(&arr_const);
+                            if is_static {
+                                global.set_linkage(inkwell::module::Linkage::Internal);
+                            }
+                            if is_thread_local {
+                                global.set_thread_local(true);
+                                global.set_thread_local_mode(Some(
+                                    ThreadLocalMode::GeneralDynamicTLSModel,
+                                ));
+                            }
+                            self.apply_global_attributes(global, &attrs);
+                            self.register_used_attributes(global.as_pointer_value(), &attrs);
+                            let binding = VariableBinding {
+                                ptr: global.as_pointer_value(),
+                                pointee_type: global_type,
+                                function_type: None,
+                            };
+                            self.global_variables.insert(var_name.clone(), binding);
+                            self.variables.insert(var_name, binding);
+                            return Ok(());
+                        }
                     } else if init_node.kind == 61 || init_node.kind == 80 {
                         // Integer constant initializer
                         let value = init_node.data as u64;
@@ -1367,6 +1468,7 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
             1 => self.context.i8_type().as_basic_type_enum(),
             2 => self.context.i32_type().as_basic_type_enum(),
             3 => self.context.i8_type().as_basic_type_enum(),
+            7 => self.context.ptr_type(AddressSpace::default()).as_basic_type_enum(),
             6 => self.context.i32_type().as_basic_type_enum(),
             10 => self.context.i16_type().as_basic_type_enum(),
             11 => self.context.i64_type().as_basic_type_enum(),
@@ -1404,6 +1506,7 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
             1 => Some((0, 1)),
             2 | 12 | 13 | 83 => Some((4, 4)),
             3 | 14 => Some((1, 1)),
+            7 => Some((8, 8)),
             10 => Some((2, 2)),
             11 | 84 => Some((8, 8)),
             // kind 16 = va_list family. Model it as pointer-sized for 64-bit targets.
@@ -2429,6 +2532,9 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                                                     }
                                                     _ => { match field_ty { BasicTypeEnum::PointerType(pt) => pt.const_null().into(), BasicTypeEnum::IntType(it) => it.const_zero().into(), BasicTypeEnum::StructType(st2) => st2.const_zero().into(), BasicTypeEnum::ArrayType(at) => at.const_zero().into(), _ => self.context.i32_type().const_zero().into() } }
                                                 };
+                                                if std::env::var("OPTICC_DEBUG_STATIC").is_ok() {
+                                                    eprintln!("DEBUG static-init field[{}]: item.kind={} val={:?}", field_idx, item.kind, val);
+                                                }
                                                 field_vals.push(val);
                                                 field_idx += 1;
                                                 item_off = item.next_sibling;
@@ -2466,7 +2572,7 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                                                             else if let Some(g) = self.module.get_global(&fname) { g.as_pointer_value().into() }
                                                             else { match ft { BasicTypeEnum::PointerType(pt) => pt.const_null().into(), _ => self.context.i32_type().const_zero().into() } }
                                                         }
-                                                        61 | 80 => { match ft { BasicTypeEnum::IntType(it) => it.const_int(item.data as u64, false).into(), BasicTypeEnum::PointerType(pt) => pt.const_null().into(), _ => self.context.i32_type().const_zero().into() } }
+                                                        61 | 80 => { match ft { BasicTypeEnum::IntType(it) => it.const_int(item.data as u64, false).into(), BasicTypeEnum::PointerType(pt) => pt.const_null().into(), BasicTypeEnum::StructType(st2) => st2.const_zero().into(), BasicTypeEnum::ArrayType(at) => at.const_zero().into(), _ => self.context.i32_type().const_zero().into() } }
                                                         63 | 81 | 82 => {
                                                             let s = arena.get_string(NodeOffset(item.data)).unwrap_or("");
                                                             let sv = self.context.const_string(s.as_bytes(), true);
@@ -2479,6 +2585,7 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                                                         }
                                                         _ => { match ft { BasicTypeEnum::PointerType(pt) => pt.const_null().into(), BasicTypeEnum::IntType(it) => it.const_zero().into(), BasicTypeEnum::StructType(st2) => st2.const_zero().into(), BasicTypeEnum::ArrayType(at2) => at2.const_zero().into(), _ => self.context.i32_type().const_zero().into() } }
                                                     };
+                                                    eprintln!("DEBUG ARRAY field[{}]: item.kind={} val={:?}", fi, item.kind, val);
                                                     fvals.push(val);
                                                     fi += 1;
                                                     item_off = item.next_sibling;
@@ -2659,6 +2766,7 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
                                                     61 | 80 => { match field_ty { BasicTypeEnum::IntType(it) => it.const_int(item.data as u64, false).into(), BasicTypeEnum::PointerType(pt) => pt.const_null().into(), BasicTypeEnum::StructType(st2) => st2.const_zero().into(), BasicTypeEnum::ArrayType(at) => at.const_zero().into(), _ => self.context.i32_type().const_zero().into() } }
                                                     _ => { match field_ty { BasicTypeEnum::PointerType(pt) => pt.const_null().into(), BasicTypeEnum::IntType(it) => it.const_zero().into(), BasicTypeEnum::StructType(st2) => st2.const_zero().into(), BasicTypeEnum::ArrayType(at) => at.const_zero().into(), _ => self.context.i32_type().const_zero().into() } }
                                                 };
+                                                eprintln!("DEBUG unconditional lower_var_decl struct field[{}]: item.kind={} val={:?}", field_idx, item.kind, val);
                                                 field_vals.push(val);
                                                 field_idx += 1;
                                                 item_off = item.next_sibling;
@@ -5385,6 +5493,13 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
         }
 
         match node.kind {
+            0 | 74 => {
+                if node.first_child != NodeOffset::NULL {
+                    self.lower_expr(arena, node.first_child)
+                } else {
+                    Ok(None)
+                }
+            }
             60 => self.lower_ident(arena, &node),
             61 => self.lower_int_const(&node),
             62 => self.lower_char_const(&node),
@@ -5510,7 +5625,14 @@ impl<'ctx, 'types> LlvmBackend<'ctx, 'types> {
         node: &CAstNode,
     ) -> Result<Option<BasicValueEnum<'ctx>>, BackendError> {
         let lhs_offset = node.first_child;
-        let rhs_offset = node.next_sibling;
+        let rhs_offset = if node.next_sibling != NodeOffset::NULL {
+            node.next_sibling
+        } else {
+            arena
+                .get(lhs_offset)
+                .map(|lhs| lhs.next_sibling)
+                .unwrap_or(NodeOffset::NULL)
+        };
 
         let lhs_val = self
             .lower_expr(arena, lhs_offset)?
@@ -9271,6 +9393,41 @@ mod tests {
         assert!(
             !ir.contains("@u8("),
             "typedef cast inside assignment must not lower as a call to @u8:\n{}",
+            ir
+        );
+    }
+
+    #[test]
+    fn test_return_bitwise_and_is_not_dropped() {
+        let ir = compile_c_to_ir("int f(int rc){ return rc & 0xff; }");
+        assert!(
+            ir.contains("and i32"),
+            "bitwise-and return expression should lower to an and instruction:\n{}",
+            ir
+        );
+        assert!(
+            ir.contains("ret i32 %"),
+            "bitwise-and return expression should return computed value, not constant zero:\n{}",
+            ir
+        );
+    }
+
+    #[test]
+    fn test_call_with_bitwise_or_argument_is_not_dropped() {
+        let ir = compile_c_to_ir(
+            "int openDatabase(const char*, void**, unsigned int, const char*); \
+             int sqlite3_open(const char *zFilename, void **ppDb){ \
+               return openDatabase(zFilename, ppDb, 0x00000002 | 0x00000004, 0); \
+             }"
+        );
+        assert!(
+            ir.contains("call i32 @openDatabase"),
+            "function call should be preserved in return expression:\n{}",
+            ir
+        );
+        assert!(
+            !ir.contains("ret i32 0"),
+            "sqlite3_open-style wrapper should not collapse to constant zero:\n{}",
             ir
         );
     }

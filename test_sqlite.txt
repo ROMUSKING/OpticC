@@ -1,0 +1,22 @@
+; ModuleID = 'test_sqlite'
+source_filename = "test_sqlite"
+
+@sqlite3Config = global i32 0
+@aDateTimeFuncs.static.0 = internal global [1 x { i16, i32, ptr, ptr, ptr, ptr, ptr, ptr, ptr, { ptr, ptr } }] [{ i16, i32, ptr, ptr, ptr, ptr, ptr, ptr, ptr, { ptr, ptr } } { i16 0, i32 0, ptr null, ptr null, ptr @juliandayFunc, ptr null, ptr null, ptr null, ptr @.str, { ptr, ptr } zeroinitializer }]
+@.str = private unnamed_addr constant [10 x i8] c"julianday\00"
+
+define void @juliandayFunc(ptr %0, i32 %1, ptr %2) {
+entry:
+  %p = alloca ptr, align 8
+  store ptr %0, ptr %p, align 8
+  %p1 = alloca i32, align 4
+  store i32 %1, ptr %p1, align 4
+  %p2 = alloca ptr, align 8
+  store ptr %2, ptr %p2, align 8
+  ret void
+}
+
+define void @test() {
+entry:
+  ret void
+}

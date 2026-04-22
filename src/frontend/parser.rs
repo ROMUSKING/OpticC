@@ -630,7 +630,10 @@ impl Parser {
                 if let Some(name) = self.find_declarator_name(declarator) {
                     self.typedef_names.insert(name.clone());
                     // Also record the resolved kind so struct members can use correct LLVM types
-                    let (kind, tag_off) = self.resolve_specifier_chain_kind(specifiers);
+                    let (mut kind, tag_off) = self.resolve_specifier_chain_kind(specifiers);
+                    if self.declarator_contains_pointer(declarator) {
+                        kind = 7;
+                    }
                     self.typedef_kinds.insert(name, (kind, tag_off));
                 }
             }
@@ -1453,6 +1456,22 @@ impl Parser {
         None
     }
 
+    fn declarator_contains_pointer(&self, offset: NodeOffset) -> bool {
+        let Some(node) = self.arena.get(offset) else {
+            return false;
+        };
+        if node.kind == 7 {
+            return true;
+        }
+        if node.first_child != NodeOffset::NULL && self.declarator_contains_pointer(node.first_child) {
+            return true;
+        }
+        if node.next_sibling != NodeOffset::NULL && self.declarator_contains_pointer(node.next_sibling) {
+            return true;
+        }
+        false
+    }
+
     pub fn is_declarator_start(&self) -> bool {
         let token = self.current_token();
         let result = token.kind == TokenKind::Identifier
@@ -1517,7 +1536,10 @@ impl Parser {
                 if is_typedef && declarator != NodeOffset::NULL {
                     if let Some(name) = self.find_declarator_name(declarator) {
                         self.typedef_names.insert(name.clone());
-                        let (kind, tag_off) = self.resolve_specifier_chain_kind(specifiers);
+                        let (mut kind, tag_off) = self.resolve_specifier_chain_kind(specifiers);
+                        if self.declarator_contains_pointer(declarator) {
+                            kind = 7;
+                        }
                         self.typedef_kinds.insert(name, (kind, tag_off));
                     }
                 }
@@ -2024,7 +2046,10 @@ impl Parser {
 
             self.advance();
             let right = self.parse_binary_op(op_prec - 1)?;
-            left = self.alloc_node(64, op_code, NodeOffset::NULL, left, right);
+            if let Some(left_node) = self.arena.get_mut(left) {
+                left_node.next_sibling = right;
+            }
+            left = self.alloc_node(64, op_code, NodeOffset::NULL, left, NodeOffset::NULL);
         }
 
         Ok(left)

@@ -1,0 +1,4 @@
+; ModuleID = 'test_simple'
+source_filename = "test_simple"
+
+@s = global { i32, { ptr, ptr } } zeroinitializer

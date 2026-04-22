@@ -456,6 +456,7 @@ const char *sqlite3_sourceid(void) {
                     .arg("-o")
                     .arg(&lib_path)
                     .arg(obj_path)
+                    .arg("-lm")
                     .output()
                     .map_err(|e| format!("Failed to run linker: {}", e))?;
 

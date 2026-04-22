@@ -30,3 +30,8 @@ path = "src/main.rs"
 
 [dev-dependencies]
 tempfile = "3.27.0"
+
+[[bin]]
+name = "print_ast"
+path = "print_ast.rs"
+
